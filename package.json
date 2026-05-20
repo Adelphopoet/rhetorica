@@ -1,0 +1,19 @@
+{
+  "name": "rhetorica",
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "web:install": "pnpm install --lockfile-only",
+    "web:lint": "pnpm --filter @rhetorica/web lint",
+    "web:dev": "pnpm --filter @rhetorica/web dev",
+    "web:test": "pnpm --filter @rhetorica/web test",
+    "web:build": "pnpm --filter @rhetorica/web build",
+    "web:typecheck": "pnpm --filter @rhetorica/web typecheck",
+    "ui:typecheck": "pnpm --filter @rhetorica/ui typecheck",
+    "lint": "pnpm web:lint",
+    "typecheck": "pnpm ui:typecheck && pnpm web:typecheck",
+    "test": "pnpm web:test",
+    "build": "pnpm web:build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  }
+}

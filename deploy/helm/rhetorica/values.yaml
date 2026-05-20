@@ -1,0 +1,57 @@
+global:
+  imagePullSecrets: []
+
+api:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-org/rhetorica-api
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  env: []
+  resources: {}
+
+worker:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-org/rhetorica-worker
+    tag: latest
+    pullPolicy: IfNotPresent
+  env: []
+  resources: {}
+
+web:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/your-org/rhetorica-web
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 3000
+  ingress:
+    enabled: false
+    className: ""
+    hosts: []
+    tls: []
+  env: []
+  resources: {}
+
+config:
+  appEnv: prod
+  logLevel: INFO
+  logJson: true
+  logLlmContent: false
+  databaseUrl: ""
+  redisUrl: ""
+  s3Endpoint: ""
+  s3Bucket: ""
+  llmBaseUrl: ""
+
+secrets:
+  llmApiKey: ""

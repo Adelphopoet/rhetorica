@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rhetorica-worker"
+version = "0.1.0"
+description = "Celery worker runtime for the Rhetorica platform"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "celery>=5.4,<6.0",
+  "pydantic-settings>=2.7,<3.0",
+  "rhetorica-backend"
+]
+
+[tool.uv.sources]
+rhetorica-backend = { workspace = true }

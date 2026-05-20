@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  repo-shape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check critical files
+        run: |
+          test -f compose.yaml
+          test -f pyproject.toml
+          test -f package.json
+          test -f deploy/helm/rhetorica/Chart.yaml
+          test -d packages/backend/src/rhetorica_backend
+          test -d apps/api/src/rhetorica_api
+          test -d apps/web/src
+
+  python-workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v5
+      - name: Sync Python workspace
+        run: uv sync --all-packages --all-groups --frozen
+
+  web-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable Corepack
+        run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+      - name: Install web workspace
+        run: pnpm install --frozen-lockfile
+      - name: Lint web workspace
+        run: pnpm lint
+      - name: Typecheck web workspace
+        run: pnpm typecheck
+      - name: Test web workspace
+        run: pnpm test
+      - name: Build web workspace
+        run: pnpm build
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare env
+        run: cp .env.example .env
+      - name: Validate docker compose
+        run: docker compose config >/dev/null
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint chart
+        run: helm lint deploy/helm/rhetorica
+
+  llm-quality-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install gate dependencies
+        run: pip install pydantic
+      - name: Run offline quality gate harness
+        env:
+          PYTHONPATH: packages/backend/src
+        run: |
+          python scripts/run_llm_quality_gates.py \
+            --samples packages/backend/evals/fixtures/smoke_core_samples.json \
+            --policy packages/backend/evals/quality-gate-policy.v1.json

@@ -1,0 +1,65 @@
+# Rhetorica
+
+Self-hosted AI workspace for governed analytics.
+
+## Monorepo layout
+
+- `apps/api` - FastAPI transport layer and API runtime.
+- `apps/worker` - background runtime for imports, heavy queries, exports.
+- `apps/web` - Next.js analyst workspace.
+- `packages/backend` - shared Python backend core: domain, infra, contracts, persistence.
+- `packages/ui` - shared frontend primitives.
+- `packages/contracts` - API, event, and schema contracts.
+- `deploy` - Docker-first local bootstrap and Helm chart.
+- `docs` - architecture, development, security, and operations documentation.
+- `ops` - runbooks and production support assets.
+- `tests` - cross-app fixtures, e2e, performance scenarios.
+
+## Local development stance
+
+- Local development is Docker-first.
+- Infrastructure runs in containers from day one: PostgreSQL, Redis, MinIO.
+- App containers are part of the same topology, but runtime entrypoints stay placeholders until implementation starts.
+- Python packages are managed through a `uv` workspace.
+- Frontend packages are managed through a `pnpm` workspace.
+
+## Test workflow
+
+### Fast path
+
+- `make test` - run the default Python and web test suites.
+- `make test-parallel` - run Python tests through `pytest-xdist` with `-n auto --dist loadfile`, then run web tests.
+
+### Python
+
+```bash
+# Full Python suite with workspace extras installed
+uv run --all-packages --all-extras pytest
+
+# Parallel Python run
+uv run --all-packages --all-extras pytest -n auto --dist loadfile
+
+# Single file / single test / keyword
+uv run pytest apps/api/tests/unit/test_chat_routes.py
+uv run pytest apps/api/tests/unit/test_chat_routes.py::test_chat_remembers_context_across_turns -xvs
+uv run pytest -k chat
+
+# Coverage
+uv run pytest --cov=packages/backend --cov=apps/api
+```
+
+`pytest` runs with `--import-mode=importlib`, so duplicate test filenames in different directories no longer break collection.
+
+### Frontend
+
+```bash
+pnpm test
+```
+
+## Architectural direction
+
+- Shared backend logic lives in `packages/backend`, not inside the API runtime.
+- Backend stays a modular monolith, split by bounded context.
+- SQL governance is a product capability and must stay explicit.
+- dbt artifacts are normalized into the semantic registry.
+- The golden path stays: question -> semantic plan -> SQL -> guarded execution -> result -> chart -> saved answer.

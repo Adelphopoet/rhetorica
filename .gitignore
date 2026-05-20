@@ -1,0 +1,48 @@
+# OS
+.DS_Store
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Node
+node_modules/
+.next/
+.pnpm-store/
+*.tsbuildinfo
+
+# Build
+build/
+dist/
+coverage/
+htmlcov/
+
+# Tooling
+.cache/
+agents/.tmp/
+.claude/
+.opencode/
+opencode.json
+ops/opencode/
+
+# slop
+.qwen
+.opencode
+
+# Local encrypted secrets
+.rhetorica_control_plane.db
+.rhetorica/secrets.enc.json
+.rhetorica/secrets.enc.json.key
+.rhetorica/secrets.enc.json.lock
+.rhetorica/certs/
+sa_key.json
+kubeconfig*

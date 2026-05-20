@@ -1,0 +1,25 @@
+name: Release Skeleton
+
+on:
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Component to release
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - api
+          - worker
+          - web
+
+jobs:
+  release-placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Explain release status
+        run: |
+          echo "Release pipeline is intentionally skeletal."
+          echo "Wire image build, tag strategy, and chart publishing before first production release."

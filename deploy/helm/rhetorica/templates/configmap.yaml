@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-config
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+data:
+  API_APP_ENV: {{ .Values.config.appEnv | quote }}
+  WORKER_APP_ENV: {{ .Values.config.appEnv | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  LOG_JSON: {{ .Values.config.logJson | quote }}
+  LOG_LLM_CONTENT: {{ .Values.config.logLlmContent | quote }}
+  DATABASE_URL: {{ .Values.config.databaseUrl | quote }}
+  REDIS_URL: {{ .Values.config.redisUrl | quote }}
+  S3_ENDPOINT: {{ .Values.config.s3Endpoint | quote }}
+  S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
+  LLM_BASE_URL: {{ .Values.config.llmBaseUrl | quote }}

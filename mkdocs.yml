@@ -1,0 +1,22 @@
+site_name: Rhetorica
+site_description: Architecture and operating docs for the governed analytics platform.
+repo_name: rhetorica
+docs_dir: docs
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/architecture.md
+      - Database Structure: architecture/database_structure.md
+  - Development:
+      - Local Development: development/local_development.md
+      - Repository Layout: development/repository_layout.md
+  - API:
+      - Overview: api/overview.md
+  - Operations:
+      - Deployment: operations/deployment.md
+  - Security:
+      - Baseline: security/baseline.md
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true

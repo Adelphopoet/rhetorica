@@ -1,0 +1,164 @@
+name: rhetorica
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-03-12T17-29-24Z
+    depends_on:
+      minio:
+        condition: service_started
+    restart: "no"
+    entrypoint: >-
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}; do sleep 2; done &&
+      mc mb --ignore-existing local/${MINIO_BUCKET}
+      "
+
+  api:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+    env_file:
+      - .env
+    working_dir: /workspace
+    environment:
+      API_APP_ENV: dev
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+      AUTH_DEFAULT_WORKSPACE_ID: ${AUTH_DEFAULT_WORKSPACE_ID:-default}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-change-me-rhetorica-dev-jwt-secret-0000000000000000}
+      AUTH_LOCAL_ADMIN_LOGIN: ${AUTH_LOCAL_ADMIN_LOGIN:-}
+      AUTH_LOCAL_ADMIN_PASSWORD: ${AUTH_LOCAL_ADMIN_PASSWORD:-}
+      AUTH_LOCAL_ADMIN_DISPLAY_NAME: ${AUTH_LOCAL_ADMIN_DISPLAY_NAME:-Platform Admin}
+      AUTH_BOOTSTRAP_ENABLED: ${AUTH_BOOTSTRAP_ENABLED:-false}
+      AUTH_BOOTSTRAP_LOGIN_SECRET: ${AUTH_BOOTSTRAP_LOGIN_SECRET:-}
+      LOG_LEVEL: DEBUG
+      LOG_LLM_CONTENT: "true"
+      PYTHONPATH: /workspace/apps/api/src:/workspace/packages/backend/src
+      UV_PROJECT_ENVIRONMENT: /tmp/.venv-api
+    volumes:
+      - .:/workspace
+      - uv-cache:/root/.cache/uv
+    ports:
+      - "${API_PORT}:8000"
+
+  worker:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+      target: dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+    env_file:
+      - .env
+    working_dir: /workspace
+    environment:
+      WORKER_APP_ENV: dev
+      LOG_LEVEL: DEBUG
+      LOG_LLM_CONTENT: "true"
+      PYTHONPATH: /workspace/apps/worker/src:/workspace/packages/backend/src
+      UV_PROJECT_ENVIRONMENT: /tmp/.venv-worker
+    volumes:
+      - .:/workspace
+      - uv-cache:/root/.cache/uv
+
+  web:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: dev
+    depends_on:
+      api:
+        condition: service_started
+    env_file:
+      - .env
+    working_dir: /workspace/apps/web
+    environment:
+      NEXT_TELEMETRY_DISABLED: "1"
+      RHETORICA_API_URL: http://api:8000
+      CI: "1"
+    volumes:
+      - .:/workspace
+      - pnpm-store:/pnpm/store
+    ports:
+      - "${WEB_PORT}:3000"
+    command: >-
+      sh -lc "pnpm --dir /workspace install --frozen-lockfile --force && pnpm --dir /workspace --filter @rhetorica/web dev"
+
+volumes:
+  postgres-data:
+  redis-data:
+  qdrant-data:
+  minio-data:
+  uv-cache:
+  pnpm-store:

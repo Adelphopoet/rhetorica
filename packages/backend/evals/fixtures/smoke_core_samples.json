@@ -1,0 +1,46 @@
+[
+  {
+    "case_id": "smoke-001",
+    "tier": "smoke",
+    "answer_correct": true,
+    "sql_correct": true,
+    "execution_succeeded": true,
+    "grounded_claim_ratio": 1.0,
+    "tool_calls": 2,
+    "latency_ms": 3100,
+    "token_cost": 0.42
+  },
+  {
+    "case_id": "smoke-002",
+    "tier": "smoke",
+    "answer_correct": true,
+    "sql_correct": false,
+    "execution_succeeded": true,
+    "grounded_claim_ratio": 0.75,
+    "tool_calls": 3,
+    "latency_ms": 4200,
+    "token_cost": 0.55
+  },
+  {
+    "case_id": "core-001",
+    "tier": "core",
+    "answer_correct": true,
+    "sql_correct": true,
+    "execution_succeeded": true,
+    "grounded_claim_ratio": 0.8,
+    "tool_calls": 3,
+    "latency_ms": 5100,
+    "token_cost": 0.81
+  },
+  {
+    "case_id": "core-002",
+    "tier": "core",
+    "answer_correct": false,
+    "sql_correct": true,
+    "execution_succeeded": false,
+    "grounded_claim_ratio": 0.4,
+    "tool_calls": 1,
+    "latency_ms": 2500,
+    "token_cost": 0.18
+  }
+]

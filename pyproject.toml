@@ -1,0 +1,62 @@
+[tool.uv.workspace]
+members = [
+  "apps/api",
+  "apps/worker",
+  "packages/backend",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+fix = true
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "B",
+  "C4",
+  "E",
+  "F",
+  "I",
+  "PGH",
+  "RUF",
+  "S",
+  "SIM",
+  "TRY",
+  "UP",
+  "W",
+  "YTT",
+]
+ignore = ["E501", "RUF001", "TRY003"]
+
+[tool.ruff.format]
+preview = true
+
+[tool.ruff.lint.per-file-ignores]
+"apps/*/tests/*" = ["S101", "S105", "S106"]
+"packages/backend/src/rhetorica_backend/domain/chat/orchestration/tool_execution_runtime_sql_policy.py" = ["S608"]
+"packages/backend/src/rhetorica_backend/domain/chat/sql/optimization.py" = ["S608"]
+"packages/backend/tests/*" = ["S101", "S105", "S106"]
+"tests/*" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+disallow_untyped_defs = true
+disallow_any_unimported = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_unused_configs = true
+show_error_codes = true
+files = ["apps/api/src", "apps/worker/src", "packages/backend/src"]
+exclude = ["\\.venv", "node_modules"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --import-mode=importlib"
+testpaths = [
+  "apps/api/tests",
+  "apps/worker/tests",
+  "packages/backend/tests",
+  "tests",
+]

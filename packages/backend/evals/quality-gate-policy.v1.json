@@ -1,0 +1,14 @@
+{
+  "min_metrics": {
+    "answer_correctness": 0.75,
+    "sql_correctness": 0.7,
+    "execution_success_rate": 0.7,
+    "grounded_claim_ratio": 0.7
+  },
+  "max_metrics": {
+    "tool_efficiency": 3.5,
+    "latency_p95": 9000,
+    "token_cost": 1.5
+  }
+}
+
