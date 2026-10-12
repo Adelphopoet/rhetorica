@@ -96,7 +96,9 @@ def generate_backend_diagrams(
     domain_specs: Iterable[DomainDiagramSpec] = DEFAULT_DOMAIN_SPECS,
 ) -> list[GeneratedDiagramArtifacts]:
     resolved_repo_root = find_repo_root(repo_root)
-    resolved_output_root = output_root or resolved_repo_root / "docs" / "backend" / "generated"
+    resolved_output_root = (
+        output_root or resolved_repo_root / "docs" / "archive" / "backend" / "generated"
+    )
     source_root = resolved_repo_root / "packages" / "backend" / "src"
 
     if not source_root.exists():
@@ -127,7 +129,7 @@ def generate_domain_diagrams(
     output_root: Path | None = None,
 ) -> GeneratedDiagramArtifacts:
     resolved_source_root = source_root or repo_root / "packages" / "backend" / "src"
-    resolved_output_root = output_root or repo_root / "docs" / "backend" / "generated"
+    resolved_output_root = output_root or repo_root / "docs" / "archive" / "backend" / "generated"
     domain_output_dir = resolved_output_root / domain_spec.slug
     domain_output_dir.mkdir(parents=True, exist_ok=True)
 

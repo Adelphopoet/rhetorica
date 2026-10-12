@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 
-from rhetorica_backend.contracts.chat import ChunkEvent, ThinkingEvent
+from rhetorica_backend.contracts.chat import ChunkEvent, ErrorEvent, ThinkingEvent
+from rhetorica_backend.domain.chat.orchestration.agent_runtime import AgentRuntimeRunItemEvent
+from rhetorica_backend.domain.chat.orchestration.state import ToolOrchestrationState
 from rhetorica_backend.domain.chat.orchestration.transport_runtime_services import (
     StreamingResponseContentService,
     StreamingRuntimeLoopService,
     SyncToolLoopRuntimeService,
-    _configured_for_responses_runtime,
 )
 
 
@@ -67,6 +69,13 @@ class TestToolCallEndSuccessResolution:
         assert _resolve_success(tool_result) is False
 
 
+def test_final_answer_tool_result_has_success_summary() -> None:
+    result = {"ok": True, "status": "succeeded"}
+
+    assert _resolve_success(result) is True
+    assert StreamingResponseContentService.summarize_tool_result(result) == "Success"
+
+
 def test_streaming_response_content_service_extracts_thinking_blocks() -> None:
     service = StreamingResponseContentService()
     content = (
@@ -85,6 +94,21 @@ def test_streaming_response_content_service_extracts_thinking_blocks() -> None:
     assert isinstance(events[2], ChunkEvent)
     assert "<think>" not in events[2].content
     assert "<thinking>" not in events[2].content
+
+
+def test_streaming_response_content_service_emits_provider_reasoning_separately() -> None:
+    service = StreamingResponseContentService()
+
+    events = service.process_content_for_thinking(
+        "Visible answer",
+        reasoning_content="Provider reasoning",
+    )
+
+    assert len(events) == 2
+    assert isinstance(events[0], ThinkingEvent)
+    assert events[0].content == "Provider reasoning"
+    assert isinstance(events[1], ChunkEvent)
+    assert events[1].content == "Visible answer"
 
 
 def test_streaming_response_content_service_parses_fenced_json_with_thinking() -> None:
@@ -125,31 +149,35 @@ def test_streaming_response_content_service_emits_thinking_diagnostics() -> None
     ]
 
 
-def test_configured_for_responses_runtime_uses_explicit_responses_contract() -> None:
-    chat_client = SimpleNamespace(
-        connection=SimpleNamespace(
-            endpoint_path="/chat/completions",
-            extra_settings={},
-        )
-    )
-    responses_client = SimpleNamespace(
-        connection=SimpleNamespace(
-            endpoint_path="/chat/completions",
-            extra_settings={"responses_endpoint_path": "/responses"},
-        )
+def test_streaming_response_content_service_emits_provider_reasoning_diagnostic() -> None:
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    def emit(event: str, **fields: object) -> None:
+        captured.append((event, fields))
+
+    StreamingResponseContentService.emit_thinking_diagnostics(
+        "",
+        reasoning_content="Provider reasoning",
+        emit=emit,
     )
 
-    assert _configured_for_responses_runtime(chat_client) is False
-    assert _configured_for_responses_runtime(responses_client) is True
+    assert captured == [
+        (
+            "llm.turn.thinking_block",
+            {"block_index": 1, "content": "Provider reasoning"},
+        )
+    ]
 
 
-def test_sync_tool_loop_runtime_service_uses_chat_completions_loop_when_responses_not_configured() -> None:
+def test_sync_tool_loop_runtime_service_uses_chat_completions_loop_when_responses_not_configured() -> (
+    None
+):
     captured: list[object] = []
 
     class _ExecutionCore:
-        def run_loop(self, **kwargs):
+        async def run_loop(self, **kwargs):
             captured.append(kwargs)
-            return {"answer": "legacy-runtime"}
+            return {"answer": "sdk-runtime"}
 
     service = SyncToolLoopRuntimeService(
         logger=logging.getLogger("test.sync_tool_runtime"),
@@ -161,66 +189,8 @@ def test_sync_tool_loop_runtime_service_uses_chat_completions_loop_when_response
         )
     )
 
-    result = service.run(
-        llm_client=SimpleNamespace(
-            connection=SimpleNamespace(
-                endpoint_path="/chat/completions",
-                extra_settings={},
-            )
-        ),
-        request=SimpleNamespace(),
-        db_connectors=[],
-        messages=[],
-        tools=[],
-        state=SimpleNamespace(
-            warnings=[],
-            context_tables=[],
-            prompt_version="v-test",
-            generated_sql=None,
-            execution=None,
-            tool_call_count=0,
-            parse_failure_count=0,
-            schema_valid_first_pass=0,
-            schema_repaired=0,
-            schema_failed=0,
-            preflight_pass=0,
-            preflight_fail=0,
-            preflight_uncertain=0,
-            add_warning=lambda _warning: None,
-        ),
-        tool_executor=object(),
-        protocol_repair_enabled=False,
-    )
-
-    assert result == {"answer": "legacy-runtime"}
-    assert len(captured) == 1
-
-
-def test_streaming_runtime_loop_service_uses_chat_completions_loop_when_responses_not_configured() -> None:
-    captured: list[object] = []
-
-    class _ExecutionCore:
-        def run_loop(self, **kwargs):
-            captured.append(kwargs)
-            return SimpleNamespace(payload={"answer": "legacy-runtime"}, events=[])
-
-    service = StreamingRuntimeLoopService(
-        logger=logging.getLogger("test.streaming_tool_runtime"),
-        execution_core=_ExecutionCore(),
-        content_service=StreamingResponseContentService(),
-        tool_loop_result_factory=lambda *, payload, events: SimpleNamespace(
-            payload=payload,
-            events=events,
-        ),
-    )
-    service._strict_runtime = SimpleNamespace(  # type: ignore[assignment]
-        run=lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("strict runtime should not be used")
-        )
-    )
-
-    result = service.run_prepared(
-        runtime=SimpleNamespace(
+    result = asyncio.run(
+        service.run(
             llm_client=SimpleNamespace(
                 connection=SimpleNamespace(
                     endpoint_path="/chat/completions",
@@ -237,17 +207,271 @@ def test_streaming_runtime_loop_service_uses_chat_completions_loop_when_response
                 prompt_version="v-test",
                 generated_sql=None,
                 execution=None,
-                analysis_plan=None,
-                checkpoint=None,
-                worker_results=[],
+                tool_call_count=0,
+                preflight_pass=0,
+                preflight_fail=0,
+                preflight_uncertain=0,
                 add_warning=lambda _warning: None,
             ),
-            tool_executor=SimpleNamespace(),
-            protocol_repair_enabled=False,
-        ),
-        cancel_event=None,
-        on_event=None,
+            tool_executor=object(),
+        )
     )
 
-    assert result.payload == {"answer": "legacy-runtime"}
+    assert result == {"answer": "sdk-runtime"}
     assert len(captured) == 1
+
+
+def test_streaming_runtime_loop_service_uses_chat_completions_loop_when_responses_not_configured() -> (
+    None
+):
+    captured: list[object] = []
+
+    class _ExecutionCore:
+        async def run_loop(self, **kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(payload={"answer": "sdk-runtime"}, events=[])
+
+    service = StreamingRuntimeLoopService(
+        logger=logging.getLogger("test.streaming_tool_runtime"),
+        execution_core=_ExecutionCore(),
+        content_service=StreamingResponseContentService(),
+        tool_loop_result_factory=lambda *, payload, events: SimpleNamespace(
+            payload=payload,
+            events=events,
+        ),
+    )
+    service._strict_runtime = SimpleNamespace(  # type: ignore[assignment]
+        run=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("strict runtime should not be used")
+        )
+    )
+
+    result = asyncio.run(
+        service.run_prepared(
+            runtime=SimpleNamespace(
+                llm_client=SimpleNamespace(
+                    connection=SimpleNamespace(
+                        endpoint_path="/chat/completions",
+                        extra_settings={},
+                    )
+                ),
+                request=SimpleNamespace(),
+                db_connectors=[],
+                messages=[],
+                tools=[],
+                state=SimpleNamespace(
+                    warnings=[],
+                    context_tables=[],
+                    prompt_version="v-test",
+                    generated_sql=None,
+                    execution=None,
+                    checkpoint=None,
+                    add_warning=lambda _warning: None,
+                ),
+                tool_executor=SimpleNamespace(),
+            ),
+            cancel_event=None,
+            on_event=None,
+        )
+    )
+
+    assert result.payload == {"answer": "sdk-runtime"}
+    assert len(captured) == 1
+
+
+def test_streaming_runtime_loop_service_records_provider_reasoning_event() -> None:
+    class _ExecutionCore:
+        async def run_loop(self, **kwargs):
+            kwargs["transport"].prepare_response_content("", "Provider reasoning")
+            return kwargs["transport"].adapt_payload({"answer": "done"})
+
+    service = StreamingRuntimeLoopService(
+        logger=logging.getLogger("test.streaming_tool_runtime"),
+        execution_core=_ExecutionCore(),
+        content_service=StreamingResponseContentService(),
+        tool_loop_result_factory=lambda *, payload, events: SimpleNamespace(
+            payload=payload,
+            events=events,
+        ),
+    )
+
+    result = asyncio.run(
+        service.run_prepared(
+            runtime=SimpleNamespace(
+                llm_client=SimpleNamespace(
+                    connection=SimpleNamespace(
+                        endpoint_path="/chat/completions",
+                        extra_settings={},
+                    )
+                ),
+                request=SimpleNamespace(),
+                db_connectors=[],
+                messages=[],
+                tools=[],
+                state=ToolOrchestrationState(),
+                tool_executor=SimpleNamespace(),
+            ),
+            cancel_event=None,
+            on_event=None,
+        )
+    )
+
+    thinking_events = [event for event in result.events if isinstance(event, ThinkingEvent)]
+    assert len(thinking_events) == 1
+    assert thinking_events[0].content == "Provider reasoning"
+
+
+def test_streaming_runtime_loop_service_does_not_emit_error_event_for_recoverable_tool_timeout() -> (
+    None
+):
+    class _ExecutionCore:
+        async def run_loop(self, **kwargs):
+            kwargs["transport"].on_run_item(
+                AgentRuntimeRunItemEvent(
+                    kind="tool_output",
+                    tool_name="search_rag_insights",
+                    tool_call_id="call-1",
+                    tool_result={
+                        "ok": False,
+                        "error_code": "tool_timeout",
+                        "user_message": "Tool timed out.",
+                        "timeout_seconds": 0.01,
+                        "can_continue": True,
+                    },
+                )
+            )
+            return kwargs["transport"].adapt_payload({"answer": "timeout"})
+
+    service = StreamingRuntimeLoopService(
+        logger=logging.getLogger("test.streaming_tool_runtime"),
+        execution_core=_ExecutionCore(),
+        content_service=StreamingResponseContentService(),
+        tool_loop_result_factory=lambda *, payload, events: SimpleNamespace(
+            payload=payload,
+            events=events,
+        ),
+    )
+
+    result = asyncio.run(
+        service.run_prepared(
+            runtime=SimpleNamespace(
+                llm_client=SimpleNamespace(
+                    connection=SimpleNamespace(
+                        endpoint_path="/chat/completions",
+                        extra_settings={},
+                    )
+                ),
+                request=SimpleNamespace(),
+                db_connectors=[],
+                messages=[],
+                tools=[],
+                state=ToolOrchestrationState(),
+                tool_executor=SimpleNamespace(),
+            ),
+            cancel_event=None,
+            on_event=None,
+        )
+    )
+
+    error_events = [event for event in result.events if isinstance(event, ErrorEvent)]
+    assert error_events == []
+
+
+def test_streaming_runtime_loop_service_emits_error_event_for_blocking_tool_timeout() -> None:
+    class _ExecutionCore:
+        async def run_loop(self, **kwargs):
+            kwargs["transport"].on_run_item(
+                AgentRuntimeRunItemEvent(
+                    kind="tool_output",
+                    tool_name="search_rag_insights",
+                    tool_call_id="call-1",
+                    tool_result={
+                        "ok": False,
+                        "error_code": "tool_timeout",
+                        "user_message": "Tool timed out.",
+                        "timeout_seconds": 0.01,
+                        "can_continue": False,
+                    },
+                )
+            )
+            return kwargs["transport"].adapt_payload({"answer": "timeout"})
+
+    service = StreamingRuntimeLoopService(
+        logger=logging.getLogger("test.streaming_tool_runtime"),
+        execution_core=_ExecutionCore(),
+        content_service=StreamingResponseContentService(),
+        tool_loop_result_factory=lambda *, payload, events: SimpleNamespace(
+            payload=payload,
+            events=events,
+        ),
+    )
+
+    result = asyncio.run(
+        service.run_prepared(
+            runtime=SimpleNamespace(
+                llm_client=SimpleNamespace(
+                    connection=SimpleNamespace(
+                        endpoint_path="/chat/completions",
+                        extra_settings={},
+                    )
+                ),
+                request=SimpleNamespace(),
+                db_connectors=[],
+                messages=[],
+                tools=[],
+                state=ToolOrchestrationState(),
+                tool_executor=SimpleNamespace(),
+            ),
+            cancel_event=None,
+            on_event=None,
+        )
+    )
+
+    error_events = [event for event in result.events if isinstance(event, ErrorEvent)]
+    assert len(error_events) == 1
+    assert error_events[0].code == "tool_timeout"
+    assert error_events[0].details["tool_name"] == "search_rag_insights"
+
+
+def test_streaming_runtime_loop_service_marks_cancelled_runtime() -> None:
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+    state = ToolOrchestrationState()
+
+    class _ExecutionCore:
+        def run_loop(self, **_kwargs):
+            raise AssertionError("cancelled runtime should not enter tool loop")
+
+    service = StreamingRuntimeLoopService(
+        logger=logging.getLogger("test.streaming_tool_runtime"),
+        execution_core=_ExecutionCore(),
+        content_service=StreamingResponseContentService(),
+        tool_loop_result_factory=lambda *, payload, events: SimpleNamespace(
+            payload=payload,
+            events=events,
+        ),
+    )
+
+    result = asyncio.run(
+        service.run_prepared(
+            runtime=SimpleNamespace(
+                llm_client=SimpleNamespace(
+                    connection=SimpleNamespace(
+                        endpoint_path="/chat/completions",
+                        extra_settings={},
+                    )
+                ),
+                request=SimpleNamespace(),
+                db_connectors=[],
+                messages=[],
+                tools=[],
+                state=state,
+                tool_executor=SimpleNamespace(),
+            ),
+            cancel_event=cancel_event,
+            on_event=None,
+        )
+    )
+
+    assert result.payload["warnings"] == ["cancelled"]
+    assert state.warnings == ["cancelled"]

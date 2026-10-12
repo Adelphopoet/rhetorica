@@ -82,9 +82,7 @@ class ToolExecutionContextSupport:
 
     @staticmethod
     def _bump_metadata_context_revision(state: ToolOrchestrationState) -> None:
-        ToolExecutionContextSupport._metadata_context_service.bump_metadata_context_revision(
-            state
-        )
+        ToolExecutionContextSupport._metadata_context_service.bump_metadata_context_revision(state)
 
     @staticmethod
     def _set_table_columns(
@@ -279,16 +277,20 @@ class ToolExecutionContextSupport:
         entity_type: Any,
         results: list[dict[str, Any]],
     ) -> bool:
-        return ToolExecutionContextSupport._metadata_context_service.should_fallback_to_table_lookup(
-            query=query,
-            entity_type=entity_type,
-            results=results,
+        return (
+            ToolExecutionContextSupport._metadata_context_service.should_fallback_to_table_lookup(
+                query=query,
+                entity_type=entity_type,
+                results=results,
+            )
         )
 
     @staticmethod
     def _table_context_to_catalog_result(table: TableContext) -> dict[str, Any]:
-        return ToolExecutionContextSupport._context_hydration_helpers.table_context_to_catalog_result(
-            table
+        return (
+            ToolExecutionContextSupport._context_hydration_helpers.table_context_to_catalog_result(
+                table
+            )
         )
 
     @staticmethod
@@ -378,9 +380,7 @@ class ToolExecutionContextSupport:
 
     @staticmethod
     def _lineage_entity_count(value: Any) -> int:
-        return ToolExecutionContextSupport._context_hydration_helpers.lineage_entity_count(
-            value
-        )
+        return ToolExecutionContextSupport._context_hydration_helpers.lineage_entity_count(value)
 
     @classmethod
     def _context_tables_for_connector_scope(
@@ -448,9 +448,7 @@ class ToolExecutionContextSupport:
 
     @staticmethod
     def _table_mapping_from_fqn(table_fqn: str) -> dict[str, str] | None:
-        return ToolExecutionContextSupport._connector_scope_policy.table_mapping_from_fqn(
-            table_fqn
-        )
+        return ToolExecutionContextSupport._connector_scope_policy.table_mapping_from_fqn(table_fqn)
 
     @classmethod
     def _execution_zone_from_selected_connector(
@@ -514,9 +512,7 @@ class ToolExecutionContextSupport:
 
     @staticmethod
     def _nested_or_string_name(value: Any) -> str | None:
-        return ToolExecutionContextSupport._context_hydration_helpers.nested_or_string_name(
-            value
-        )
+        return ToolExecutionContextSupport._context_hydration_helpers.nested_or_string_name(value)
 
     @classmethod
     def _list_of_strings(cls, value: Any) -> list[str]:

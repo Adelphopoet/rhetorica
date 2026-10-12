@@ -1022,7 +1022,9 @@ class SqlOptimizationService:
                         else skill.name
                     ),
                     reference=(
-                        rule_asset.source_url if rule_asset is not None else skill.source_url
+                        rule_asset.source_url
+                        if rule_asset is not None and rule_asset.source_url
+                        else skill.source_url or f"workspace_skill:{skill.id}"
                     ),
                 )
             )

@@ -6,6 +6,8 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    maxWorkers: 2,
+    testTimeout: 15_000,
   },
   resolve: {
     alias: {

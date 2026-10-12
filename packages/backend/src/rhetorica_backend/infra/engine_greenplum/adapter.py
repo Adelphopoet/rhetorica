@@ -9,24 +9,47 @@ from rhetorica_backend.domain.execution.models import (
     EngineAdapter,
     EngineRunRequest,
     EngineRunResult,
+    ResultBlockConsumer,
 )
 
 
 class GreenplumActiveExecution(ActiveExecution):
-    def __init__(self, connection: Any, cursor: Any):
+    def __init__(self, connection: Any, cursor: Any, row_limit: int):
         self._connection = connection
         self._cursor = cursor
         self.query_id: str | None = None
+        self._row_limit = row_limit
 
     def fetch(self) -> EngineRunResult:
+        return self.fetch_streaming(
+            consumer=None,
+            preview_row_limit=self._row_limit,
+        )
+
+    def fetch_streaming(
+        self,
+        *,
+        consumer: ResultBlockConsumer | None,
+        preview_row_limit: int,
+    ) -> EngineRunResult:
         description = self._cursor.description or []
         columns = [column.name for column in description]
-        rows = self._cursor.fetchall() if description else []
+        if consumer is not None:
+            consumer.start(columns)
+        preview: list[list[object]] = []
+        row_count = 0
+        while description and (block := self._cursor.fetchmany(10_000)):
+            rows = [list(row) for row in block]
+            row_count += len(rows)
+            if len(preview) < preview_row_limit:
+                preview.extend(rows[: preview_row_limit - len(preview)])
+            if consumer is not None:
+                consumer.write_rows(rows)
         return EngineRunResult(
             query_id=self.query_id,
             columns=columns,
-            rows=[list(row) for row in rows],
-            row_count=len(rows),
+            rows=preview,
+            row_count=row_count,
         )
 
     def cancel(self) -> None:
@@ -70,7 +93,11 @@ class GreenplumAdapter(EngineAdapter):
         cursor = conn.cursor()
         cursor.execute(f"SET statement_timeout = {max(1, request.timeout_ms)}")
         cursor.execute(request.sql)
-        return GreenplumActiveExecution(connection=conn, cursor=cursor)
+        return GreenplumActiveExecution(
+            connection=conn,
+            cursor=cursor,
+            row_limit=request.row_limit,
+        )
 
     @staticmethod
     def _sanitize_extra_settings(

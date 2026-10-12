@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchBackend } from "@/lib/backendAuth";
+import { backendResponseHeaders, fetchBackend } from "@/lib/backendAuth";
 
 export async function PUT(
   request: NextRequest,
@@ -17,15 +17,15 @@ export async function PUT(
     const body = await response.text();
     return new NextResponse(body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch (error) {
     return NextResponse.json(
       {
         error: "scenario_update_proxy_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: error instanceof Error ? error.message : "Неизвестная ошибка",
       },
       { status: 500 }
     );
@@ -48,15 +48,15 @@ export async function DELETE(
     const body = await response.text();
     return new NextResponse(body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch (error) {
     return NextResponse.json(
       {
         error: "scenario_archive_proxy_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: error instanceof Error ? error.message : "Неизвестная ошибка",
       },
       { status: 500 }
     );

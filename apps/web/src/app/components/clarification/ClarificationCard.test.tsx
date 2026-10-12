@@ -85,12 +85,12 @@ describe("ClarificationCard", () => {
 
     it("renders type-specific color header", () => {
       const onSelect = vi.fn();
-      const { container } = render(
+      render(
         <ClarificationCard clarification={mockClarification} onSelect={onSelect} />
       );
 
       // Should have the type label visible
-      expect(screen.getByText("Select data source")).toBeInTheDocument();
+      expect(screen.getByText("Выбор источника данных")).toBeInTheDocument();
     });
   });
 

@@ -53,37 +53,6 @@ class ToolExecutionRuntimeSupport(ToolExecutionContextSupport):
         connector_scope_policy=_connector_scope_policy,
     )
 
-    def _resolve_metadata_connection(
-        self,
-        request: ChatAskRequest,
-        arguments: dict[str, Any],
-        warnings: list[str],
-        db_connectors: list[ConnectorItem] | None = None,
-    ):
-        return self._metadata_runtime_service.resolve_metadata_connection(
-            request=request,
-            arguments=arguments,
-            warnings=warnings,
-            db_connectors=db_connectors or [],
-        )
-
-    def _resolve_effective_metadata_connection(
-        self,
-        *,
-        request: ChatAskRequest,
-        arguments: dict[str, Any],
-        warnings: list[str],
-        db_connectors: list[ConnectorItem],
-        state: ToolOrchestrationState | None = None,
-    ) -> Any | None:
-        return self._metadata_runtime_service.resolve_effective_metadata_connection(
-            request=request,
-            arguments=arguments,
-            warnings=warnings,
-            db_connectors=db_connectors,
-            state=state,
-        )
-
     @classmethod
     def _attempt_sql_identifier_repair(
         cls,
@@ -151,9 +120,7 @@ class ToolExecutionRuntimeSupport(ToolExecutionContextSupport):
 
     @staticmethod
     def _requested_connector_name(arguments: dict[str, Any]) -> str | None:
-        return ToolExecutionRuntimeSupport._runtime_sql_policy.requested_connector_name(
-            arguments
-        )
+        return ToolExecutionRuntimeSupport._runtime_sql_policy.requested_connector_name(arguments)
 
     @classmethod
     def _preflight_connector_name(
@@ -199,53 +166,17 @@ class ToolExecutionRuntimeSupport(ToolExecutionContextSupport):
 
     @staticmethod
     def _rewrite_trino_show_create_table(sql: str) -> str:
-        return ToolExecutionRuntimeSupport._runtime_sql_policy.rewrite_trino_show_create_table(
-            sql
-        )
-
-    @staticmethod
-    def _metadata_service_name(connection: Any) -> str | None:
-        return ToolExecutionRuntimeSupport._runtime_sql_policy.metadata_service_name(
-            connection
-        )
-
-    @staticmethod
-    def _metadata_mapping_value(connection: Any, key: str) -> str | None:
-        return ToolExecutionRuntimeSupport._runtime_sql_policy.metadata_mapping_value(
-            connection,
-            key,
-        )
-
-    @classmethod
-    def _effective_metadata_connection(
-        cls,
-        *,
-        metadata_connection: Any,
-        request: ChatAskRequest,
-        arguments: dict[str, Any],
-        db_connectors: list[ConnectorItem],
-        state: ToolOrchestrationState | None,
-    ) -> Any:
-        return cls._runtime_sql_policy.effective_metadata_connection(
-            metadata_connection=metadata_connection,
-            request=request,
-            arguments=arguments,
-            db_connectors=db_connectors,
-            state=state,
-        )
+        return ToolExecutionRuntimeSupport._runtime_sql_policy.rewrite_trino_show_create_table(sql)
 
     def _select_runtime_lookup_connector(
         self,
         *,
         request: ChatAskRequest,
         db_connectors: list[ConnectorItem],
-        metadata_connection: Any | None,
     ) -> ConnectorItem | None:
         return self._runtime_sql_policy.select_runtime_lookup_connector(
             request=request,
             db_connectors=db_connectors,
-            metadata_connection=metadata_connection,
-            sql_router=self._sql_router,
         )
 
     @staticmethod
@@ -356,9 +287,7 @@ class ToolExecutionRuntimeSupport(ToolExecutionContextSupport):
         default_error_code: str,
         can_continue: bool,
     ) -> dict[str, Any]:
-        category, classified_code, user_message, retry_recommended = classify_exception(
-            exc
-        )
+        category, classified_code, user_message, retry_recommended = classify_exception(exc)
         code = classified_code or default_error_code
         return build_tool_error(
             error_code=code,
@@ -455,53 +384,13 @@ class ToolExecutionRuntimeSupport(ToolExecutionContextSupport):
 
     @staticmethod
     def _table_match_patterns(mapping: dict[str, str]) -> tuple[str, ...]:
-        return ToolExecutionRuntimeSupport._runtime_connector_policy.table_match_patterns(
-            mapping
-        )
+        return ToolExecutionRuntimeSupport._runtime_connector_policy.table_match_patterns(mapping)
 
     @staticmethod
     def _contains_table_identifier(sql: str, identifier: str) -> bool:
         return ToolExecutionRuntimeSupport._runtime_connector_policy.contains_table_identifier(
             sql,
             identifier,
-        )
-
-    @classmethod
-    def _metadata_tool_argument_connector_name(
-        cls,
-        *,
-        arguments: dict[str, Any],
-        db_connectors: list[ConnectorItem],
-    ) -> str | None:
-        return cls._runtime_sql_policy.metadata_tool_argument_connector_name(
-            arguments=arguments,
-            db_connectors=db_connectors,
-        )
-
-    @classmethod
-    def _metadata_tool_scope_connector_name(
-        cls,
-        *,
-        arguments: dict[str, Any],
-        db_connectors: list[ConnectorItem],
-    ) -> str | None:
-        return cls._runtime_sql_policy.metadata_tool_scope_connector_name(
-            arguments=arguments,
-            db_connectors=db_connectors,
-        )
-
-    @classmethod
-    def _metadata_tool_connector_name(
-        cls,
-        *,
-        request: ChatAskRequest,
-        arguments: dict[str, Any],
-        db_connectors: list[ConnectorItem],
-    ) -> str | None:
-        return cls._runtime_sql_policy.metadata_tool_connector_name(
-            request=request,
-            arguments=arguments,
-            db_connectors=db_connectors,
         )
 
     @staticmethod

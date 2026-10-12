@@ -1,34 +1,277 @@
 global:
   imagePullSecrets: []
+  tolerations: []
+
+extraCa:
+  existingConfigMap: ""
+  mountPath: /workspace/.rhetorica/certs
+  nodeExtraCaCertsFile: ""
+
+namespaceControls:
+  roleBinding:
+    enabled: false
+    name: sa-admin-binding
+    subjectKind: User
+    subjectName: ""
+    roleKind: ClusterRole
+    roleName: admin
+  resourceQuota:
+    enabled: false
+    hard: {}
+  limitRange:
+    enabled: false
+    limits: []
+
+infra:
+  enabled: false
+  # Override only when a separately managed infra Deployment serves this Service.
+  serviceSelector:
+    component: infra
+    instance: ""
+  tolerations: null
+  imagePullPolicy: IfNotPresent
+  storageClassName: ""
+  temporal:
+    # Optional single-node Temporal beside embedded dev infrastructure.
+    # Production can continue using an independently operated Temporal frontend.
+    enabled: false
+    image: temporalio/auto-setup:1.29.3
+    existingSecret: ""
+    passwordKey: password
+    resources:
+      requests:
+        cpu: 150m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+  postgres:
+    image: postgres:16-alpine
+    database: rhetorica
+    username: rhetorica
+    password: rhetorica
+    servicePort: 5432
+    externalAccess:
+      enabled: false
+      type: LoadBalancer
+      port: 5432
+      annotations: {}
+      externalTrafficPolicy: Cluster
+      loadBalancerIP: ""
+      loadBalancerSourceRanges: []
+    storageSize: 10Gi
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+  redis:
+    image: redis:7-alpine
+    servicePort: 6379
+    storageSize: 1Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    servicePort: 6333
+    storageSize: 10Gi
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-02-28T09-55-16Z
+    initImage: quay.io/minio/mc:RELEASE.2025-03-12T17-29-24Z
+    initJobEnabled: true
+    rootUser: minio
+    rootPassword: minio123
+    bucket: rhetorica-dev
+    servicePort: 9000
+    consolePort: 9001
+    storageSize: 10Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+database:
+  # DATABASE_URL stays in a namespace Secret, outside Helm values and ConfigMap.
+  existingSecret: ""
+  urlKey: DATABASE_URL
+  caConfigMap: ""
+  caMountPath: /etc/rhetorica/managed-postgres
 
 api:
   enabled: true
+  tolerations: null
   replicaCount: 1
+  lifecycle: {}
+  hostAliases: []
   image:
-    repository: ghcr.io/your-org/rhetorica-api
+    repository: ghcr.io/adelphopoet/rhetorica/api
     tag: latest
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
     port: 8000
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    tls: []
   env: []
-  resources: {}
+  extraEnvFrom: []
+  # Disk-backed ephemeral workspace for streaming snapshots/XLSX ZIP assembly.
+  tempSizeLimit: 2Gi
+  resources:
+    requests:
+      cpu: 300m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+      ephemeral-storage: 3Gi
+
+scenarioWorkflows:
+  enabled: false
+  temporal:
+    # External frontend; leave empty when infra.temporal.enabled supplies it.
+    address: ""
+    namespace: default
+    taskQueue: rhetorica-scenarios-v1
+    tlsSecret: ""
+    serverName: ""
+  worker:
+    # Keep enabled when disabling admission, to drain already accepted runs.
+    enabled: false
+    replicaCount: 1
+    concurrency: 2
+    # Scenario workers receive connector credentials, but never Langfuse credentials.
+    extraEnvFrom: []
+    resources:
+      requests:
+        cpu: 150m
+        memory: 384Mi
+        ephemeral-storage: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 3Gi
 
 worker:
   enabled: true
+  tolerations: null
   replicaCount: 1
+  lifecycle: {}
+  hostAliases: []
   image:
-    repository: ghcr.io/your-org/rhetorica-worker
+    repository: ghcr.io/adelphopoet/rhetorica/worker
     tag: latest
     pullPolicy: IfNotPresent
   env: []
-  resources: {}
+  extraEnvFrom: []
+  tempSizeLimit: 2Gi
+  resources:
+    requests:
+      cpu: 300m
+      memory: 512Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+      ephemeral-storage: 3Gi
+
+# The API depends only on the internal SandboxGateway HTTP contract. For the
+# pilot this image runs NsJail; production may replace it with a gVisor/Kata
+# control-plane image without changing API/backend code.
+sandbox:
+  enabled: false
+  tolerations: null
+  deploymentMode: local
+  replicaCount: 1
+  image:
+    repository: ghcr.io/adelphopoet/rhetorica/sandbox
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    port: 8090
+  runtimeClassName: ""
+  maxParallelRuns: 2
+  processTimeoutSeconds: 60
+  sessionTtlMinutes: 20
+  cleanupIntervalSeconds: 60
+  maxWorkspaceBytes: "536870912"
+  maxTmpBytes: "134217728"
+  maxLogBytes: "65536"
+  maxOutputFiles: "100"
+  maxSessionOutputFiles: "200"
+  memoryLimitBytes: "1073741824"
+  pidsLimit: "64"
+  cpuMsPerSecond: "1000"
+  manageLegacyCgroupParents: "true"
+  workspaceMedium: Memory
+  workspaceSizeLimit: 1Gi
+  podSecurityContext: {}
+  securityContext:
+    privileged: true
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: true
+    runAsUser: 0
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2304Mi
+      ephemeral-storage: 2Gi
+  kubernetesJobs:
+    maxSessions: 10
+    startupTimeoutSeconds: 60
+    controller:
+      tolerations: null
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 250m
+          memory: 256Mi
+    runner:
+      processMemoryLimitBytes: "805306368"
+      cpuMsPerSecond: "400"
+      workspaceSizeLimit: 768Mi
+      resources:
+        requests:
+          cpu: 400m
+          memory: 1Gi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: 425m
+          memory: 1152Mi
+          ephemeral-storage: 1Gi
 
 web:
   enabled: true
+  tolerations: null
   replicaCount: 1
   image:
-    repository: ghcr.io/your-org/rhetorica-web
+    repository: ghcr.io/adelphopoet/rhetorica/web
     tag: latest
     pullPolicy: IfNotPresent
   service:
@@ -37,21 +280,142 @@ web:
   ingress:
     enabled: false
     className: ""
+    annotations: {}
     hosts: []
     tls: []
+  redirectIngress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    path: /
+    tls: []
   env: []
-  resources: {}
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 config:
   appEnv: prod
   logLevel: INFO
   logJson: true
   logLlmContent: false
+  otelEnabled: false
+  otelExporterOtlpEndpoint: ""
+  otelExporterOtlpInsecure: "false"
+  otelExporterOtlpTimeout: "5"
+  otelBatchSpanExportTimeout: "5000"
+  otelTracesSampler: parentbased_traceidratio
+  otelTracesSamplerArg: "0.1"
+  otelMetricExportInterval: "30000"
+  otelMetricExportTimeout: "5000"
+  langfuseEnabled: false
+  langfuseCaptureContent: false
+  langfuseAnnotationQueueId: ""
+  langfuseFeedbackScoreName: rhetorica_human_feedback
+  langfuseReviewPriorityScoreName: rhetorica_review_priority
   databaseUrl: ""
   redisUrl: ""
+  rateLimitRedisKeyPrefix: rhetorica:rate-limit:api
+  celeryBrokerUrl: ""
+  celeryResultBackend: ""
+  qdrantUrl: ""
+  ragCollectionName: rag_insights
+  ragVectorSize: "384"
+  ragDistance: cosine
+  ragPreferGrpc: "false"
+  ragEmbeddingModel: BAAI/bge-small-en-v1.5
+  ragConfidenceThreshold: "0.7"
+  ragMergeSimilarityThreshold: "0.9"
+  documentationBaseUrl: ""
+  documentationConnectorName: platform_docs
+  documentationWorkspaceId: default
+  documentationIndexUrl: ""
+  documentationContentFormat: markdown
+  documentationAuthType: none
+  documentationVerifyTls: "true"
+  documentationIncludePaths: ""
+  documentationExcludePaths: ""
+  documentationSyncEnabled: "true"
+  documentationSyncIntervalMinutes: "1440"
+  documentationQdrantCollection: documentation_chunks
+  documentationQdrantPreferGrpc: "false"
+  documentationVectorSize: "1024"
+  documentationEmbeddingBaseUrl: ""
+  documentationEmbeddingModel: BAAI/bge-small-en-v1.5
+  documentationEmbeddingEndpointPath: /v1/embeddings
+  documentationEmbeddingTimeoutSeconds: "120"
   s3Endpoint: ""
   s3Bucket: ""
+  s3Region: us-east-1
+  s3Secure: "false"
+  sandboxUrl: ""
+  fileMaxInputBytes: "26214400"
+  fileMaxFilesPerTurn: "5"
+  fileMaxTurnBytes: "52428800"
+  fileMaxOutputBytes: "52428800"
+  fileMaxSessionOutputBytes: "104857600"
+  fileSqlExportMaxRows: "1048575"
+  fileSqlExportMaxBytes: "536870912"
+  sqlResultSnapshotMaxBytes: "536870912"
+  sqlResultSnapshotMaxCellBytes: "1048576"
+  sqlResultSnapshotMaxRowBytes: "16777216"
+  sqlResultPreviewRows: "500"
+  fileUserQuotaBytes: "1073741824"
+  fileWorkspaceQuotaBytes: "10737418240"
+  fileStagedTtlHours: "24"
   llmBaseUrl: ""
+  authEnabled: true
+  authDefaultWorkspaceId: default
+  authCookieSecure: true
+  authCookieSameSite: lax
+  authLocalAdminDisplayName: Platform Admin
+  authBootstrapEnabled: false
+  authKeycloakEnabled: false
+  authKeycloakIssuerUrl: ""
+  authKeycloakClientId: ""
+  authKeycloakAdminGroups: ""
+  authKeycloakAnalystGroups: ""
+  authKeycloakRequireMappedGroup: true
+  authOauthCimdEnabled: true
+  authOauthTransactionTtlMinutes: "10"
+  authOauthCodeTtlMinutes: "5"
+  authOauthAccessTtlMinutes: "60"
+  authOauthRefreshTtlDays: "30"
+  authOauthDcrRegistrationsPerSource: "30"
+  authOauthDcrMaxClients: "10000"
+  authOauthRecordRetentionHours: "24"
+  authOauthDcrInactiveClientRetentionDays: "90"
+  mcpAllowedHosts: "127.0.0.1:*,localhost:*,[::1]:*"
+  mcpAllowedOrigins: "http://127.0.0.1:*,http://localhost:*"
+  webPublicUrl: ""
+  publicApiUrl: ""
+  webKeycloakRedirectUri: ""
+  webKeycloakPostLogoutRedirectUri: ""
+  webApiUrl: ""
 
 secrets:
+  # Empty means: generate once on install and reuse the Kubernetes Secret on upgrades.
+  authJwtSecret: ""
+  # Empty means: generate once and reuse on Helm upgrades.
+  authApiTokenPepper: ""
+  # Empty means: generate once and reuse on Helm upgrades.
+  authOauthTokenPepper: ""
+  authLocalAdminLogin: ""
+  authLocalAdminPassword: ""
+  # Empty means: generate once on install and reuse the Kubernetes Secret on upgrades.
+  authBootstrapLoginSecret: ""
+  keycloakClientSecret: ""
+  ragQdrantApiKey: ""
+  documentationApiToken: ""
+  documentationEmbeddingApiKey: ""
+  documentationQdrantApiKey: ""
+  s3AccessKey: ""
+  s3SecretKey: ""
+  # Empty means: generate once and reuse on Helm upgrades.
+  sandboxInternalToken: ""
   llmApiKey: ""

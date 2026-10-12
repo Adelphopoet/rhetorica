@@ -1,0 +1,122 @@
+{{- if and .Values.sandbox.enabled (eq .Values.sandbox.deploymentMode "local") }}
+{{- if ne (int .Values.sandbox.replicaCount) 1 }}
+{{- fail "sandbox.replicaCount must be 1 for the local NsJail adapter; use the Kubernetes sandbox adapter to scale sessions" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-sandbox
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: sandbox
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "rhetorica.labels" . | nindent 8 }}
+        app.kubernetes.io/component: sandbox
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "rhetorica.tolerations" (dict "root" . "component" .Values.sandbox) | nindent 6 }}
+      {{- with .Values.sandbox.runtimeClassName }}
+      runtimeClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.sandbox.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: sandbox
+          image: "{{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}"
+          imagePullPolicy: {{ .Values.sandbox.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.sandbox.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.sandbox.service.port }}
+          env:
+            - name: SANDBOX_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rhetorica.fullname" . }}-secret
+                  key: SANDBOX_INTERNAL_TOKEN
+            - name: SANDBOX_SESSIONS_ROOT
+              value: /var/lib/rhetorica-sandbox/sessions
+            - name: SANDBOX_PYTHON_PATH
+              value: /opt/rhetorica-venv/bin/python
+            - name: SANDBOX_MAX_PARALLEL_RUNS
+              value: {{ .Values.sandbox.maxParallelRuns | quote }}
+            - name: SANDBOX_PROCESS_TIMEOUT_SECONDS
+              value: {{ .Values.sandbox.processTimeoutSeconds | quote }}
+            - name: SANDBOX_SESSION_TTL_MINUTES
+              value: {{ .Values.sandbox.sessionTtlMinutes | quote }}
+            - name: SANDBOX_CLEANUP_INTERVAL_SECONDS
+              value: {{ .Values.sandbox.cleanupIntervalSeconds | quote }}
+            - name: SANDBOX_MAX_INPUT_BYTES
+              value: {{ .Values.config.fileMaxInputBytes | quote }}
+            - name: SANDBOX_MAX_OUTPUT_BYTES
+              value: {{ .Values.config.fileMaxOutputBytes | quote }}
+            - name: SANDBOX_MAX_SESSION_OUTPUT_BYTES
+              value: {{ .Values.config.fileMaxSessionOutputBytes | quote }}
+            - name: SANDBOX_MAX_WORKSPACE_BYTES
+              value: {{ .Values.sandbox.maxWorkspaceBytes | quote }}
+            - name: SANDBOX_MAX_TMP_BYTES
+              value: {{ .Values.sandbox.maxTmpBytes | quote }}
+            - name: SANDBOX_MAX_LOG_BYTES
+              value: {{ .Values.sandbox.maxLogBytes | quote }}
+            - name: SANDBOX_MAX_OUTPUT_FILES
+              value: {{ .Values.sandbox.maxOutputFiles | quote }}
+            - name: SANDBOX_MAX_SESSION_OUTPUT_FILES
+              value: {{ .Values.sandbox.maxSessionOutputFiles | quote }}
+            - name: SANDBOX_MEMORY_LIMIT_BYTES
+              value: {{ .Values.sandbox.memoryLimitBytes | quote }}
+            - name: SANDBOX_PIDS_LIMIT
+              value: {{ .Values.sandbox.pidsLimit | quote }}
+            - name: SANDBOX_CPU_MS_PER_SECOND
+              value: {{ .Values.sandbox.cpuMsPerSecond | quote }}
+            - name: SANDBOX_MANAGE_LEGACY_CGROUP_PARENTS
+              value: {{ .Values.sandbox.manageLegacyCgroupParents | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.sandbox.resources | nindent 12 }}
+          volumeMounts:
+            - name: sessions
+              mountPath: /var/lib/rhetorica-sandbox/sessions
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: sessions
+          emptyDir:
+            {{- with .Values.sandbox.workspaceMedium }}
+            medium: {{ . | quote }}
+            {{- end }}
+            sizeLimit: {{ .Values.sandbox.workspaceSizeLimit }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+{{- end }}

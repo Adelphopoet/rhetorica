@@ -10,17 +10,12 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import ClassVar, Protocol
 
 from rhetorica_backend.contracts.chat import (
     AssistantFeedbackValue,
     FeedbackReason,
 )
-
-if TYPE_CHECKING:
-    from rhetorica_backend.domain.chat.metadata.ranking_service import (
-        MetadataRankingService,
-    )
 
 
 class FeedbackRoutingAction(str, Enum):
@@ -136,9 +131,11 @@ class FeedbackPolicy:
         )
 
         # Build repair prompt context if needed
-        repair_prompt_context = self._build_repair_context(context) if (
-            FeedbackRoutingAction.TRIGGER_REPAIR_TURN in actions
-        ) else None
+        repair_prompt_context = (
+            self._build_repair_context(context)
+            if (FeedbackRoutingAction.TRIGGER_REPAIR_TURN in actions)
+            else None
+        )
 
         # Build reason string for logging
         reason = self._build_routing_reason(context, actions)
@@ -244,7 +241,7 @@ class FeedbackPipelineService:
     def __init__(
         self,
         policy: FeedbackPolicy | None = None,
-        metadata_ranking_service: MetadataRankingService | None = None,
+        metadata_ranking_service: NegativeFeedbackSignalSink | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._policy = policy or FeedbackPolicy()

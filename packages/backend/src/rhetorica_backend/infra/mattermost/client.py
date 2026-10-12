@@ -11,6 +11,7 @@ import httpx
 class MattermostUser:
     id: str
     username: str
+    display_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,11 @@ class MattermostClient:
 
     def get_me(self) -> MattermostUser:
         payload = self._request_json("GET", "/api/v4/users/me")
-        return MattermostUser(id=str(payload["id"]), username=str(payload["username"]))
+        return self._user_from_payload(payload)
+
+    def get_user(self, user_id: str) -> MattermostUser:
+        payload = self._request_json("GET", f"/api/v4/users/{user_id}")
+        return self._user_from_payload(payload)
 
     def get_post(self, post_id: str) -> MattermostPost:
         payload = self._request_json("GET", f"/api/v4/posts/{post_id}")
@@ -84,6 +89,23 @@ class MattermostClient:
             payload["file_ids"] = file_ids
         response = self._request_json("POST", "/api/v4/posts", json=payload)
         return str(response["id"])
+
+    def create_reaction(
+        self,
+        *,
+        user_id: str,
+        post_id: str,
+        emoji_name: str,
+    ) -> None:
+        self._request_json(
+            "POST",
+            "/api/v4/reactions",
+            json={
+                "user_id": user_id,
+                "post_id": post_id,
+                "emoji_name": emoji_name,
+            },
+        )
 
     def upload_bytes(
         self,
@@ -177,6 +199,25 @@ class MattermostClient:
             if isinstance(raw_post, dict):
                 posts.append(cls._post_from_payload(raw_post))
         return posts
+
+    @staticmethod
+    def _user_from_payload(payload: dict[str, Any]) -> MattermostUser:
+        display_name = str(payload.get("nickname") or "").strip()
+        if not display_name:
+            full_name = " ".join(
+                part
+                for part in (
+                    str(payload.get("first_name") or "").strip(),
+                    str(payload.get("last_name") or "").strip(),
+                )
+                if part
+            )
+            display_name = full_name
+        return MattermostUser(
+            id=str(payload["id"]),
+            username=str(payload["username"]),
+            display_name=display_name or None,
+        )
 
     @staticmethod
     def _post_from_payload(payload: dict[str, Any]) -> MattermostPost:

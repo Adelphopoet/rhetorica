@@ -2,23 +2,63 @@
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, TypedDict
 from urllib.parse import urljoin
 
 import httpx
 from rhetorica_backend.contracts.admin_integrations import LlmConnectionConfig
 from rhetorica_backend.domain.chat.error_contract import retry_idempotent
 from rhetorica_backend.domain.chat.llm.token_budget import LlmPromptBudgetService
+from rhetorica_backend.domain.chat.settings import get_chat_settings
 from rhetorica_backend.infra.logging import (
     build_llm_request_log,
     build_llm_response_log,
     get_logger,
     llm_content_logging_enabled,
+    llm_payload_contains_file_tools,
     sanitize_for_logging,
 )
+
+
+class LlmFunctionToolChoiceTarget(TypedDict):
+    name: str
+
+
+class LlmFunctionToolChoice(TypedDict):
+    type: Literal["function"]
+    function: LlmFunctionToolChoiceTarget
+
+
+LlmToolChoice = Literal["auto", "none"] | LlmFunctionToolChoice
+
+
+@dataclass(slots=True)
+class LlmCallDiagnostics:
+    """Content-free observations of one SDK model call, timestamps in UTC."""
+
+    run_id: str
+    call_id: str
+    call_index: int
+    streamed: bool
+    started_at: str
+    status: str = "running"
+    ended_at: str | None = None
+    first_chunk_at: str | None = None
+    last_chunk_at: str | None = None
+    last_chunk_type: str | None = None
+    text_chars: int = 0
+    reasoning_chars: int = 0
+    tool_arguments_chars: int = 0
+    content_event_count: int = 0
+    terminal_event: str | None = None
+    response_id: str | None = None
+    provider_request_id: str | None = None
+    error_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +71,47 @@ class LlmCallUsage:
     total_tokens: int
     duration_ms: float
     retries: int
+    cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
+    cache_usage_reported: bool = False
     phase: str = "tool_loop"
+    usage_reported: bool = True
+    diagnostics: LlmCallDiagnostics | None = None
+
+
+def _nonnegative_usage_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return int(value)
+
+
+def _normalized_cache_usage(usage: dict[str, Any]) -> tuple[int, int, bool]:
+    """Normalize OpenAI-compatible and Anthropic prompt-cache usage fields."""
+    details: dict[str, Any] = {}
+    for key in ("prompt_tokens_details", "input_tokens_details"):
+        candidate = usage.get(key)
+        if isinstance(candidate, dict):
+            details = candidate
+            break
+
+    read_keys = ("cached_tokens", "cache_read_input_tokens")
+    write_keys = (
+        "cache_write_tokens",
+        "cache_write_input_tokens",
+        "cache_creation_input_tokens",
+    )
+    reported = any(key in details for key in read_keys + write_keys) or any(
+        key in usage for key in read_keys + write_keys
+    )
+
+    def first_count(keys: tuple[str, ...]) -> int:
+        for source in (details, usage):
+            for key in keys:
+                if key in source:
+                    return _nonnegative_usage_int(source.get(key))
+        return 0
+
+    return first_count(read_keys), first_count(write_keys), reported
 
 
 @dataclass
@@ -44,7 +124,7 @@ class LlmCompletionRequest:
     temperature: float | None = None
     max_tokens: int | None = None
     response_schema: dict[str, Any] | None = None
-    tool_choice: Literal["auto", "required"] | None = None
+    tool_choice: LlmToolChoice | None = None
 
 
 @dataclass
@@ -53,6 +133,33 @@ class LlmCompletionResponse:
 
     message: dict[str, Any]
     raw_body: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class LlmTurnRequest:
+    """Normalized single-turn request used by orchestration runtime."""
+
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None = None
+    response_schema: dict[str, Any] | None = None
+    tool_choice: LlmToolChoice | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LlmTurnResult:
+    """Normalized single-turn result independent of provider transport details."""
+
+    response: LlmCompletionResponse
+    output_text: str
+    tool_calls: list[dict[str, Any]]
+    tools_disabled: bool = False
+    structured_disabled: bool = False
+
+
+class LlmTurnClient(Protocol):
+    """Port consumed by the tool loop for one model turn."""
+
+    def create_turn(self, request: LlmTurnRequest) -> LlmTurnResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,8 +184,18 @@ class LlmResponsesResult:
 class LlmClient:
     """Client for OpenAI-compatible LLM APIs."""
 
-    def __init__(self, connection: LlmConnectionConfig):
+    def __init__(
+        self,
+        connection: LlmConnectionConfig,
+        *,
+        request_timeout: float | None = None,
+    ):
         self._connection = connection
+        self._request_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else get_chat_settings().llm_request_timeout
+        )
         self._logger = get_logger(__name__, llm_model=connection.model)
         self._call_usages: list[LlmCallUsage] = []
 
@@ -118,12 +235,29 @@ class LlmClient:
         )
 
     @staticmethod
-    def _build_headers(connection: LlmConnectionConfig) -> dict[str, str]:
+    def _build_headers(
+        connection: LlmConnectionConfig,
+        *,
+        api_key_index: int | None = None,
+    ) -> dict[str, str]:
         """Build HTTP headers for LLM API requests."""
         headers = {"Content-Type": "application/json", **connection.headers}
-        if connection.api_key:
-            headers["Authorization"] = f"Bearer {connection.api_key}"
+        api_key = LlmClient._select_api_key(connection, api_key_index=api_key_index)
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         return headers
+
+    @staticmethod
+    def _select_api_key(
+        connection: LlmConnectionConfig,
+        *,
+        api_key_index: int | None = None,
+    ) -> str | None:
+        if connection.api_keys:
+            if api_key_index is not None:
+                return connection.api_keys[api_key_index % len(connection.api_keys)]
+            return secrets.choice(connection.api_keys)
+        return connection.api_key
 
     @staticmethod
     def _build_payload(
@@ -131,7 +265,7 @@ class LlmClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         response_schema: dict[str, Any] | None = None,
-        tool_choice: Literal["auto", "required"] | None = None,
+        tool_choice: LlmToolChoice | None = None,
     ) -> dict[str, Any]:
         """Build request payload for LLM API."""
         payload: dict[str, Any] = {
@@ -143,9 +277,13 @@ class LlmClient:
             payload["tool_choice"] = tool_choice or "auto"
         if connection.temperature is not None:
             payload["temperature"] = connection.temperature
+        if connection.top_p is not None:
+            payload["top_p"] = connection.top_p
+        if connection.reasoning_effort is not None:
+            payload["reasoning_effort"] = connection.reasoning_effort
         if connection.max_tokens is not None:
-            payload["max_tokens"] = connection.max_tokens
-        if response_schema and LlmClient._structured_output_enabled(connection):
+            payload[connection.max_tokens_parameter] = connection.max_tokens
+        if response_schema and not tools and LlmClient._structured_output_enabled(connection):
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -154,7 +292,28 @@ class LlmClient:
                     "schema": response_schema,
                 },
             }
+        if LlmClient._reasoning_split_enabled(connection):
+            payload["reasoning_split"] = True
+        chat_template_enable_thinking = connection.extra_settings.get(
+            "chat_template_enable_thinking"
+        )
+        if isinstance(chat_template_enable_thinking, bool):
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": chat_template_enable_thinking,
+            }
         return payload
+
+    @staticmethod
+    def _reasoning_split_enabled(connection: LlmConnectionConfig) -> bool:
+        """Enable ExampleReasoningModel-compatible reasoning split payload extension."""
+        if connection.model == "ExampleReasoningModel":
+            return True
+        extra = connection.extra_settings
+        for key in ("example_reasoning_compatible", "reasoning_split"):
+            raw = extra.get(key)
+            if isinstance(raw, bool) and raw:
+                return True
+        return False
 
     @staticmethod
     def _structured_output_enabled(connection: LlmConnectionConfig) -> bool:
@@ -167,6 +326,12 @@ class LlmClient:
             return not raw_legacy
         return True
 
+    @staticmethod
+    def _explicit_final_answer_enabled(connection: LlmConnectionConfig) -> bool:
+        """Require final answers to use the SDK-native finalization tool."""
+        raw = connection.extra_settings.get("require_explicit_final_answer")
+        return raw if isinstance(raw, bool) else False
+
     def build_prompt_budget_service(self) -> LlmPromptBudgetService:
         """Build request-budget service from connector settings."""
         return LlmPromptBudgetService(
@@ -175,6 +340,37 @@ class LlmClient:
             response_reserve_tokens=self._connection.max_tokens
             or LlmPromptBudgetService.DEFAULT_RESPONSE_RESERVE_TOKENS,
         )
+
+    def summarize_context_for_compaction(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> str:
+        """Summarize a completed prompt prefix without exposing any tools."""
+        response = self.chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Create a concise continuation checkpoint for the supplied "
+                        "conversation prefix. Preserve the user's current goal, explicit "
+                        "constraints, decisions, concrete facts, exact identifiers, exact "
+                        "SQL when present, errors, unresolved questions, and the next step. "
+                        "Do not call tools. Do not invent facts. Do not reproduce bulky tool "
+                        "outputs; the backend supplies an authoritative executed-call ledger "
+                        "and artifact handles separately. Return only the checkpoint text."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(messages, ensure_ascii=False, sort_keys=True),
+                },
+            ],
+            tools=None,
+            response_schema=None,
+            tool_choice=None,
+        )
+        content = response.message.get("content")
+        return content if isinstance(content, str) else ""
 
     @staticmethod
     def _context_window_tokens(connection: LlmConnectionConfig) -> int | None:
@@ -220,7 +416,7 @@ class LlmClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         response_schema: dict[str, Any] | None = None,
-        tool_choice: Literal["auto", "required"] | None = None,
+        tool_choice: LlmToolChoice | None = None,
     ) -> LlmCompletionResponse:
         """
         Send chat completion request to LLM API.
@@ -239,7 +435,6 @@ class LlmClient:
             base_url=self._connection.base_url,
             endpoint_path=self._connection.endpoint_path,
         )
-        headers = self._build_headers(self._connection)
         payload = self._build_payload(
             self._connection,
             messages,
@@ -247,14 +442,23 @@ class LlmClient:
             response_schema=response_schema,
             tool_choice=tool_choice,
         )
-        include_content = self._include_llm_content()
+        contains_file_tools = llm_payload_contains_file_tools(payload)
+        include_content = self._include_llm_content() and not contains_file_tools
         attempt_count = 0
         last_duration_ms = 0.0
+        api_key_offset = self._api_key_retry_offset()
 
         def _request() -> dict[str, Any]:
             nonlocal attempt_count, last_duration_ms
             attempt_count += 1
-            with httpx.Client(timeout=45.0, verify=self._connection.verify_tls) as client:
+            headers = self._build_headers(
+                self._connection,
+                api_key_index=api_key_offset + attempt_count - 1,
+            )
+            with httpx.Client(
+                timeout=self._request_timeout,
+                verify=self._connection.verify_tls,
+            ) as client:
                 started_at = perf_counter()
                 self._logger.info(
                     "llm.request.started",
@@ -276,7 +480,11 @@ class LlmClient:
                         endpoint=endpoint,
                         status_code=response.status_code,
                         duration_ms=last_duration_ms,
-                        response_text=sanitize_for_logging(response.text),
+                        response_text=(
+                            "[REDACTED:file_tool_payload]"
+                            if contains_file_tools
+                            else sanitize_for_logging(response.text)
+                        ),
                     )
                     raise
                 body = response.json()
@@ -296,6 +504,10 @@ class LlmClient:
             _request,
             max_attempts=self._retry_attempts(),
         )
+        self._commit_successful_retry(
+            api_key_offset=api_key_offset,
+            attempt_count=attempt_count,
+        )
 
         message = self._extract_message(body)
 
@@ -303,6 +515,7 @@ class LlmClient:
         usage = body.get("usage", {})
         if isinstance(usage, dict):
             retries = max(0, attempt_count - 1)
+            cached_tokens, cache_write_tokens, cache_reported = _normalized_cache_usage(usage)
             self._call_usages.append(
                 LlmCallUsage(
                     model=self._connection.model,
@@ -311,6 +524,9 @@ class LlmClient:
                     total_tokens=usage.get("total_tokens", 0),
                     duration_ms=last_duration_ms,
                     retries=retries,
+                    cached_input_tokens=cached_tokens,
+                    cache_write_input_tokens=cache_write_tokens,
+                    cache_usage_reported=cache_reported,
                 )
             )
 
@@ -433,7 +649,6 @@ class LlmClient:
     ) -> LlmResponsesResult:
         """Call strict OpenAI Responses API with native function tools."""
         endpoint = self._build_responses_endpoint(self._connection)
-        headers = self._build_headers(self._connection)
         instructions: str | None = None
         resolved_input: list[dict[str, Any]]
         if input_items is not None:
@@ -459,17 +674,30 @@ class LlmClient:
             payload["text"] = text_format
         if self._connection.temperature is not None:
             payload["temperature"] = self._connection.temperature
+        if self._connection.top_p is not None:
+            payload["top_p"] = self._connection.top_p
+        if self._connection.reasoning_effort is not None:
+            payload["reasoning"] = {"effort": self._connection.reasoning_effort}
         if self._connection.max_tokens is not None:
             payload["max_output_tokens"] = self._connection.max_tokens
 
-        include_content = self._include_llm_content()
+        contains_file_tools = llm_payload_contains_file_tools(payload)
+        include_content = self._include_llm_content() and not contains_file_tools
         attempt_count = 0
         last_duration_ms = 0.0
+        api_key_offset = self._api_key_retry_offset()
 
         def _request() -> dict[str, Any]:
             nonlocal attempt_count, last_duration_ms
             attempt_count += 1
-            with httpx.Client(timeout=45.0, verify=self._connection.verify_tls) as client:
+            headers = self._build_headers(
+                self._connection,
+                api_key_index=api_key_offset + attempt_count - 1,
+            )
+            with httpx.Client(
+                timeout=self._request_timeout,
+                verify=self._connection.verify_tls,
+            ) as client:
                 started_at = perf_counter()
                 self._logger.info(
                     "llm.responses.request.started",
@@ -491,7 +719,11 @@ class LlmClient:
                         endpoint=endpoint,
                         status_code=response.status_code,
                         duration_ms=last_duration_ms,
-                        response_text=sanitize_for_logging(response.text),
+                        response_text=(
+                            "[REDACTED:file_tool_payload]"
+                            if contains_file_tools
+                            else sanitize_for_logging(response.text)
+                        ),
                     )
                     raise
                 body = response.json()
@@ -508,11 +740,16 @@ class LlmClient:
                 return body
 
         body = retry_idempotent(_request, max_attempts=self._retry_attempts())
+        self._commit_successful_retry(
+            api_key_offset=api_key_offset,
+            attempt_count=attempt_count,
+        )
         usage = body.get("usage", {})
         if isinstance(usage, dict):
             input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
             output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
             total_tokens = int(usage.get("total_tokens") or input_tokens + output_tokens)
+            cached_tokens, cache_write_tokens, cache_reported = _normalized_cache_usage(usage)
             self._call_usages.append(
                 LlmCallUsage(
                     model=self._connection.model,
@@ -521,6 +758,9 @@ class LlmClient:
                     total_tokens=total_tokens,
                     duration_ms=last_duration_ms,
                     retries=max(0, attempt_count - 1),
+                    cached_input_tokens=cached_tokens,
+                    cache_write_input_tokens=cache_write_tokens,
+                    cache_usage_reported=cache_reported,
                 )
             )
         response_id = body.get("id")
@@ -536,7 +776,7 @@ class LlmClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         response_schema: dict[str, Any] | None = None,
-        tool_choice: Literal["auto", "required"] | None = None,
+        tool_choice: LlmToolChoice | None = None,
     ) -> tuple[LlmCompletionResponse, bool, bool]:
         """
         Send chat completion with fallback to non-tools mode if not supported.
@@ -606,6 +846,29 @@ class LlmClient:
         else:
             return response, tools_disabled, structured_disabled
 
+    def create_turn(self, request: LlmTurnRequest) -> LlmTurnResult:
+        """Create one normalized model turn for orchestration.
+
+        This wraps the existing OpenAI-compatible transport behind a small port.
+        The runtime can move to native Responses state handling without changing
+        terminal policy or tool execution contracts.
+        """
+        response, tools_disabled, structured_disabled = self.chat_completion_with_fallback(
+            messages=request.messages,
+            tools=request.tools,
+            response_schema=request.response_schema,
+            tool_choice=request.tool_choice,
+        )
+        content = response.message.get("content")
+        tool_calls = response.message.get("tool_calls")
+        return LlmTurnResult(
+            response=response,
+            output_text=content if isinstance(content, str) else "",
+            tool_calls=tool_calls if isinstance(tool_calls, list) else [],
+            tools_disabled=tools_disabled,
+            structured_disabled=structured_disabled,
+        )
+
     def _retry_attempts(self) -> int:
         raw = self._connection.extra_settings.get("llm_retry_attempts")
         if isinstance(raw, int | float):
@@ -613,6 +876,26 @@ class LlmClient:
             if 1 <= value <= 5:
                 return value
         return 3
+
+    def _api_key_retry_offset(self) -> int:
+        if not self._connection.api_keys:
+            return 0
+        if self._connection.selected_api_key_index is not None:
+            return self._connection.selected_api_key_index
+        return secrets.randbelow(len(self._connection.api_keys))
+
+    def _commit_successful_retry(self, *, api_key_offset: int, attempt_count: int) -> None:
+        """Persist a credential switch only after the retry chain succeeds."""
+        if attempt_count <= 1 or not self._connection.api_keys:
+            return
+        selected_index = (api_key_offset + attempt_count - 1) % len(self._connection.api_keys)
+        expected_index = self._connection.selected_api_key_index
+        if expected_index is None:
+            return
+        self._connection.commit_credential_retry(
+            selected_api_key_index=selected_index,
+            expected_index=expected_index,
+        )
 
     def _include_llm_content(self) -> bool:
         configured = self._connection.extra_settings.get("log_llm_content")

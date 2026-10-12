@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rhetorica_backend.contracts.scenarios import ScenarioConnectorBindings, ScenarioToolPolicy
+from rhetorica_backend.infra.postgres.scenario_models import ScenarioDefinitionOrm
 from rhetorica_backend.infra.postgres.scenario_repository import ScenarioRepository
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from rhetorica_backend.infra.postgres.user_repository import UserAccountRepository
@@ -100,3 +101,44 @@ def test_scenario_repository_archives_without_destroying_definition(tmp_path: Pa
         )
         is not None
     )
+
+
+def test_scenario_repository_ignores_removed_metadata_binding_in_stored_rows(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path, "scenario_legacy_binding.db")
+    owner = UserAccountRepository(db=runtime).ensure_bootstrap_user("ws-1")
+    scenario_repository = ScenarioRepository(db=runtime)
+    created = scenario_repository.create_definition(
+        slug="legacy-metadata-binding",
+        workspace_id="ws-1",
+        owner_user_id=owner.id,
+        scope="personal",
+        title="Legacy binding",
+        summary="Summary",
+        description="Description",
+        input_schema={"type": "object", "properties": {}, "required": []},
+        prompt_template="Prompt",
+        tool_policy=ScenarioToolPolicy(),
+        default_connector_bindings=ScenarioConnectorBindings(run_sql=True),
+        status="published",
+    )
+    with runtime.session() as session:
+        row = session.get(ScenarioDefinitionOrm, created.id)
+        assert row is not None
+        row.default_connector_bindings = {
+            "metadata_connector_name": None,
+            "database_connector_name": "trino",
+            "run_sql": True,
+        }
+        session.commit()
+
+    loaded = scenario_repository.get_definition_for_owner(
+        created.id,
+        workspace_id="ws-1",
+        owner_user_id=owner.id,
+    )
+
+    assert loaded is not None
+    assert loaded.default_connector_bindings.database_connector_name == "trino"
+    assert loaded.default_connector_bindings.run_sql is True

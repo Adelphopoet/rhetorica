@@ -26,7 +26,6 @@ else:
 
 
 RuntimeCompletionKind = Literal[
-    "capability_question",
     "llm_connector_missing",
     "runtime_completed",
     "cancelled",
@@ -71,25 +70,6 @@ class SqlPlanningContext(BaseModel):
     selected_database_connector: str | None = None
     generated_sql: str | None = None
     metadata_context_revision: int = 0
-
-
-class TurnContextSnapshot(BaseModel):
-    """Stable, serializable turn snapshot used by finalization and diagnostics."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    warnings: list[str] = Field(default_factory=list)
-    metadata_sources: list[str] = Field(default_factory=list)
-    context_tables: list[str] = Field(default_factory=list)
-    metadata_table_columns: dict[str, list[str]] = Field(default_factory=dict)
-    semantic_grounding: dict[str, Any] | None = None
-    execution_zone: ExecutionZoneSnapshot | None = None
-    selected_database_connector: str | None = None
-    generated_sql: str | None = None
-    visualization_candidate: dict[str, Any] | None = None
-    prompt_version: str | None = None
-    metadata_context_revision: int = 0
-    execution_attempts: list[SqlExecutionOutcome] = Field(default_factory=list)
 
 
 class NoRuntimeTransportArtifact(BaseModel):
@@ -151,8 +131,8 @@ class PreparedRuntimeTurnInput(Generic[TState]):
     tools: list[dict[str, Any]]
     state: TState
     tool_executor: ToolExecutorPort
-    protocol_repair_enabled: bool
     llm_client: Any
+    agent_session: Any | None = None
 
 
 class RuntimeExecutionResult(BaseModel):
@@ -212,16 +192,7 @@ class CompletedSessionFlow(BaseModel):
         default_factory=lambda: NoRuntimeTransportArtifact()
     )
     history_persistence: HistoryPersistenceDecision
-
-
-class FinalizationInput(BaseModel):
-    """Typed payload passed into finalization/repair steps."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    raw_final_text: str
-    uncertainty_flags: list[str] = Field(default_factory=list)
-    turn_context: TurnContextSnapshot
+    persisted_user_message_id: str | None = None
 
 
 class ToolCallRequest(BaseModel):
@@ -245,6 +216,35 @@ class ToolCallResult(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class ToolCallOutcomeReceipt(BaseModel):
+    """Deterministic facts retained after a tool result leaves the active prompt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ok: bool
+    error_code: str | None = None
+    error_category: str | None = None
+    status: str | None = None
+    execution_status: str | None = None
+    execution_id: str | None = None
+    result_state: str | None = None
+    row_count: int | None = None
+    artifact_id: str | None = None
+    artifact_sha256: str | None = None
+
+
+class ExecutedToolCallLedgerEntry(BaseModel):
+    """Exact ordered record of one tool call actually executed by the backend."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sequence: int = Field(ge=1)
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    outcome: ToolCallOutcomeReceipt
+
+
 class ExecuteToolCallPlan(BaseModel):
     """Tool loop step: execute the requested tool call."""
 
@@ -255,46 +255,20 @@ class ExecuteToolCallPlan(BaseModel):
     call_signature: tuple[str, str]
 
 
-class DuplicateToolCallPlan(BaseModel):
-    """Tool loop step: reuse a previously observed tool result."""
+class RejectRepeatedToolCallPlan(BaseModel):
+    """Tool loop step: return a recoverable error without executing the tool."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    plan_type: Literal["duplicate"] = "duplicate"
+    plan_type: Literal["reject_repeated"] = "reject_repeated"
     tool_call_id: str
     call_signature: tuple[str, str]
     tool_result: dict[str, Any]
-    cached_result_available: bool
-    recovery_kind: Literal["none", "duplicate_loop"] = "none"
 
 
 ToolCallExecutionPlan = Annotated[
-    ExecuteToolCallPlan | DuplicateToolCallPlan,
+    ExecuteToolCallPlan | RejectRepeatedToolCallPlan,
     Field(discriminator="plan_type"),
-]
-
-
-class ContinueToolResultDecision(BaseModel):
-    """Tool loop step: keep iterating after the tool result."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    decision_type: Literal["continue"] = "continue"
-
-
-class StopToolResultDecision(BaseModel):
-    """Tool loop step: stop and surface a terminal payload."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    decision_type: Literal["stop"] = "stop"
-    payload: dict[str, Any]
-    recovery_kind: Literal["none", "execution_error"] = "none"
-
-
-ToolResultDecision = Annotated[
-    ContinueToolResultDecision | StopToolResultDecision,
-    Field(discriminator="decision_type"),
 ]
 
 
@@ -372,6 +346,40 @@ class NonToolTurnCompletionInput(BaseModel):
     current_tool_names: list[str] = Field(default_factory=list)
 
 
+class StructuredFinalAnswer(BaseModel):
+    """Terminal candidate produced by a validated final-answer contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_type: Literal["structured"] = "structured"
+    payload: dict[str, Any]
+
+
+class PlainFinalAnswer(BaseModel):
+    """Terminal candidate produced by model text when no tool call is pending."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_type: Literal["plain"] = "plain"
+    answer_markdown: str = Field(min_length=1)
+    uncertainty_flags: list[str] = Field(default_factory=list)
+
+
+class NoAnswer(BaseModel):
+    """Terminal candidate for responses with neither tool calls nor final text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_type: Literal["none"] = "none"
+    reason: str = "empty_model_response"
+
+
+FinalAnswerCandidate = Annotated[
+    StructuredFinalAnswer | PlainFinalAnswer | NoAnswer,
+    Field(discriminator="candidate_type"),
+]
+
+
 class DecisionFinalizedTurnCompletion(BaseModel):
     """Completion produced from an explicit final/clarification decision."""
 
@@ -398,7 +406,15 @@ class FallbackTurnCompletion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     completion_type: Literal["fallback"] = "fallback"
-    reason: Literal["abort", "unacceptable_final_payload", "analysis_plan_incomplete"]
+    reason: Literal[
+        "abort",
+        "unacceptable_final_payload",
+        "invalid_non_tool_final_payload",
+        "invalid_submit_final_answer",
+        "progress_submit_final_answer",
+        "unacceptable_submit_final_answer",
+        "premature_submit_final_answer",
+    ]
     payload: dict[str, Any]
     soft_fallback_applied: bool = False
 
@@ -478,6 +494,7 @@ class TransportFinalizationInput(BaseModel):
     llm_usages: list[dict[str, Any]] = Field(default_factory=list)
     history_persistence: HistoryPersistenceDecision
     transport_events: list[StreamEvent] = Field(default_factory=list)
+    persisted_user_message_id: str | None = None
 
 
 class SyncTransportFinalizationResult(BaseModel):

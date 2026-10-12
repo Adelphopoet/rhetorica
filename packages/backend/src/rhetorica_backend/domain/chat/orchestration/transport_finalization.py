@@ -76,6 +76,7 @@ class SessionFlowTransportFinalizationInputFactory:
             llm_usages=flow.llm_usages,
             history_persistence=flow.history_persistence,
             transport_events=transport_events,
+            persisted_user_message_id=flow.persisted_user_message_id,
         )
 
 
@@ -126,10 +127,23 @@ class PostAssemblyTransportFinalizationService(Generic[TTransportResult]):
         *,
         finalization_input: TransportFinalizationInput,
     ) -> TTransportResult:
+        self._persist_token_usage(finalization_input=finalization_input)
         history_result = self._persist_history(finalization_input=finalization_input)
         return self._adapter.build_result(
             finalization_input=finalization_input,
             history_result=history_result,
+        )
+
+    def _persist_token_usage(
+        self,
+        *,
+        finalization_input: TransportFinalizationInput,
+    ) -> None:
+        if not finalization_input.conversation_id or not finalization_input.llm_usages:
+            return
+        self._history_persistence_service.add_token_usage(
+            conversation_id=finalization_input.conversation_id,
+            llm_usages=finalization_input.llm_usages,
         )
 
     def _persist_history(
@@ -145,6 +159,8 @@ class PostAssemblyTransportFinalizationService(Generic[TTransportResult]):
             conversation_id=decision.conversation_id,
             request=finalization_input.request,
             turn=finalization_input.turn,
+            persist_user_message=finalization_input.persisted_user_message_id is None,
+            persisted_user_message_id=finalization_input.persisted_user_message_id,
         )
         return HistoryPersistenceResult(
             decision=decision,

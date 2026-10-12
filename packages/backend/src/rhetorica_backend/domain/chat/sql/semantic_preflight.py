@@ -21,14 +21,29 @@ _UNSUPPORTED_FUNCTIONS: dict[str, set[str]] = {
 
 _UNSUPPORTED_SQL_PATTERNS: dict[str, tuple[tuple[str, str], ...]] = {
     "trino": (
-        (r"\bsystem\.tables\b", "Table 'system.tables' is ClickHouse-specific and not valid for Trino."),
-        (r"\bsystem\.columns\b", "Table 'system.columns' is ClickHouse-specific and not valid for Trino."),
+        (
+            r"\bsystem\.tables\b",
+            "Table 'system.tables' is ClickHouse-specific and not valid for Trino.",
+        ),
+        (
+            r"\bsystem\.columns\b",
+            "Table 'system.columns' is ClickHouse-specific and not valid for Trino.",
+        ),
         (r"\bprewhere\b", "Clause 'PREWHERE' is ClickHouse-specific and not valid for Trino."),
         (r"\blimit\s+by\b", "Clause 'LIMIT BY' is ClickHouse-specific and not valid for Trino."),
         (r"\btodate\s*\(", "Function 'toDate' is ClickHouse-specific and not valid for Trino."),
-        (r"\btodatetime\s*\(", "Function 'toDateTime' is ClickHouse-specific and not valid for Trino."),
-        (r"\buniqexact\s*\(", "Function 'uniqExact' is ClickHouse-specific and not valid for Trino."),
-        (r"\barrayjoin\s*\(", "Function 'arrayJoin' is ClickHouse-specific and not valid for Trino."),
+        (
+            r"\btodatetime\s*\(",
+            "Function 'toDateTime' is ClickHouse-specific and not valid for Trino.",
+        ),
+        (
+            r"\buniqexact\s*\(",
+            "Function 'uniqExact' is ClickHouse-specific and not valid for Trino.",
+        ),
+        (
+            r"\barrayjoin\s*\(",
+            "Function 'arrayJoin' is ClickHouse-specific and not valid for Trino.",
+        ),
     ),
 }
 
@@ -137,7 +152,10 @@ class SemanticSqlPreflightService:
                 or [
                     SqlPreflightError(
                         code="sql_parse_failed",
-                        message=self._parse_error_message(inspection.parse_error),
+                        message=self._parse_error_message(
+                            inspection.parse_error,
+                            dialect=dialect,
+                        ),
                     )
                 ],
             )
@@ -167,20 +185,37 @@ class SemanticSqlPreflightService:
                 referenced_tables=referenced_tables,
                 referenced_columns=referenced_columns,
             )
-        builtin_tables = {
-            self._normalize_identifier(table)
-            for table in referenced_tables
-            if self._is_builtin_table(table)
-        }
-        references_only_builtin_tables = bool(referenced_tables) and (
-            len(builtin_tables) == len(referenced_tables)
+        references_only_builtin_tables = self._references_only_builtin_tables(
+            parsed=parsed,
+            engine=engine,
+            referenced_tables=referenced_tables,
         )
+        if not referenced_tables:
+            if (
+                self._distributed_builtin_table_function_targets(parsed)
+                and not references_only_builtin_tables
+            ):
+                return SqlPreflightResult(
+                    status="uncertain",
+                    errors=[
+                        SqlPreflightError(
+                            code="metadata_context_missing",
+                            message=(
+                                "Metadata context is empty; cannot verify table/column references."
+                            ),
+                        )
+                    ],
+                    referenced_tables=referenced_tables,
+                    referenced_columns=referenced_columns,
+                )
+            return SqlPreflightResult(
+                status="fail" if errors else "pass",
+                errors=errors,
+                referenced_tables=referenced_tables,
+                referenced_columns=referenced_columns,
+            )
 
-        if (
-            not context_tables
-            and not metadata_table_columns
-            and not references_only_builtin_tables
-        ):
+        if not context_tables and not metadata_table_columns and not references_only_builtin_tables:
             return SqlPreflightResult(
                 status="uncertain",
                 errors=[
@@ -217,16 +252,12 @@ class SemanticSqlPreflightService:
                 errors.append(
                     SqlPreflightError(
                         code="missing_table",
-                        message=(
-                            f"Table '{reference.identifier}' is missing in metadata context."
-                        ),
+                        message=(f"Table '{reference.identifier}' is missing in metadata context."),
                         identifier=reference.identifier,
                     )
                 )
                 continue
-            resolved_tables[self._normalize_identifier(reference.identifier)] = (
-                resolved_table
-            )
+            resolved_tables[self._normalize_identifier(reference.identifier)] = resolved_table
 
         cross_database_error = self._cross_database_reference_error(
             resolved_tables=resolved_tables.values(),
@@ -257,8 +288,7 @@ class SemanticSqlPreflightService:
         if (
             requested_connector_name
             and selected_connector_name
-            and requested_connector_name.strip().lower()
-            != selected_connector_name.strip().lower()
+            and requested_connector_name.strip().lower() != selected_connector_name.strip().lower()
         ):
             errors.append(
                 SqlPreflightError(
@@ -321,10 +351,13 @@ class SemanticSqlPreflightService:
             return _SqlParseOutcome(expression=None, error=str(exc))
 
     @staticmethod
-    def _parse_error_message(parse_error: str | None) -> str:
+    def _parse_error_message(parse_error: str | None, *, dialect: str | None = None) -> str:
+        suffix = ""
+        if dialect and dialect.strip().lower() == "trino":
+            suffix = " For Trino executable SQL, use catalog.schema.table."
         if not parse_error:
-            return "Unable to parse SQL for semantic preflight."
-        return f"Unable to parse SQL for semantic preflight: {parse_error}"
+            return "Unable to parse SQL for semantic preflight." + suffix
+        return f"Unable to parse SQL for semantic preflight: {parse_error}{suffix}"
 
     @staticmethod
     def _build_scope(parsed: exp.Expression) -> Scope | None:
@@ -526,7 +559,7 @@ class SemanticSqlPreflightService:
                 continue
             return None
         parts = [
-            part.strip("`\"")
+            part.strip('`"')
             for part in (source_table.catalog, source_table.db, source_table.name)
             if isinstance(part, str) and part.strip()
         ]
@@ -675,9 +708,7 @@ class SemanticSqlPreflightService:
                     errors.append(
                         SqlPreflightError(
                             code="missing_column",
-                            message=(
-                                f"Column '{column_name}' was not found in referenced tables."
-                            )
+                            message=(f"Column '{column_name}' was not found in referenced tables.")
                             + cls._format_suggestion_suffix(suggestions),
                             identifier=column_name,
                             table=table_hint,
@@ -760,9 +791,7 @@ class SemanticSqlPreflightService:
                     errors.append(
                         SqlPreflightError(
                             code="missing_column",
-                            message=(
-                                f"Column '{column_name}' is missing in table '{resolved}'."
-                            )
+                            message=(f"Column '{column_name}' is missing in table '{resolved}'.")
                             + cls._format_suggestion_suffix(suggestions),
                             identifier=column_name,
                             table=resolved,
@@ -804,9 +833,7 @@ class SemanticSqlPreflightService:
                 errors.append(
                     SqlPreflightError(
                         code="missing_column",
-                        message=(
-                            f"Column '{column_name}' was not found in referenced tables."
-                        )
+                        message=(f"Column '{column_name}' was not found in referenced tables.")
                         + cls._format_suggestion_suffix(suggestions),
                         identifier=column_name,
                         table=table_hint,
@@ -842,24 +869,18 @@ class SemanticSqlPreflightService:
         if len(database_scopes) <= 1:
             return None
 
-        scope_list = sorted(
-            {
-                f"{mapping['service']}.{mapping['database']}"
-                for mapping in (
-                    cls._table_mapping_from_fqn(table)
-                    for tables in database_scopes.values()
-                    for table in tables
-                )
-                if mapping is not None
-            }
-        )
-        example_tables = sorted(
-            {
-                table
+        scope_list = sorted({
+            f"{mapping['service']}.{mapping['database']}"
+            for mapping in (
+                cls._table_mapping_from_fqn(table)
                 for tables in database_scopes.values()
                 for table in tables
-            }
-        )[:4]
+            )
+            if mapping is not None
+        })
+        example_tables = sorted({table for tables in database_scopes.values() for table in tables})[
+            :4
+        ]
         return SqlPreflightError(
             code="cross_database_reference",
             message=(
@@ -918,6 +939,83 @@ class SemanticSqlPreflightService:
     @classmethod
     def _is_builtin_table(cls, table: str) -> bool:
         return cls._is_builtin_table_name(cls._normalize_identifier(table))
+
+    @classmethod
+    def _references_only_builtin_tables(
+        cls,
+        *,
+        parsed: exp.Expression,
+        engine: str,
+        referenced_tables: list[str],
+    ) -> bool:
+        builtin_tables = {
+            cls._normalize_identifier(table)
+            for table in referenced_tables
+            if cls._is_builtin_table(table)
+        }
+        if referenced_tables:
+            return len(builtin_tables) == len(referenced_tables)
+
+        if engine.strip().lower() != "clickhouse":
+            return False
+
+        function_targets = cls._distributed_builtin_table_function_targets(parsed)
+        return bool(function_targets) and all(
+            cls._is_builtin_table(target) for target in function_targets
+        )
+
+    @classmethod
+    def _distributed_builtin_table_function_targets(
+        cls,
+        parsed: exp.Expression,
+    ) -> list[str]:
+        targets: list[str] = []
+        for table in parsed.find_all(exp.Table):
+            function = table.this
+            if not isinstance(function, exp.Anonymous):
+                continue
+            function_name = str(function.this).strip().lower()
+            if function_name not in {"cluster", "clusterallreplicas", "remote", "remotesecure"}:
+                continue
+            expressions = list(function.expressions)
+            target = cls._table_function_target_from_expressions(expressions)
+            if target is not None:
+                targets.append(target)
+        return targets
+
+    @classmethod
+    def _table_function_target_from_expressions(
+        cls,
+        expressions: list[exp.Expression],
+    ) -> str | None:
+        if len(expressions) < 2:
+            return None
+        compact_target = cls._target_from_column_expression(expressions[1])
+        if compact_target is not None:
+            return compact_target
+        if len(expressions) < 3:
+            return None
+        database = cls._target_from_string_literal(expressions[1])
+        table = cls._target_from_string_literal(expressions[2])
+        if database is None or table is None:
+            return None
+        return cls._join_identifier_parts([database, table])
+
+    @classmethod
+    def _target_from_column_expression(cls, expression: exp.Expression) -> str | None:
+        if not isinstance(expression, exp.Column):
+            return None
+        return cls._join_identifier_parts([
+            cls._optional_identifier(expression.table),
+            cls._optional_identifier(expression.name),
+        ])
+
+    @staticmethod
+    def _target_from_string_literal(expression: exp.Expression) -> str | None:
+        if not isinstance(expression, exp.Literal) or not expression.is_string:
+            return None
+        value = expression.this
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
     @staticmethod
     def _is_builtin_table_name(table: str) -> bool:
@@ -987,8 +1085,7 @@ class SemanticSqlPreflightService:
             # Use word-boundary regex to prevent substring matches
             # e.g., "orders" should NOT match "fraud_orders"
             is_authorized = any(
-                re.search(rf"\b{re.escape(table_ref)}\b", source.lower())
-                is not None
+                re.search(rf"\b{re.escape(table_ref)}\b", source.lower()) is not None
                 for source in metric_source_tables
             )
             if not is_authorized:
@@ -1017,23 +1114,29 @@ class SemanticSqlPreflightService:
             # Find the resolved table from metadata
             resolved_table = self._resolve_table_fqn(
                 table_ref,
-                {
-                    self._normalize_identifier(t): t
-                    for t in context_tables
-                    if t and t.strip()
-                },
+                {self._normalize_identifier(t): t for t in context_tables if t and t.strip()},
             )
             if resolved_table is None:
                 resolved_table = table_ref
 
             # Check if this column is allowed for the metric
-            if (
-                col_name not in normalized_allowed
-                and col_name not in {
-                    "as", "distinct", "count", "sum", "avg", "min", "max",
-                    "and", "or", "not", "in", "between", "like", "is", "null",
-                }
-            ):
+            if col_name not in normalized_allowed and col_name not in {
+                "as",
+                "distinct",
+                "count",
+                "sum",
+                "avg",
+                "min",
+                "max",
+                "and",
+                "or",
+                "not",
+                "in",
+                "between",
+                "like",
+                "is",
+                "null",
+            }:
                 errors.append(
                     SqlPreflightError(
                         code="metric_dimension_violation",

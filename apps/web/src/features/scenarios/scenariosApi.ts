@@ -7,12 +7,12 @@ export type ScenarioToolPolicy = {
 
 export type ScenarioConnectorBindings = {
   llm_connector_name: string | null;
-  metadata_connector_name: string | null;
   database_connector_name: string | null;
   run_sql: boolean | null;
 };
 
 export type ScenarioDefinition = {
+  execution_kind?: "legacy" | "workflow";
   id: string;
   slug: string;
   workspace_id: string;
@@ -67,7 +67,7 @@ function parseDetail(detail: unknown, fallbackStatus: number): never {
   if (typeof detail === "string" && detail.length > 0) {
     throw new Error(detail);
   }
-  throw new Error(`Request failed with status ${fallbackStatus}`);
+  throw new Error(`Запрос не выполнен (${fallbackStatus}). Проверьте настройки и повторите`);
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {

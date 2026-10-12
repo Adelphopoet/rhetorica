@@ -1,12 +1,12 @@
 import type { AnalysisDocument } from "@/features/analysis/types";
 import type { VisualizationSpec } from "@/features/charts";
+import type { FileArtifactRef } from "@/features/files/fileApi";
 
 export type StreamEventType =
   | "thinking"
   | "tool_call_start"
   | "tool_call_end"
   | "execution_status"
-  | "runtime_state"
   | "chunk"
   | "done"
   | "error";
@@ -22,8 +22,10 @@ export type ClaimVerificationStatus = "verified" | "unverified";
 export type EvidenceType =
   | "execution_result"
   | "metadata_entity"
+  | "gitlab_file"
+  | "airflow_runtime"
   | "rag_insight"
-  | "confluence_page";
+  | "internal_documentation";
 
 export interface AnswerClaim {
   claim_id: string;
@@ -147,9 +149,6 @@ export interface SemanticGrounding {
 export interface RuntimeContextTrace {
   metadata_table_columns: Record<string, string[]>;
   semantic_grounding?: SemanticGrounding | null;
-  analysis_plan?: AnalysisPlan | null;
-  worker_results?: AnalysisWorkerResult[];
-  checkpoint_digest?: AnalysisCheckpointDigest | null;
 }
 
 export interface CapabilityTrace {
@@ -170,6 +169,7 @@ interface BaseStreamEvent {
 export interface ThinkingEvent extends BaseStreamEvent {
   type: "thinking";
   content: string;
+  delta?: boolean;
 }
 
 export interface ToolCallStartEvent extends BaseStreamEvent {
@@ -196,13 +196,6 @@ export interface ExecutionStatusEvent extends BaseStreamEvent {
 export interface ChunkEvent extends BaseStreamEvent {
   type: "chunk";
   content: string;
-}
-
-export interface RuntimeStateEvent extends BaseStreamEvent {
-  type: "runtime_state";
-  analysis_plan?: AnalysisPlan | null;
-  worker_results?: AnalysisWorkerResult[];
-  checkpoint_digest?: AnalysisCheckpointDigest | null;
 }
 
 // Clarification types - matches backend contracts
@@ -236,9 +229,6 @@ export interface DoneEvent extends BaseStreamEvent {
   execution?: ExecuteSqlResponse | null;
   analysis_document?: AnalysisDocument | null;
   visualization?: VisualizationSpec | null;
-  analysis_plan?: AnalysisPlan | null;
-  worker_results?: AnalysisWorkerResult[];
-  checkpoint_digest?: AnalysisCheckpointDigest | null;
   selected_database_connector?: string;
   assistant_message_id?: string;
   metadata_sources: string[];
@@ -252,71 +242,7 @@ export interface DoneEvent extends BaseStreamEvent {
   warnings: string[];
   cancelled?: boolean;
   clarification_request?: ClarificationRequest | null;
-}
-
-export type AnalysisPlanStepStatus =
-  | "planned"
-  | "running"
-  | "done"
-  | "blocked"
-  | "failed"
-  | "cancelled";
-
-export interface AnalysisPlanStep {
-  id: string;
-  title: string;
-  status: AnalysisPlanStepStatus;
-  required_evidence: string[];
-  evidence_ids: string[];
-  blocker?: string | null;
-}
-
-export interface AnalysisPlan {
-  plan_id?: string;
-  goal: string;
-  status: "planned" | "running" | "blocked" | "completed" | "failed" | "cancelled";
-  steps: AnalysisPlanStep[];
-  required_evidence: string[];
-  open_questions: string[];
-  warnings: string[];
-}
-
-export interface AnalysisWorkerResult {
-  task_id: string;
-  goal: string;
-  status: "succeeded" | "failed" | "blocked" | "cancelled";
-  key_finding?: string | null;
-  evidence_ids: string[];
-  blocker?: string | null;
-  next_action?: string | null;
-  warnings: string[];
-}
-
-export interface AnalysisCheckpointDigest {
-  run_id: string;
-  plan_id?: string | null;
-  status: "planned" | "running" | "blocked" | "awaiting_user" | "completed" | "failed" | "cancelled";
-  active_step_id?: string | null;
-  completed_step_ids: string[];
-  blocked_step_id?: string | null;
-  budget_state?: {
-    pending_approval?: {
-      kind?: string;
-      tool_name?: string;
-      approval_token?: string;
-      step_id?: string;
-      connector_name?: string;
-      sql?: string;
-      reason?: string;
-    };
-    approved_approval_token?: string;
-    consumed_approval_token?: string;
-    [key: string]: unknown;
-  };
-  evidence_ids: string[];
-  blocker?: string | null;
-  next_action?: string | null;
-  warnings: string[];
+  files?: FileArtifactRef[];
 }
 
 export interface ErrorEvent extends BaseStreamEvent {
@@ -331,7 +257,6 @@ export type StreamEvent =
   | ToolCallStartEvent
   | ToolCallEndEvent
   | ExecutionStatusEvent
-  | RuntimeStateEvent
   | ChunkEvent
   | DoneEvent
   | ErrorEvent;
@@ -375,9 +300,6 @@ export interface StreamingMessage {
   toolCalls: ToolCallEntry[];
   executionStatuses: ExecutionStatusEntry[];
   payload?: DoneEvent;
-  analysisPlan?: AnalysisPlan | null;
-  checkpointDigest?: AnalysisCheckpointDigest | null;
-  workerResults?: AnalysisWorkerResult[];
   timestamp: Date;
   isStreaming: boolean;
   isComplete: boolean;

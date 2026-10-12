@@ -11,7 +11,6 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
 from rhetorica_backend.contracts.analysis_document import AnalysisChartBlock, AnalysisDocument
 from rhetorica_backend.contracts.chat import ChatAskResponse
 from rhetorica_backend.contracts.execution import (
@@ -27,7 +26,12 @@ from rhetorica_backend.contracts.export import (
     AnalysisScenarioProvenance,
     AnalysisSourceMetadata,
 )
-from rhetorica_backend.contracts.visualization import VisualizationKind, VisualizationSpec
+from rhetorica_backend.contracts.visualization import VisualizationSpec
+from rhetorica_backend.domain.exports.chart_renderer import (
+    ChartRenderer,
+    ChartRenderRequest,
+    PlotlyChartRenderer,
+)
 from rhetorica_backend.domain.results.analysis_document_builder import (
     primary_visualization_from_document,
 )
@@ -42,25 +46,6 @@ class RenderedAnalysisExport:
     filename: str
     content_type: str
     content: bytes
-
-
-@dataclass(frozen=True)
-class _ChartSeries:
-    name: str
-    values: list[float | None]
-    color: str
-
-
-@dataclass(frozen=True)
-class _CartesianChartSnapshot:
-    title: str
-    summary: str | None
-    x_axis_label: str | None
-    y_axis_label: str | None
-    labels: list[str]
-    series: list[_ChartSeries]
-    mode: str
-    stacked: bool
 
 
 class AnalysisExportService:
@@ -258,6 +243,9 @@ class AnalysisExportService:
     }
     """
 
+    def __init__(self, *, chart_renderer: ChartRenderer | None = None) -> None:
+        self._chart_renderer = chart_renderer or PlotlyChartRenderer()
+
     def build_bundle(
         self,
         *,
@@ -380,6 +368,88 @@ class AnalysisExportService:
             export_metadata=AnalysisExportMetadata(generated_at=datetime.now(tz=UTC)),
         )
         return self._render_chart_png(bundle)
+
+    def render_chat_response_chart_pngs(
+        self,
+        *,
+        response: ChatAskResponse,
+        workspace_id: str,
+        question: str,
+    ) -> list[bytes]:
+        """Render every chart block from an in-memory chat response."""
+        chart_blocks = [
+            block
+            for block in (response.analysis_document.blocks if response.analysis_document else [])
+            if isinstance(block, AnalysisChartBlock)
+        ]
+        if not chart_blocks:
+            chart_png = self.render_chat_response_chart_png(
+                response=response,
+                workspace_id=workspace_id,
+                question=question,
+            )
+            return [chart_png] if chart_png is not None else []
+
+        rendered: list[bytes] = []
+        for block in chart_blocks:
+            preview = block.preview
+            if preview is None:
+                preview = response.execution.preview if response.execution is not None else QueryPreview()
+            bundle = self._chat_response_export_bundle(
+                response=response,
+                workspace_id=workspace_id,
+                question=question,
+                preview=preview,
+                analysis_document=None,
+                visualization=block.visualization,
+            )
+            chart_png = self._render_chart_png(bundle)
+            if chart_png is not None:
+                rendered.append(chart_png)
+        return rendered
+
+    def _chat_response_export_bundle(
+        self,
+        *,
+        response: ChatAskResponse,
+        workspace_id: str,
+        question: str,
+        preview: QueryPreview,
+        analysis_document: AnalysisDocument | None,
+        visualization: VisualizationSpec | None,
+    ) -> AnalysisExportBundle:
+        return AnalysisExportBundle(
+            question=question,
+            answer_markdown=response.answer,
+            generated_sql=response.generated_sql,
+            execution_summary=AnalysisExecutionSummary(
+                execution_id=response.execution.execution_id if response.execution else None,
+                status=response.execution.status if response.execution else None,
+                engine=response.execution.engine if response.execution else None,
+                row_count=response.execution.row_count if response.execution else None,
+                duration_ms=response.execution.duration_ms if response.execution else None,
+                query_id=response.execution.query_id if response.execution else None,
+                error_message=response.execution.error_message if response.execution else None,
+                warnings=response.execution.warnings if response.execution else [],
+            ),
+            preview=preview,
+            analysis_document=analysis_document,
+            visualization=visualization,
+            claims=response.claims,
+            evidence=response.evidence,
+            claim_evidence_links=response.claim_evidence_links,
+            source_metadata=AnalysisSourceMetadata(
+                workspace_id=workspace_id,
+                conversation_id=response.conversation_id or "mattermost",
+                assistant_message_id=response.assistant_message_id or "mattermost",
+                message_created_at=datetime.now(tz=UTC),
+                selected_database_connector=response.selected_database_connector,
+                metadata_sources=response.metadata_sources,
+                context_tables=response.context_tables,
+            ),
+            scenario_provenance=AnalysisScenarioProvenance(),
+            export_metadata=AnalysisExportMetadata(generated_at=datetime.now(tz=UTC)),
+        )
 
     def render_html(self, bundle: AnalysisExportBundle) -> str:
         """Render a standalone HTML analyst report."""
@@ -628,7 +698,7 @@ class AnalysisExportService:
         chart_png = self._render_chart_png(bundle)
         if chart_png is not None:
             story.append(Paragraph("Visualization", heading_style))
-            story.append(PlatypusImage(BytesIO(chart_png), width=516, height=237))
+            story.append(PlatypusImage(BytesIO(chart_png), width=516, height=290))
             story.append(Spacer(1, 10))
 
         self._append_pdf_markdown_section(
@@ -1055,215 +1125,15 @@ class AnalysisExportService:
         return f"## Visualization\n\n{chart_html}"
 
     def _render_chart_png(self, bundle: AnalysisExportBundle) -> bytes | None:
-        snapshot = self._build_cartesian_chart_snapshot(bundle)
-        if snapshot is None:
-            return None
-
-        width = 1400
-        height = 760
-        image = Image.new("RGBA", (width, height), "#fbfdff")
-        draw = ImageDraw.Draw(image)
-        title_font = self._image_font(30)
-        body_font = self._image_font(17)
-        small_font = self._image_font(14)
-        left = 100
-        right = width - 72
-        header_y = 32
-        title_lines = self._wrap_text_to_width(
-            draw=draw,
-            text=snapshot.title,
-            font=title_font,
-            max_width=right - left,
-            max_lines=2,
-        )
-        title_line_height = self._text_height(draw=draw, text="Ag", font=title_font)
-        header_bottom = header_y + len(title_lines) * title_line_height + max(
-            0,
-            len(title_lines) - 1,
-        ) * 6
-        if snapshot.summary:
-            summary_lines = self._wrap_text_to_width(
-                draw=draw,
-                text=snapshot.summary,
-                font=body_font,
-                max_width=right - left,
-                max_lines=2,
-            )
-            summary_line_height = self._text_height(draw=draw, text="Ag", font=body_font)
-            header_bottom += (
-                12
-                + len(summary_lines) * summary_line_height
-                + max(0, len(summary_lines) - 1) * 5
-            )
-        top = max(128, int(header_bottom + 26))
-        bottom = height - 150
-        plot_width = right - left
-        plot_height = bottom - top
-
-        draw.rounded_rectangle(
-            [(0, 0), (width - 1, height - 1)],
-            radius=28,
-            fill="#fbfdff",
-            outline="#dbe6f5",
-            width=2,
-        )
-        header_bottom = self._draw_wrapped_text(
-            draw=draw,
-            xy=(left, header_y),
-            text=snapshot.title,
-            font=title_font,
-            fill="#182433",
-            max_width=right - left,
-            max_lines=2,
-            line_gap=6,
-        )
-        if snapshot.summary:
-            self._draw_wrapped_text(
-                draw=draw,
-                xy=(left, header_bottom + 12),
-                text=snapshot.summary,
-                font=body_font,
-                fill="#5d6b82",
-                max_width=right - left,
-                max_lines=2,
-                line_gap=5,
-            )
-
-        draw.rounded_rectangle(
-            [(left - 18, top - 18), (right + 18, bottom + 18)],
-            radius=24,
-            fill="#ffffff",
-            outline="#dbe6f5",
-            width=2,
-        )
-
-        max_value = max(
-            (
-                self._stacked_max(snapshot.series, len(snapshot.labels))
-                if snapshot.stacked
-                else max((value for item in snapshot.series for value in item.values if value is not None), default=0.0)
-            ),
-            0.0,
-        )
-        if max_value <= 0:
-            return None
-
-        for tick in range(6):
-            ratio = tick / 5
-            y = bottom - ratio * plot_height
-            draw.line([(left, y), (right, y)], fill="#e5edf8", width=2)
-            label = self._format_numeric_tick(max_value * ratio)
-            bbox = draw.textbbox((0, 0), label, font=small_font)
-            draw.text((left - 16 - (bbox[2] - bbox[0]), y - 8), label, fill="#6b7b93", font=small_font)
-
-        draw.line([(left, top), (left, bottom)], fill="#bfd0e8", width=3)
-        draw.line([(left, bottom), (right, bottom)], fill="#bfd0e8", width=3)
-
-        if snapshot.mode == "bar":
-            self._draw_bar_chart(
-                draw=draw,
-                snapshot=snapshot,
-                left=left,
-                bottom=bottom,
-                plot_width=plot_width,
-                plot_height=plot_height,
-            )
-        else:
-            self._draw_line_chart(
-                draw=draw,
-                snapshot=snapshot,
-                left=left,
-                bottom=bottom,
-                plot_width=plot_width,
-                plot_height=plot_height,
-            )
-
-        step = plot_width / max(len(snapshot.labels), 1)
-        for index, label in enumerate(snapshot.labels):
-            x = left + (index + 0.5) * step
-            clipped = label[:14] + "…" if len(label) > 15 else label
-            bbox = draw.textbbox((0, 0), clipped, font=small_font)
-            draw.text((x - (bbox[2] - bbox[0]) / 2, bottom + 18), clipped, fill="#6b7b93", font=small_font)
-
-        legend_y = height - 84
-        cursor_x = left
-        for series in snapshot.series:
-            if cursor_x > right - 140:
-                break
-            draw.rounded_rectangle(
-                [(cursor_x, legend_y), (cursor_x + 22, legend_y + 22)],
-                radius=7,
-                fill=series.color,
-                outline=series.color,
-            )
-            series_label = self._truncate_text_to_width(
-                draw=draw,
-                text=series.name,
-                font=body_font,
-                max_width=210,
-            )
-            draw.text(
-                (cursor_x + 32, legend_y - 1),
-                series_label,
-                fill="#30445f",
-                font=body_font,
-            )
-            cursor_x += 260
-
-        footer = "Snapshot built from stored execution preview."
-        if snapshot.x_axis_label or snapshot.y_axis_label:
-            footer = (
-                f"X: {snapshot.x_axis_label or '-'}  |  "
-                f"Y: {snapshot.y_axis_label or '-'}"
-            )
-        draw.text((left, height - 42), footer, fill="#7c8aa0", font=small_font)
-
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue()
-
-    def _build_cartesian_chart_snapshot(
-        self,
-        bundle: AnalysisExportBundle,
-    ) -> _CartesianChartSnapshot | None:
         spec = bundle.visualization
-        preview = self._chart_preview(bundle)
-        if spec is None or not preview.columns or not preview.rows:
+        if spec is None:
             return None
-
-        series = self._build_chart_series(spec, preview)
-        if not series:
-            return None
-
-        mode = "line"
-        if spec.kind in {
-            VisualizationKind.BAR,
-            VisualizationKind.BAR_GROUPED,
-            VisualizationKind.BAR_STACKED,
-            VisualizationKind.DONUT,
-            VisualizationKind.PIE,
-            VisualizationKind.FUNNEL,
-            VisualizationKind.HEATMAP,
-            VisualizationKind.TREEMAP,
-            VisualizationKind.WATERFALL,
-            VisualizationKind.HISTOGRAM,
-        }:
-            mode = "bar"
-
-        stacked = spec.kind in {
-            VisualizationKind.AREA_STACKED,
-            VisualizationKind.BAR_STACKED,
-        } or bool(spec.encoding.stack)
-
-        return _CartesianChartSnapshot(
-            title=spec.title or self._build_title(bundle),
-            summary=spec.summary or spec.description or spec.rationale.why_kind,
-            x_axis_label=spec.x_axis_label,
-            y_axis_label=spec.y_axis_label,
-            labels=self._build_chart_labels(spec, preview),
-            series=series,
-            mode=mode,
-            stacked=stacked,
+        return self._chart_renderer.render(
+            ChartRenderRequest(
+                spec=spec,
+                preview=self._chart_preview(bundle),
+                fallback_title=self._build_title(bundle),
+            )
         )
 
     def _chart_preview(self, bundle: AnalysisExportBundle) -> QueryPreview:
@@ -1271,354 +1141,6 @@ class AnalysisExportService:
         if chart_block is not None and chart_block.preview is not None and chart_block.preview.columns:
             return chart_block.preview
         return bundle.preview
-
-    def _build_chart_labels(
-        self,
-        spec: VisualizationSpec,
-        preview: QueryPreview,
-    ) -> list[str]:
-        x_index = self._find_column_index(preview, spec.encoding.x)
-        if x_index is None:
-            return []
-        labels: list[str] = []
-        seen: set[str] = set()
-        for row in preview.rows:
-            label = self._stringify_cell(row[x_index])
-            if label in seen:
-                continue
-            seen.add(label)
-            labels.append(label)
-        return labels
-
-    def _build_chart_series(
-        self,
-        spec: VisualizationSpec,
-        preview: QueryPreview,
-    ) -> list[_ChartSeries]:
-        labels = self._build_chart_labels(spec, preview)
-        if not labels:
-            return []
-
-        colors = ["#2563eb", "#0f766e", "#d97706", "#b91c1c", "#7c3aed", "#0ea5e9"]
-        x_index = self._find_column_index(preview, spec.encoding.x)
-        if x_index is None:
-            return []
-
-        series_index = self._find_column_index(preview, spec.encoding.series)
-        if series_index is not None and spec.encoding.y:
-            metric_index = self._find_column_index(preview, spec.encoding.y[0])
-            if metric_index is None:
-                return []
-            values_by_series: dict[str, dict[str, float]] = {}
-            series_order: list[str] = []
-            for row in preview.rows:
-                label = self._stringify_cell(row[x_index])
-                series_name = self._stringify_cell(row[series_index])
-                value = self._to_float(row[metric_index])
-                if value is None:
-                    continue
-                if series_name not in values_by_series:
-                    values_by_series[series_name] = {}
-                    series_order.append(series_name)
-                values_by_series[series_name][label] = values_by_series[series_name].get(label, 0.0) + value
-            return [
-                _ChartSeries(
-                    name=name,
-                    values=[values_by_series[name].get(label) for label in labels],
-                    color=colors[index % len(colors)],
-                )
-                for index, name in enumerate(series_order)
-            ]
-
-        series: list[_ChartSeries] = []
-        for index, name in enumerate(spec.encoding.y):
-            column_index = self._find_column_index(preview, name)
-            if column_index is None:
-                continue
-            values_by_label: dict[str, float] = {}
-            for row in preview.rows:
-                label = self._stringify_cell(row[x_index])
-                value = self._to_float(row[column_index])
-                if value is None:
-                    continue
-                values_by_label[label] = values_by_label.get(label, 0.0) + value
-            series.append(
-                _ChartSeries(
-                    name=self._humanize_label(name),
-                    values=[values_by_label.get(label) for label in labels],
-                    color=colors[index % len(colors)],
-                )
-            )
-        return series
-
-    def _draw_line_chart(
-        self,
-        *,
-        draw: ImageDraw.ImageDraw,
-        snapshot: _CartesianChartSnapshot,
-        left: int,
-        bottom: int,
-        plot_width: int,
-        plot_height: int,
-    ) -> None:
-        max_value = self._stacked_max(snapshot.series, len(snapshot.labels)) if snapshot.stacked else max(
-            (value for item in snapshot.series for value in item.values if value is not None),
-            default=0.0,
-        )
-        if max_value <= 0:
-            return
-
-        step = plot_width / max(len(snapshot.labels), 1)
-        running = [0.0] * len(snapshot.labels)
-        for series in snapshot.series:
-            points: list[tuple[float, float]] = []
-            base_points: list[tuple[float, float]] = []
-            for index, value in enumerate(series.values):
-                current = value or 0.0
-                base = running[index] if snapshot.stacked else 0.0
-                top_value = base + current if snapshot.stacked else current
-                x = left + (index + 0.5) * step
-                y = bottom - (top_value / max_value) * plot_height
-                points.append((x, y))
-                if snapshot.stacked:
-                    base_y = bottom - (base / max_value) * plot_height
-                    base_points.append((x, base_y))
-                    running[index] = top_value
-
-            if snapshot.stacked:
-                polygon = points + list(reversed(base_points))
-                draw.polygon(polygon, fill=self._hex_to_rgba(series.color, 70), outline=series.color)
-            if len(points) >= 2:
-                draw.line(points, fill=series.color, width=6)
-            for x, y in points:
-                draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=series.color, outline="#ffffff", width=2)
-
-    def _draw_bar_chart(
-        self,
-        *,
-        draw: ImageDraw.ImageDraw,
-        snapshot: _CartesianChartSnapshot,
-        left: int,
-        bottom: int,
-        plot_width: int,
-        plot_height: int,
-    ) -> None:
-        max_value = self._stacked_max(snapshot.series, len(snapshot.labels)) if snapshot.stacked else max(
-            (value for item in snapshot.series for value in item.values if value is not None),
-            default=0.0,
-        )
-        if max_value <= 0:
-            return
-
-        step = plot_width / max(len(snapshot.labels), 1)
-        if snapshot.stacked:
-            for label_index in range(len(snapshot.labels)):
-                x0 = left + label_index * step + step * 0.2
-                x1 = left + (label_index + 1) * step - step * 0.2
-                stack_bottom = bottom
-                for series in snapshot.series:
-                    value = series.values[label_index] or 0.0
-                    height = (value / max_value) * plot_height
-                    y0 = stack_bottom - height
-                    draw.rounded_rectangle((x0, y0, x1, stack_bottom), radius=9, fill=series.color)
-                    stack_bottom = y0
-            return
-
-        group_width = step * 0.72
-        bar_width = group_width / max(len(snapshot.series), 1)
-        for label_index in range(len(snapshot.labels)):
-            group_left = left + label_index * step + (step - group_width) / 2
-            for series_index, series in enumerate(snapshot.series):
-                value = series.values[label_index]
-                if value is None:
-                    continue
-                height = (value / max_value) * plot_height
-                x0 = group_left + series_index * bar_width
-                x1 = x0 + bar_width - 6
-                y0 = bottom - height
-                draw.rounded_rectangle((x0, y0, x1, bottom), radius=8, fill=series.color)
-
-    @staticmethod
-    def _find_column_index(preview: QueryPreview, name: str | None) -> int | None:
-        if name is None:
-            return None
-        try:
-            return preview.columns.index(name)
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _to_float(value: object) -> float | None:
-        if isinstance(value, bool):
-            return float(value)
-        if isinstance(value, int | float):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return float(value)
-            except ValueError:
-                return None
-        return None
-
-    @classmethod
-    def _image_font(cls, size: int) -> ImageFont.ImageFont:
-        font_path = cls._font_path()
-        if font_path is None:
-            return ImageFont.load_default()
-        return ImageFont.truetype(font_path, size=size)
-
-    @classmethod
-    def _draw_wrapped_text(
-        cls,
-        *,
-        draw: ImageDraw.ImageDraw,
-        xy: tuple[int, int],
-        text: str,
-        font: ImageFont.ImageFont,
-        fill: str,
-        max_width: int,
-        max_lines: int,
-        line_gap: int,
-    ) -> int:
-        x, y = xy
-        lines = cls._wrap_text_to_width(
-            draw=draw,
-            text=text,
-            font=font,
-            max_width=max_width,
-            max_lines=max_lines,
-        )
-        cursor_y = y
-        line_height = cls._text_height(draw=draw, text="Ag", font=font)
-        for line in lines:
-            draw.text((x, cursor_y), line, fill=fill, font=font)
-            cursor_y += line_height + line_gap
-        return cursor_y - line_gap if lines else y
-
-    @classmethod
-    def _wrap_text_to_width(
-        cls,
-        *,
-        draw: ImageDraw.ImageDraw,
-        text: str,
-        font: ImageFont.ImageFont,
-        max_width: int,
-        max_lines: int,
-    ) -> list[str]:
-        words = [word for word in text.replace("\n", " ").split(" ") if word]
-        if not words or max_lines <= 0:
-            return []
-
-        lines: list[str] = []
-        current = ""
-        for word in words:
-            candidate = f"{current} {word}".strip()
-            if cls._text_width(draw=draw, text=candidate, font=font) <= max_width:
-                current = candidate
-                continue
-            if current:
-                lines.append(current)
-                current = word
-            else:
-                lines.append(
-                    cls._truncate_text_to_width(
-                        draw=draw,
-                        text=word,
-                        font=font,
-                        max_width=max_width,
-                    )
-                )
-                current = ""
-            if len(lines) == max_lines:
-                break
-
-        if current and len(lines) < max_lines:
-            lines.append(current)
-
-        if len(lines) > max_lines:
-            lines = lines[:max_lines]
-        if words and len(lines) == max_lines:
-            consumed = " ".join(lines).removesuffix("...").strip()
-            original = " ".join(words)
-            if len(consumed) < len(original):
-                lines[-1] = cls._truncate_text_to_width(
-                    draw=draw,
-                    text=lines[-1],
-                    font=font,
-                    max_width=max_width,
-                )
-        return lines
-
-    @classmethod
-    def _truncate_text_to_width(
-        cls,
-        *,
-        draw: ImageDraw.ImageDraw,
-        text: str,
-        font: ImageFont.ImageFont,
-        max_width: int,
-    ) -> str:
-        if cls._text_width(draw=draw, text=text, font=font) <= max_width:
-            return text
-        suffix = "..."
-        available = max(0, max_width - cls._text_width(draw=draw, text=suffix, font=font))
-        clipped = text
-        while clipped and cls._text_width(draw=draw, text=clipped, font=font) > available:
-            clipped = clipped[:-1]
-        return f"{clipped.rstrip()}{suffix}" if clipped else suffix
-
-    @staticmethod
-    def _text_width(
-        *,
-        draw: ImageDraw.ImageDraw,
-        text: str,
-        font: ImageFont.ImageFont,
-    ) -> int:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[2] - bbox[0]
-
-    @staticmethod
-    def _text_height(
-        *,
-        draw: ImageDraw.ImageDraw,
-        text: str,
-        font: ImageFont.ImageFont,
-    ) -> int:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[3] - bbox[1]
-
-    @staticmethod
-    def _stacked_max(series: list[_ChartSeries], label_count: int) -> float:
-        if not series or label_count <= 0:
-            return 0.0
-        return max(
-            sum(item.values[index] or 0.0 for item in series)
-            for index in range(label_count)
-        )
-
-    @staticmethod
-    def _hex_to_rgba(value: str, alpha: int) -> tuple[int, int, int, int]:
-        normalized = value.lstrip("#")
-        if len(normalized) != 6:
-            return (37, 99, 235, alpha)
-        red = int(normalized[0:2], 16)
-        green = int(normalized[2:4], 16)
-        blue = int(normalized[4:6], 16)
-        return (red, green, blue, alpha)
-
-    @staticmethod
-    def _format_numeric_tick(value: float) -> str:
-        if value >= 1_000_000:
-            return f"{value / 1_000_000:.1f}M"
-        if value >= 1_000:
-            return f"{value / 1_000:.1f}K"
-        if value.is_integer():
-            return str(int(value))
-        return f"{value:.1f}"
-
-    @staticmethod
-    def _humanize_label(value: str) -> str:
-        return value.replace("_", " ").strip().title()
 
     @staticmethod
     @lru_cache(maxsize=1)

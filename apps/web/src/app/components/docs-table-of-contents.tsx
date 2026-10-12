@@ -49,8 +49,8 @@ export function DocsTableOfContents({ headings }: DocsTableOfContentsProps) {
 
   return (
     <aside className="hidden xl:block">
-      <div className="sticky top-4 rounded-[28px] border border-[#17253b] bg-[linear-gradient(180deg,rgba(9,15,28,0.96),rgba(7,11,20,0.9))] p-4 shadow-[0_24px_60px_rgba(0,0,0,0.28)]">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#6f88ac]">On This Page</p>
+      <div className="sticky top-4 rounded-[28px] border border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-page)/0.9))] p-4 shadow-[0_24px_60px_rgb(var(--color-shadow)/calc(0.28*var(--shadow-opacity-scale)))]">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted">На этой странице</p>
         <nav className="mt-4 max-h-[calc(100vh-140px)] overflow-y-auto pr-1">
           <ul className="space-y-1.5">
             {headings
@@ -62,8 +62,8 @@ export function DocsTableOfContents({ headings }: DocsTableOfContentsProps) {
                     className={cn(
                       "flex rounded-2xl px-3 py-2 text-sm leading-5 transition",
                       heading.id === activeId
-                        ? "bg-[#122039] text-[#f5f9ff]"
-                        : "text-[#97abc9] hover:bg-[#0d1728] hover:text-white"
+                        ? "bg-elevated text-primary"
+                        : "text-secondary hover:bg-surface hover:text-primary"
                     )}
                     style={{ paddingLeft: `${0.75 + (heading.level - 1) * 0.7}rem` }}
                   >

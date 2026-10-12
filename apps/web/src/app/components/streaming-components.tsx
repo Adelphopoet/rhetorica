@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, ChevronUp, Brain, Wrench, AlertCircle, CheckCircle2 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@rhetorica/ui";
+import { formatInMoscow } from "@/lib/dateTime";
 import type {
   ExecutionStatusEntry,
   ExecutionStatusValue,
@@ -28,23 +29,29 @@ export function ThinkingBlock({ content, timestamp, isCollapsed = false }: Think
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className="my-2 border border-[#2e3d59]/50 rounded-lg overflow-hidden bg-[#0a111d]/40"
+      className="my-2 border border-border-strong/50 rounded-lg overflow-hidden bg-surface/40"
     >
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-[#101c30]/60 hover:bg-[#101c30]/80 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 bg-elevated/60 hover:bg-elevated/80 transition-colors"
       >
-        <Brain className="h-4 w-4 text-[#7484a3]" />
-        <span className="text-xs font-medium text-[#7484a3] uppercase tracking-wider">
-          Thinking
+        <Brain className="h-4 w-4 text-muted" />
+        <span className="text-xs font-medium text-muted uppercase tracking-wider">
+          Ход рассуждений
         </span>
-        <span className="text-xs text-[#5da8ff]/60 ml-auto">
-          {timestamp ? new Date(timestamp).toLocaleTimeString("en-GB") : ""}
+        <span className="text-xs text-accent/60 ml-auto">
+          {timestamp
+            ? formatInMoscow(timestamp, {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              }) ?? ""
+            : ""}
         </span>
         {expanded ? (
-          <ChevronUp className="h-3 w-3 text-[#7484a3]" />
+          <ChevronUp className="h-3 w-3 text-muted" />
         ) : (
-          <ChevronDown className="h-3 w-3 text-[#7484a3]" />
+          <ChevronDown className="h-3 w-3 text-muted" />
         )}
       </button>
 
@@ -57,7 +64,7 @@ export function ThinkingBlock({ content, timestamp, isCollapsed = false }: Think
             transition={{ duration: 0.2 }}
             className="overflow-hidden"
           >
-            <div className="px-3 py-2.5 text-xs text-[#a9b8d4]/80 italic leading-relaxed border-t border-[#2e3d59]/30">
+            <div className="px-3 py-2.5 text-xs text-secondary/80 italic leading-relaxed border-t border-border-strong/30">
               {content}
             </div>
           </motion.div>
@@ -249,10 +256,10 @@ export function ToolCallCard({
     return Object.entries(args)
       .map(([key, value]) => {
         if (Array.isArray(value)) {
-          return `${key}: [${value.length} items]`;
+          return `${key}: [${value.length} элементов]`;
         }
         if (value && typeof value === "object") {
-          return `${key}: {${Object.keys(value).length} fields}`;
+          return `${key}: {${Object.keys(value).length} полей}`;
         }
         return `${key}: ${JSON.stringify(value)}`;
       })
@@ -273,45 +280,49 @@ export function ToolCallCard({
         "my-2 border rounded-lg overflow-hidden",
         isComplete
           ? success
-            ? "border-[#38c67d]/30 bg-[#0b1a12]/40"
-            : "border-[#ff6b6b]/30 bg-[#1a0b0b]/40"
-          : "border-[#5da8ff]/30 bg-[#0a1525]/40"
+            ? "border-success/30 bg-success-subtle/40"
+            : "border-danger/30 bg-danger-subtle/40"
+          : "border-accent/30 bg-surface/40"
       )}
     >
       <div className="flex items-center gap-2 px-3 py-2">
         {isComplete ? (
           success ? (
-            <CheckCircle2 className="h-4 w-4 text-[#38c67d]" />
+            <CheckCircle2 className="h-4 w-4 text-success" />
           ) : (
-            <AlertCircle className="h-4 w-4 text-[#ff6b6b]" />
+            <AlertCircle className="h-4 w-4 text-danger" />
           )
         ) : (
-          <Wrench className="h-4 w-4 text-[#5da8ff] animate-pulse" />
+          <Wrench className="h-4 w-4 text-accent animate-pulse" />
         )}
         <span className={cn(
           "text-xs font-medium",
           isComplete
             ? success
-              ? "text-[#38c67d]"
-              : "text-[#ff6b6b]"
-            : "text-[#5da8ff]"
+              ? "text-success"
+              : "text-danger"
+            : "text-accent"
         )}>
           {formatToolName(tool_name)}
         </span>
         <div className="ml-auto flex items-center gap-2">
           {displayTimestamp ? (
-            <span className="text-xs text-[#7484a3]">
-              {new Date(displayTimestamp).toLocaleTimeString("en-GB")}
+            <span className="text-xs text-muted">
+              {formatInMoscow(displayTimestamp, {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+              })}
             </span>
           ) : null}
           {!isComplete && (
-            <span className="text-xs text-[#5da8ff]/60 animate-pulse">
-              Running...
+            <span className="text-xs text-accent/60 animate-pulse">
+              Выполняется…
             </span>
           )}
         </div>
         {duration && (
-          <span className="text-xs text-[#7484a3] ml-2">
+          <span className="text-xs text-muted ml-2">
             {duration}s
           </span>
         )}
@@ -320,23 +331,23 @@ export function ToolCallCard({
       {(args || result_summary) && (
         <div className="px-3 pb-2">
           {args && (
-            <div className="text-xs text-[#7484a3] mb-1">
-              <span className="font-medium">Arguments:</span> {formatArgs(args)}
+            <div className="text-xs text-muted mb-1">
+              <span className="font-medium">Аргументы:</span> {formatArgs(args)}
             </div>
           )}
           {result_summary && (
             <div className={cn(
               "text-xs",
-              success ? "text-[#38c67d]/80" : "text-[#ff6b6b]/80"
+              success ? "text-success/80" : "text-danger/80"
             )}>
-              <span className="font-medium">Result:</span> {result_summary}
+              <span className="font-medium">Результат:</span> {result_summary}
             </div>
           )}
           {metadataScoring ? (
-            <div className="mt-3 space-y-3 rounded-lg border border-[#2e3d59]/40 bg-[#0a111d]/45 p-3">
+            <div className="mt-3 space-y-3 rounded-lg border border-border-strong/40 bg-surface/45 p-3">
               {metadataScoring.chosen_table_fqn ? (
-                <div className="text-xs text-[#d8e5ff]">
-                  <span className="font-medium text-[#9ec3ff]">Selected:</span>{" "}
+                <div className="text-xs text-primary">
+                  <span className="font-medium text-accent">Выбрано:</span>{" "}
                   {metadataScoring.chosen_table_fqn}
                 </div>
               ) : null}
@@ -348,52 +359,52 @@ export function ToolCallCard({
                     className={cn(
                       "rounded-md border px-2.5 py-2",
                       candidate.suspicious
-                        ? "border-[#5b302f] bg-[#1a0f10]/60"
-                        : "border-[#233654] bg-[#0d1828]/60"
+                        ? "border-danger-border bg-danger-subtle/60"
+                        : "border-border-strong bg-surface/60"
                     )}
                   >
                     <div className="flex items-center gap-2">
-                      <span className="rounded-full border border-[#35517d] bg-[#10213a] px-2 py-0.5 text-[11px] font-semibold text-[#9ec3ff]">
-                        Score {Math.round(candidate.relevance_score * 1000) / 1000}
+                      <span className="rounded-full border border-accent-border bg-elevated px-2 py-0.5 text-[11px] font-semibold text-accent">
+                        Оценка: {Math.round(candidate.relevance_score * 1000) / 1000}
                       </span>
                       {candidate.tier ? (
-                        <span className="text-[11px] uppercase tracking-wide text-[#7be4a9]">
+                        <span className="text-[11px] uppercase tracking-wide text-success">
                           {candidate.tier}
                         </span>
                       ) : null}
                       {candidate.certification ? (
-                        <span className="text-[11px] uppercase tracking-wide text-[#f5c06a]">
+                        <span className="text-[11px] uppercase tracking-wide text-warning">
                           {candidate.certification}
                         </span>
                       ) : null}
                     </div>
-                    <div className="mt-1 text-xs font-medium text-[#f4f7ff]">{candidate.fqn}</div>
+                    <div className="mt-1 text-xs font-medium text-primary">{candidate.fqn}</div>
                     {candidate.matched_on.length > 0 ? (
-                      <p className="mt-1 text-xs leading-5 text-[#c6d4ee]">
-                        matched on: {candidate.matched_on.join(", ")}
+                      <p className="mt-1 text-xs leading-5 text-primary">
+                        совпадения по: {candidate.matched_on.join(", ")}
                       </p>
                     ) : null}
                     {candidate.reason_codes.length > 0 ? (
-                      <p className="text-xs leading-5 text-[#8fa5c8]">
-                        reasons: {candidate.reason_codes.join(", ")}
+                      <p className="text-xs leading-5 text-secondary">
+                        причины: {candidate.reason_codes.join(", ")}
                       </p>
                     ) : null}
                     {[
-                      ...(candidate.owner_teams ?? []).map((item) => `team: ${item}`),
-                      ...(candidate.domains ?? []).map((item) => `domain: ${item}`),
-                      ...(candidate.glossary_terms ?? []).map((item) => `term: ${item}`),
-                      ...(candidate.related_metrics ?? []).map((item) => `metric: ${item}`),
+                      ...(candidate.owner_teams ?? []).map((item) => `команда: ${item}`),
+                      ...(candidate.domains ?? []).map((item) => `домен: ${item}`),
+                      ...(candidate.glossary_terms ?? []).map((item) => `термин: ${item}`),
+                      ...(candidate.related_metrics ?? []).map((item) => `метрика: ${item}`),
                     ].length > 0 ? (
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         {[
-                          ...(candidate.owner_teams ?? []).map((item) => `team: ${item}`),
-                          ...(candidate.domains ?? []).map((item) => `domain: ${item}`),
-                          ...(candidate.glossary_terms ?? []).map((item) => `term: ${item}`),
-                          ...(candidate.related_metrics ?? []).map((item) => `metric: ${item}`),
+                          ...(candidate.owner_teams ?? []).map((item) => `команда: ${item}`),
+                          ...(candidate.domains ?? []).map((item) => `домен: ${item}`),
+                          ...(candidate.glossary_terms ?? []).map((item) => `термин: ${item}`),
+                          ...(candidate.related_metrics ?? []).map((item) => `метрика: ${item}`),
                         ].slice(0, 8).map((label) => (
                           <span
                             key={label}
-                            className="rounded border border-[#314867] bg-[#101d31] px-1.5 py-0.5 text-[11px] text-[#a9b8d4]"
+                            className="rounded border border-border-strong bg-elevated px-1.5 py-0.5 text-[11px] text-secondary"
                           >
                             {label}
                           </span>
@@ -405,13 +416,13 @@ export function ToolCallCard({
                         className={cn(
                           "mt-2 text-xs leading-5",
                           candidate.quality_status === "failed" || candidate.quality_status === "aborted"
-                            ? "text-[#ff9a9a]"
-                            : "text-[#7be4a9]"
+                            ? "text-danger"
+                            : "text-success"
                         )}
                       >
-                        quality: {candidate.quality_status}
+                        качество: {candidate.quality_status}
                         {candidate.quality_summary
-                          ? ` (${candidate.quality_summary.success}/${candidate.quality_summary.total} passing)`
+                          ? ` (${candidate.quality_summary.success}/${candidate.quality_summary.total} успешно)`
                           : ""}
                       </p>
                     ) : null}
@@ -421,13 +432,13 @@ export function ToolCallCard({
             </div>
           ) : null}
           {optimizer ? (
-            <div className="mt-3 space-y-3 rounded-lg border border-[#2e3d59]/40 bg-[#0a111d]/45 p-3">
+            <div className="mt-3 space-y-3 rounded-lg border border-border-strong/40 bg-surface/45 p-3">
               {optimizer.rules_triggered.length > 0 ? (
                 <div className="flex flex-wrap gap-1.5">
                   {optimizer.rules_triggered.map((ruleId) => (
                     <span
                       key={ruleId}
-                      className="rounded-full border border-[#35517d] bg-[#10213a] px-2 py-0.5 text-[11px] text-[#9ec3ff]"
+                      className="rounded-full border border-accent-border bg-elevated px-2 py-0.5 text-[11px] text-accent"
                     >
                       {ruleId}
                     </span>
@@ -440,15 +451,15 @@ export function ToolCallCard({
                   {optimizer.findings.map((finding) => (
                     <div
                       key={finding.rule_id}
-                      className="rounded-md border border-[#3a2f22] bg-[#181209]/50 px-2.5 py-2"
+                      className="rounded-md border border-warning-border bg-warning-subtle/50 px-2.5 py-2"
                     >
                       <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-semibold uppercase tracking-wide text-[#f5c06a]">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-warning">
                           {finding.severity ?? "info"}
                         </span>
-                        <span className="text-xs font-medium text-[#f4f7ff]">{finding.title}</span>
+                        <span className="text-xs font-medium text-primary">{finding.title}</span>
                       </div>
-                      <p className="mt-1 text-xs leading-5 text-[#c6d4ee]">{finding.summary}</p>
+                      <p className="mt-1 text-xs leading-5 text-primary">{finding.summary}</p>
                     </div>
                   ))}
                 </div>
@@ -459,15 +470,15 @@ export function ToolCallCard({
                   {optimizer.recommended_actions.map((action) => (
                     <div
                       key={action.action_id}
-                      className="rounded-md border border-[#1f4d35] bg-[#0d1812]/60 px-2.5 py-2"
+                      className="rounded-md border border-success-border bg-success-subtle/60 px-2.5 py-2"
                     >
                       <div className="flex items-center gap-2">
-                        <span className="text-[11px] font-semibold uppercase tracking-wide text-[#7be4a9]">
-                          {action.applied ? "Applied" : "Suggested"}
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-success">
+                          {action.applied ? "Применено" : "Предложено"}
                         </span>
-                        <span className="text-xs font-medium text-[#f4f7ff]">{action.title}</span>
+                        <span className="text-xs font-medium text-primary">{action.title}</span>
                       </div>
-                      <p className="mt-1 text-xs leading-5 text-[#c6d4ee]">{action.summary}</p>
+                      <p className="mt-1 text-xs leading-5 text-primary">{action.summary}</p>
                     </div>
                   ))}
                 </div>
@@ -480,15 +491,15 @@ export function ToolCallCard({
       {args && (
         <button
           onClick={() => setExpanded(!expanded)}
-          className="w-full px-3 py-1.5 bg-[#0f1829]/60 hover:bg-[#0f1829]/80 transition-colors flex items-center justify-center gap-1"
+          className="w-full px-3 py-1.5 bg-elevated/60 hover:bg-elevated/80 transition-colors flex items-center justify-center gap-1"
         >
-          <span className="text-xs text-[#5da8ff]/80">
-            {expanded ? "Hide" : "Show"} arguments
+          <span className="text-xs text-accent/80">
+            {expanded ? "Скрыть" : "Показать"} аргументы
           </span>
           {expanded ? (
-            <ChevronUp className="h-3 w-3 text-[#5da8ff]" />
+            <ChevronUp className="h-3 w-3 text-accent" />
           ) : (
-            <ChevronDown className="h-3 w-3 text-[#5da8ff]" />
+            <ChevronDown className="h-3 w-3 text-accent" />
           )}
         </button>
       )}
@@ -500,9 +511,9 @@ export function ToolCallCard({
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="overflow-hidden border-t border-[#2e3d59]/30"
+            className="overflow-hidden border-t border-border-strong/30"
           >
-            <pre className="px-3 py-2 text-xs text-[#a9b8d4]/80 font-mono overflow-x-auto bg-[#0a111d]/40">
+            <pre className="px-3 py-2 text-xs text-secondary/80 font-mono overflow-x-auto bg-surface/40">
               {JSON.stringify(args, null, 2)}
             </pre>
           </motion.div>
@@ -524,20 +535,37 @@ export function ExecutionProgress({ statuses }: ExecutionProgressProps) {
 
   const latestStatus = statuses[statuses.length - 1];
 
+  const getStatusLabel = (status: ExecutionStatusValue) => {
+    switch (status) {
+      case "queued":
+        return "В очереди";
+      case "running":
+        return "Выполняется";
+      case "streaming_results":
+        return "Поток результатов";
+      case "done":
+        return "Завершено";
+      case "failed":
+        return "Не удалось";
+      default:
+        return status;
+    }
+  };
+
   const getStatusColor = (status: ExecutionStatusValue) => {
     switch (status) {
       case "queued":
-        return "text-[#7484a3]";
+        return "text-muted";
       case "running":
-        return "text-[#5da8ff]";
+        return "text-accent";
       case "streaming_results":
-        return "text-[#38c67d]";
+        return "text-success";
       case "done":
-        return "text-[#38c67d]";
+        return "text-success";
       case "failed":
-        return "text-[#ff6b6b]";
+        return "text-danger";
       default:
-        return "text-[#7484a3]";
+        return "text-muted";
     }
   };
 
@@ -563,21 +591,21 @@ export function ExecutionProgress({ statuses }: ExecutionProgressProps) {
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className="my-2 p-3 border border-[#2e3d59]/50 rounded-lg bg-[#0a111d]/40"
+      className="my-2 p-3 border border-border-strong/50 rounded-lg bg-surface/40"
     >
       <div className="flex items-center gap-2 mb-2">
-        <span className="text-xs font-medium text-[#7484a3] uppercase tracking-wider">
-          SQL Execution
+        <span className="text-xs font-medium text-muted uppercase tracking-wider">
+          Выполнение SQL
         </span>
       </div>
 
       <div className="flex items-center gap-2">
         <span className="text-lg">{getStatusIcon(latestStatus.status)}</span>
         <span className={cn("text-sm font-medium", getStatusColor(latestStatus.status))}>
-          {latestStatus.status.replace("_", " ").toUpperCase()}
+          {getStatusLabel(latestStatus.status)}
         </span>
         {latestStatus.message && (
-          <span className="text-xs text-[#7484a3] ml-2">
+          <span className="text-xs text-muted ml-2">
             {latestStatus.message}
           </span>
         )}
@@ -612,6 +640,7 @@ type TimelineItem =
   | {
       kind: "thinking";
       id: string;
+      renderKey: string;
       timestamp?: string;
       insertionKey: number;
       block: ThinkingBlockEntry;
@@ -619,6 +648,7 @@ type TimelineItem =
   | {
       kind: "tool_call";
       id: string;
+      renderKey: string;
       timestamp?: string;
       insertionKey: number;
       tool: ToolCallEntry;
@@ -639,14 +669,28 @@ function getInsertionKey(id: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function nextOccurrenceKey(
+  kind: TimelineItem["kind"],
+  id: string,
+  occurrences: Map<string, number>
+): string {
+  const occurrence = occurrences.get(id) ?? 0;
+  occurrences.set(id, occurrence + 1);
+  return `${kind}:${id}:${occurrence}`;
+}
+
 function buildIntermediateTimeline(
   thinkingBlocks: ThinkingBlockEntry[],
   toolCalls: ToolCallEntry[]
 ): TimelineItem[] {
+  const thinkingOccurrences = new Map<string, number>();
+  const toolOccurrences = new Map<string, number>();
+
   return [
     ...thinkingBlocks.map((block, index) => ({
       kind: "thinking" as const,
       id: block.id,
+      renderKey: nextOccurrenceKey("thinking", block.id, thinkingOccurrences),
       timestamp: block.timestamp,
       insertionKey: block.sequence ?? getInsertionKey(block.id, index),
       block,
@@ -654,6 +698,7 @@ function buildIntermediateTimeline(
     ...toolCalls.map((tool, index) => ({
       kind: "tool_call" as const,
       id: tool.id,
+      renderKey: nextOccurrenceKey("tool_call", tool.id, toolOccurrences),
       timestamp: tool.started_at ?? tool.completed_at,
       insertionKey: tool.sequence ?? getInsertionKey(tool.id, thinkingBlocks.length + index),
       tool,
@@ -684,11 +729,24 @@ export function CollapsibleThinking({
   if (!hasContent) return null;
   const timeline = buildIntermediateTimeline(thinkingBlocks, toolCalls);
 
+  const thinkingCountLabel =
+    thinkingBlocks.length === 1
+      ? "блок рассуждений"
+      : thinkingBlocks.length >= 2 && thinkingBlocks.length <= 4
+        ? "блока рассуждений"
+        : "блоков рассуждений";
+  const toolCountLabel =
+    toolCalls.length === 1
+      ? "вызов инструмента"
+      : toolCalls.length >= 2 && toolCalls.length <= 4
+        ? "вызова инструмента"
+        : "вызовов инструмента";
+
   const summary = (
-    <span className="truncate text-xs text-[#7484a3]">
-      {thinkingBlocks.length > 0 && `${thinkingBlocks.length} thinking block${thinkingBlocks.length !== 1 ? "s" : ""}`}
-      {toolCalls.length > 0 && `${thinkingBlocks.length > 0 ? ", " : ""}${toolCalls.length} tool call${toolCalls.length !== 1 ? "s" : ""}`}
-      {executionStatuses.length > 0 && `${thinkingBlocks.length > 0 || toolCalls.length > 0 ? ", " : ""}SQL executed`}
+    <span className="truncate text-xs text-muted">
+      {thinkingBlocks.length > 0 && `${thinkingBlocks.length} ${thinkingCountLabel}`}
+      {toolCalls.length > 0 && `${thinkingBlocks.length > 0 ? ", " : ""}${toolCalls.length} ${toolCountLabel}`}
+      {executionStatuses.length > 0 && `${thinkingBlocks.length > 0 || toolCalls.length > 0 ? ", " : ""}SQL выполнен`}
     </span>
   );
 
@@ -699,29 +757,29 @@ export function CollapsibleThinking({
       className={cn(
         "my-2 overflow-hidden rounded-xl border",
         isStreaming
-          ? "border-[#5da8ff]/35 bg-[#0a1525]/28"
-          : "border-[#22314d]/55 bg-[#07101d]/38"
+          ? "border-accent/35 bg-surface/[0.28]"
+          : "border-border-strong/55 bg-surface/[0.38]"
       )}
     >
       <button
         onClick={() => setExpanded(!expanded)}
-        aria-label={`${expanded ? "Hide" : "Show"} system run log`}
+        aria-label={`${expanded ? "Скрыть" : "Показать"} журнал выполнения`}
         className={cn(
           "flex w-full items-center gap-2 px-3 py-2 transition-colors",
           isStreaming
-            ? "bg-[#0d1d32]/58 hover:bg-[#0f223b]/72"
-            : "bg-[#0c1525]/52 hover:bg-[#101c30]/68"
+            ? "bg-elevated/[0.58] hover:bg-elevated/[0.72]"
+            : "bg-surface/[0.52] hover:bg-elevated/[0.68]"
         )}
       >
         {expanded ? (
-          <ChevronUp className="h-3.5 w-3.5 text-[#7484a3]" />
+          <ChevronUp className="h-3.5 w-3.5 text-muted" />
         ) : (
-          <ChevronDown className="h-3.5 w-3.5 text-[#7484a3]" />
+          <ChevronDown className="h-3.5 w-3.5 text-muted" />
         )}
-        <span className="flex shrink-0 items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8ea1c3]">
-          System log
+        <span className="flex shrink-0 items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-secondary">
+          Журнал выполнения
           {isStreaming && (
-            <span className="text-[#5da8ff] normal-case animate-pulse">live</span>
+            <span className="text-accent normal-case animate-pulse">онлайн</span>
           )}
         </span>
         {summary}
@@ -734,20 +792,20 @@ export function CollapsibleThinking({
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="overflow-hidden border-t border-[#2e3d59]/30"
+            className="overflow-hidden border-t border-border-strong/30"
           >
-            <div className="space-y-2 bg-[#08101c]/42 p-3">
+            <div className="space-y-2 bg-surface/[0.42] p-3">
               {timeline.map((item) =>
                 item.kind === "thinking" ? (
                   <ThinkingBlock
-                    key={item.id}
+                    key={item.renderKey}
                     content={item.block.content}
                     timestamp={item.block.timestamp}
                     isCollapsed={false}
                   />
                 ) : (
                   <ToolCallCard
-                    key={item.id}
+                    key={item.renderKey}
                     tool_name={item.tool.tool_name}
                     arguments={item.tool.arguments}
                     result_summary={item.tool.result_summary}

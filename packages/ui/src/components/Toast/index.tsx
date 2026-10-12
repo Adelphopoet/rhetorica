@@ -88,10 +88,10 @@ const iconMap = {
 };
 
 const variantClasses = {
-  success: "bg-[#38c67d]/10 border-[#38c67d]/30 text-[#38c67d]",
-  error: "bg-[#ff6d7c]/10 border-[#ff6d7c]/30 text-[#ff6d7c]",
-  warning: "bg-[#f2b14b]/10 border-[#f2b14b]/30 text-[#f2b14b]",
-  info: "bg-[#5da8ff]/10 border-[#5da8ff]/30 text-[#5da8ff]",
+  success: "bg-success/10 border-success/30 text-success",
+  error: "bg-danger/10 border-danger/30 text-danger",
+  warning: "bg-warning/10 border-warning/30 text-warning",
+  info: "bg-accent/10 border-accent/30 text-accent",
 };
 
 function ToastItem({ toast, onClose }: ToastItemProps) {

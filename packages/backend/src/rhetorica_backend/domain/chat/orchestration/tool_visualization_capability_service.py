@@ -90,6 +90,7 @@ class ToolVisualizationCapabilityService:
             )
 
         state.visualization_candidate = visualization
+        state.visualization_candidates.append(visualization)
         return {
             "ok": True,
             "tool_name": "build_visualization",
@@ -108,8 +109,8 @@ class ToolVisualizationCapabilityService:
         kind = self._required_str(arguments.get("kind"))
         x = self._required_str(arguments.get("x"))
         y = self._string_list(arguments.get("y"))
-        why_kind = self._required_str(arguments.get("why_kind"))
-        if kind is None or x is None or not y or why_kind is None:
+        why_kind = self._required_str(arguments.get("why_kind")) or ""
+        if kind is None or x is None or not y:
             return None
 
         try:

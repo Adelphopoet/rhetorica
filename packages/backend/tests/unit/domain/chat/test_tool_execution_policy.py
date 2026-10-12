@@ -1,179 +1,139 @@
 from __future__ import annotations
 
-from rhetorica_backend.contracts.execution import ExecuteSqlResponse
-from rhetorica_backend.domain.chat.orchestration.chat_orchestrator import (
-    ChatOrchestrator,
-)
 from rhetorica_backend.domain.chat.orchestration.models import (
-    DuplicateToolCallPlan,
-    StopToolResultDecision,
+    ExecuteToolCallPlan,
+    RejectRepeatedToolCallPlan,
 )
-from rhetorica_backend.domain.chat.orchestration.state import (
-    SqlExecutionAttempt,
-    ToolOrchestrationState,
+from rhetorica_backend.domain.chat.orchestration.orchestration_service_bundles import (
+    build_tool_execution_policy,
 )
+from rhetorica_backend.domain.chat.orchestration.state import ToolOrchestrationState
 from rhetorica_backend.domain.chat.orchestration.tool_execution_policy import (
     ToolExecutionPolicy,
 )
 
 
 def _policy() -> ToolExecutionPolicy:
-    return ChatOrchestrator._build_tool_execution_policy()
+    return build_tool_execution_policy()
 
 
-def test_plan_tool_call_reuses_cached_duplicate_and_requests_recovery() -> None:
-    state = ToolOrchestrationState(
-        execution_attempts=[
-            SqlExecutionAttempt(
-                sql="SELECT 1",
-                connector_name="clickhouse",
-                execution=ExecuteSqlResponse(
-                    execution_id="exec-1",
-                    status="succeeded",
-                    engine="clickhouse",
-                    normalized_sql="SELECT 1",
-                ),
-                preflight_status="pass",
-            )
-        ]
-    )
+def test_plan_tool_call_executes_matching_call_twice_then_returns_error() -> None:
+    state = ToolOrchestrationState()
     args_json = '{"sql": "SELECT 1"}'
     signature = ("run_sql", args_json)
-    state.previous_tool_calls.append(signature)
-    state.tool_call_context_revisions[signature] = state.metadata_context_revision
-    state.tool_call_results[signature] = {
-        "ok": False,
-        "error_code": "sql_preflight_failed",
-        "can_continue": True,
-    }
+    policy = _policy()
 
-    plan = _policy().plan_tool_call(
+    for execution_number in (1, 2):
+        plan = policy.plan_tool_call(
+            state=state,
+            tool_name="run_sql",
+            args_json=args_json,
+            tool_call_id=f"call-{execution_number}",
+        )
+        assert isinstance(plan, ExecuteToolCallPlan)
+        state.record_executed_tool_call(
+            tool_call_id=plan.tool_call_id,
+            tool_name="run_sql",
+            arguments={"sql": "SELECT 1"},
+            result={"ok": True, "execution_id": f"exec-{execution_number}"},
+            prompt_result={
+                "tool_artifact": {
+                    "artifact_id": "artifact-select-1",
+                    "sha256": "same-result-sha",
+                }
+            },
+        )
+
+    for execution_number in (1, 2):
+        state.record_executed_tool_call(
+            tool_call_id=f"other-{execution_number}",
+            tool_name="run_sql",
+            arguments={"sql": "SELECT 2"},
+            result={"ok": True},
+            prompt_result={
+                "tool_artifact": {
+                    "artifact_id": "artifact-select-2",
+                    "sha256": "other-result-sha",
+                }
+            },
+        )
+
+    third_plan = policy.plan_tool_call(
         state=state,
         tool_name="run_sql",
         args_json=args_json,
-        tool_call_id="call-1",
+        tool_call_id="call-3",
     )
 
-    assert isinstance(plan, DuplicateToolCallPlan)
-    assert plan.cached_result_available is True
-    assert plan.recovery_kind == "duplicate_loop"
-    assert plan.tool_result["ok"] is True
-    assert plan.tool_result["duplicate"] is True
-    assert plan.tool_result["new_evidence"] is False
-    assert plan.tool_result["cached_result"] == {
-        "ok": False,
-        "error_code": "sql_preflight_failed",
-        "can_continue": True,
-    }
-    assert "llm_tool_loop_duplicate_detected" in state.warnings
-    assert "llm_tool_loop_duplicate_reused_result" in state.warnings
-    assert "llm_tool_loop_duplicate_preflight_fail" in state.warnings
+    assert isinstance(third_plan, RejectRepeatedToolCallPlan)
+    assert third_plan.call_signature == signature
+    tool_result = third_plan.tool_result
+    assert tool_result["ok"] is False
+    assert tool_result["error_code"] == "identical_tool_call_limit_reached"
+    assert tool_result["error_category"] == "NON_RETRYABLE"
+    assert tool_result["can_continue"] is True
+    assert tool_result["retryable"] is False
+    assert tool_result["retry_recommended"] is False
+    assert tool_result["blocked_for_turn"] is True
+    assert tool_result["duplicate"] is True
+    assert tool_result["new_evidence"] is False
+    assert tool_result["previous_execution_count"] == 2
+    assert tool_result["previous_artifact_ids"] == ["artifact-select-1"]
+    assert tool_result["previous_result_sha256s"] == ["same-result-sha"]
+    assert tool_result["previous_results_identical"] is True
+    assert tool_result["blocked_call_count"] == 2
+    assert [item["arguments"] for item in tool_result["blocked_call_signatures"]] == [
+        {"sql": "SELECT 1"},
+        {"sql": "SELECT 2"},
+    ]
+    assert tool_result["tool_name"] == "run_sql"
+    assert tool_result["arguments_json"] == args_json
+    assert "результат идентичен, новых данных нет" in tool_result["user_message"]
+    assert "не повторяйте его" in tool_result["user_message"]
+    assert state.warnings == ["llm_tool_loop_identical_call_limit_reached"]
 
 
-def test_resolve_tool_result_builds_fatal_payload_from_latest_success() -> None:
-    execution = ExecuteSqlResponse(
-        execution_id="exec-good",
-        status="succeeded",
-        engine="clickhouse",
-        normalized_sql="SELECT 42",
-    )
-    state = ToolOrchestrationState(
-        generated_sql="SELECT broken()",
-        selected_database_connector="fallback",
-        preflight_fail=2,
-        execution_attempts=[
-            SqlExecutionAttempt(
-                sql="SELECT 42",
-                connector_name="clickhouse",
-                execution=execution,
-                preflight_status="pass",
-            )
-        ],
-    )
+def test_plan_tool_call_executes_same_tool_with_changed_arguments() -> None:
+    state = ToolOrchestrationState()
+    for execution_number in (1, 2):
+        state.record_executed_tool_call(
+            tool_call_id=f"call-{execution_number}",
+            tool_name="catalog__search",
+            arguments={"query": "raw%"},
+            result={"ok": True},
+            prompt_result={},
+        )
 
-    decision = _policy().resolve_tool_result(
-        tool_result={
-            "ok": False,
-            "can_continue": True,
-            "error_code": "sql_preflight_failed",
-            "user_message": "SQL preflight failed.",
-            "preflight_errors": [{"message": "Column 'gmv' is missing in table 'dm.ft_orders'."}],
-        },
+    plan = _policy().plan_tool_call(
         state=state,
+        tool_name="catalog__search",
+        args_json='{"query": "raw% expected_income"}',
+        tool_call_id="call-3",
     )
 
-    assert isinstance(decision, StopToolResultDecision)
-    assert decision.recovery_kind == "execution_error"
-    assert decision.payload["sql"] == "SELECT 42"
-    assert decision.payload["selected_database_connector"] == "clickhouse"
-    assert decision.payload["execution"]["execution_id"] == "exec-good"
-    assert "Column 'gmv' is missing" in decision.payload["answer"]
-    assert "llm_tool_loop_preflight_fail_stop" in decision.payload["warnings"]
+    assert isinstance(plan, ExecuteToolCallPlan)
+    assert state.warnings == []
 
 
-def test_build_incomplete_payload_reuses_latest_successful_execution() -> None:
-    execution = ExecuteSqlResponse(
-        execution_id="exec-good",
-        status="succeeded",
-        engine="clickhouse",
-        normalized_sql="SELECT count() FROM dm.ft_order",
-    )
-    state = ToolOrchestrationState(
-        generated_sql="SELECT broken()",
-        selected_database_connector="fallback",
-        execution_attempts=[
-            SqlExecutionAttempt(
-                sql="SELECT count() FROM dm.ft_order",
-                connector_name="clickhouse",
-                execution=execution,
-                preflight_status="pass",
-            )
-        ],
+def test_repeated_call_error_does_not_claim_unknown_results_are_identical() -> None:
+    state = ToolOrchestrationState()
+    for execution_number in (1, 2):
+        state.record_executed_tool_call(
+            tool_call_id=f"call-{execution_number}",
+            tool_name="catalog__search",
+            arguments={"query": "raw%"},
+            result={"ok": True},
+            prompt_result={},
+        )
+
+    plan = _policy().plan_tool_call(
+        state=state,
+        tool_name="catalog__search",
+        args_json='{"query": "raw%"}',
+        tool_call_id="call-3",
     )
 
-    payload = _policy().build_incomplete_payload(state)
-
-    assert payload["answer"] == "Analysis incomplete but query results are available."
-    assert payload["sql"] == "SELECT count() FROM dm.ft_order"
-    assert payload["selected_database_connector"] == "clickhouse"
-    assert payload["execution"]["execution_id"] == "exec-good"
-
-
-def test_build_incomplete_payload_without_successful_attempts() -> None:
-    state = ToolOrchestrationState(
-        generated_sql="SELECT broken()",
-        selected_database_connector="fallback",
-        execution_attempts=[],
-    )
-
-    payload = _policy().build_incomplete_payload(state)
-
-    assert payload["answer"] == "Model did not finish tool orchestration."
-    assert payload["sql"] == "SELECT broken()"
-    assert payload["selected_database_connector"] == "fallback"
-
-
-def test_build_incomplete_payload_with_custom_answer() -> None:
-    execution = ExecuteSqlResponse(
-        execution_id="exec-good",
-        status="succeeded",
-        engine="clickhouse",
-        normalized_sql="SELECT count() FROM dm.ft_order",
-    )
-    state = ToolOrchestrationState(
-        generated_sql="SELECT broken()",
-        selected_database_connector="fallback",
-        execution_attempts=[
-            SqlExecutionAttempt(
-                sql="SELECT count() FROM dm.ft_order",
-                connector_name="clickhouse",
-                execution=execution,
-                preflight_status="pass",
-            )
-        ],
-    )
-
-    payload = _policy().build_incomplete_payload(state, answer="Custom answer content")
-
-    assert payload["answer"] == "Custom answer content"
-    assert payload["sql"] == "SELECT count() FROM dm.ft_order"
+    assert isinstance(plan, RejectRepeatedToolCallPlan)
+    assert plan.tool_result["previous_results_identical"] is None
+    assert "результат идентичен" not in plan.tool_result["user_message"]
+    assert "повторное выполнение не запущено" in plan.tool_result["user_message"]

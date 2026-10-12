@@ -28,7 +28,7 @@ class TestRepairTurnService:
             generated_sql="SELECT region, SUM(amount) FROM sales GROUP BY region",
             executed_sql="SELECT region, SUM(amount) FROM sales GROUP BY region",
             context_tables=["analytics.dm.sales", "analytics.dm.regions"],
-            metadata_sources=["openmetadata"],
+            metadata_sources=["mcp"],
             evidence=[
                 AnswerEvidence(
                     evidence_id="ev-1",
@@ -36,12 +36,8 @@ class TestRepairTurnService:
                     reference="sales table",
                 )
             ],
-            claims=[
-                AnswerClaim(claim_id="cl-1", text="Total sales")
-            ],
-            claim_evidence_links=[
-                ClaimEvidenceLink(claim_id="cl-1", evidence_ids=["ev-1"])
-            ],
+            claims=[AnswerClaim(claim_id="cl-1", text="Total sales")],
+            claim_evidence_links=[ClaimEvidenceLink(claim_id="cl-1", evidence_ids=["ev-1"])],
             tool_trace=[],
             feedback_reason=feedback_reason,
             feedback_comment=comment,

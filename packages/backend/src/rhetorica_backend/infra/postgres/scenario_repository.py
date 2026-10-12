@@ -14,6 +14,8 @@ from rhetorica_backend.infra.postgres.scenario_models import (
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from sqlalchemy import or_, select
 
+_LEGACY_CONNECTOR_BINDING_KEYS = frozenset({"metadata_connector_name"})
+
 
 class ScenarioDefinitionItem:
     def __init__(
@@ -295,8 +297,8 @@ class ScenarioRepository:
             input_schema=row.input_schema or {},
             prompt_template=row.prompt_template,
             tool_policy=ScenarioToolPolicy.model_validate(row.tool_policy or {}),
-            default_connector_bindings=ScenarioConnectorBindings.model_validate(
-                row.default_connector_bindings or {}
+            default_connector_bindings=ScenarioRepository._load_connector_bindings(
+                row.default_connector_bindings
             ),
             status=row.status,
             version=row.version,
@@ -304,6 +306,13 @@ class ScenarioRepository:
             updated_at=row.updated_at,
             published_at=row.published_at,
         )
+
+    @staticmethod
+    def _load_connector_bindings(value: dict[str, Any] | None) -> ScenarioConnectorBindings:
+        normalized = dict(value or {})
+        for key in _LEGACY_CONNECTOR_BINDING_KEYS:
+            normalized.pop(key, None)
+        return ScenarioConnectorBindings.model_validate(normalized)
 
     @staticmethod
     def _to_run_item(row: ScenarioRunOrm) -> ScenarioRunItem:

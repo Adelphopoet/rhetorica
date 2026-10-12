@@ -21,37 +21,6 @@ def sql_router():
 class TestSqlRouter:
     """Tests for SqlRouter."""
 
-    def test_is_non_analytic_question_greeting_ru(self, sql_router):
-        """Test non-analytic question detection for Russian greetings."""
-        assert sql_router.is_non_analytic_question("Привет") is True
-        assert sql_router.is_non_analytic_question("Здравствуйте") is True
-        assert sql_router.is_non_analytic_question("Добрый день") is True
-
-    def test_is_non_analytic_question_greeting_en(self, sql_router):
-        """Test non-analytic question detection for English greetings."""
-        assert sql_router.is_non_analytic_question("Hello") is True
-        assert sql_router.is_non_analytic_question("Hi") is True
-        assert sql_router.is_non_analytic_question("Hey") is True
-
-    def test_is_non_analytic_question_thanks(self, sql_router):
-        """Test non-analytic question detection for thanks."""
-        assert sql_router.is_non_analytic_question("Спасибо") is True
-        assert sql_router.is_non_analytic_question("Thank you") is True
-        assert sql_router.is_non_analytic_question("Thanks") is True
-
-    def test_is_non_analytic_question_short_phrase(self, sql_router):
-        """Test non-analytic question detection for short phrases."""
-        # "Привет, как дела" has more than 2 words, so it's not automatically non-analytic
-        # Only very short greetings are detected
-        assert sql_router.is_non_analytic_question("Привет") is True
-        assert sql_router.is_non_analytic_question("Hi there") is True
-
-    def test_is_non_analytic_question_analytic(self, sql_router):
-        """Test non-analytic question detection for analytic questions."""
-        assert sql_router.is_non_analytic_question("Покажи продажи") is False
-        assert sql_router.is_non_analytic_question("Show me sales data") is False
-        assert sql_router.is_non_analytic_question("SELECT * FROM users") is False
-
     def test_select_connector_by_request_name(self, sql_router):
         """Test connector selection by request name."""
         from datetime import datetime
@@ -312,9 +281,7 @@ class TestSqlRouter:
         assert execution_service.request is not None
         assert execution_service.request.policy.timeout_ms == 900_000
 
-    def test_select_connector_does_not_fallback_for_unknown_llm_target_name(
-        self, sql_router
-    ):
+    def test_select_connector_does_not_fallback_for_unknown_llm_target_name(self, sql_router):
         """Unknown explicit LLM connector target must not fallback to first connector."""
         from datetime import datetime
 
@@ -347,9 +314,7 @@ class TestSqlRouter:
 
         assert selected is None
 
-    def test_select_connector_does_not_fallback_for_unmapped_llm_target(
-        self, sql_router
-    ):
+    def test_select_connector_does_not_fallback_for_unmapped_llm_target(self, sql_router):
         """Explicit service/database/schema target must not fallback when unavailable."""
         from datetime import datetime
 
@@ -365,11 +330,6 @@ class TestSqlRouter:
                     username="user",
                     password=None,
                     database="analytics",
-                    extra_settings={
-                        "metadata_service": "clickhouse-prod",
-                        "metadata_database": "analytics",
-                        "metadata_schema": "sandbox",
-                    },
                 ),
                 has_password=True,
                 created_at=datetime.now(),
@@ -404,115 +364,6 @@ class TestSqlRouter:
         )
 
         assert selected is None
-
-    def test_select_connector_matches_missing_schema_mapping_as_wildcard(
-        self, sql_router
-    ):
-        """Connector without metadata_schema should still match exact service/database."""
-        from datetime import datetime
-
-        connector = ConnectorItem(
-            id="1",
-            name="clickhouse",
-            workspace_id="test",
-            connection=EngineConnectionConfig(
-                engine="clickhouse",
-                host="localhost",
-                port=5432,
-                username="user",
-                password=None,
-                database="default",
-                extra_settings={
-                    "metadata_service": "Sample-ClickHouse",
-                    "metadata_database": "default",
-                },
-            ),
-            has_password=True,
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        )
-        request = ChatAskRequest(question="Test", workspace_id="test")
-        llm_payload = {
-            "target": {
-                "service": "Sample-ClickHouse",
-                "database": "default",
-                "schema": "dm",
-            }
-        }
-
-        selected = sql_router.select_connector(
-            request=request,
-            llm_payload=llm_payload,
-            db_connectors=[connector],
-        )
-
-        assert selected is not None
-        assert selected.name == "clickhouse"
-
-    def test_select_connector_prefers_exact_schema_mapping_over_wildcard(
-        self, sql_router
-    ):
-        """Exact schema mapping should win over generic service/database wildcard."""
-        from datetime import datetime
-
-        wildcard = ConnectorItem(
-            id="1",
-            name="clickhouse-default",
-            workspace_id="test",
-            connection=EngineConnectionConfig(
-                engine="clickhouse",
-                host="localhost",
-                port=5432,
-                username="user",
-                password=None,
-                database="default",
-                extra_settings={
-                    "metadata_service": "Sample-ClickHouse",
-                    "metadata_database": "default",
-                },
-            ),
-            has_password=True,
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        )
-        exact = ConnectorItem(
-            id="2",
-            name="clickhouse-dm",
-            workspace_id="test",
-            connection=EngineConnectionConfig(
-                engine="clickhouse",
-                host="localhost",
-                port=5432,
-                username="user",
-                password=None,
-                database="default",
-                extra_settings={
-                    "metadata_service": "Sample-ClickHouse",
-                    "metadata_database": "default",
-                    "metadata_schema": "dm",
-                },
-            ),
-            has_password=True,
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        )
-        request = ChatAskRequest(question="Test", workspace_id="test")
-        llm_payload = {
-            "target": {
-                "service": "Sample-ClickHouse",
-                "database": "default",
-                "schema": "dm",
-            }
-        }
-
-        selected = sql_router.select_connector(
-            request=request,
-            llm_payload=llm_payload,
-            db_connectors=[wildcard, exact],
-        )
-
-        assert selected is not None
-        assert selected.name == "clickhouse-dm"
 
     def test_to_optional_str_valid(self, sql_router):
         """Test optional string conversion with valid input."""

@@ -79,10 +79,46 @@ def test_sync_transport_finalization_persists_history_and_attaches_message_id() 
     assert [message["role"] for message in saved_messages] == ["user", "assistant"]
 
 
+def test_sync_transport_finalization_does_not_duplicate_pre_persisted_user_message() -> None:
+    saved_messages: list[dict[str, object]] = []
+
+    def save_message(**kwargs):
+        saved_messages.append(kwargs)
+        return SimpleNamespace(id="assistant-1")
+
+    service = PostAssemblyTransportFinalizationService(
+        history_persistence_service=ChatHistoryPersistenceService(
+            conversation_manager=SimpleNamespace(save_message=save_message)
+        ),
+        adapter=SyncChatTransportAdapter(),
+    )
+
+    result = service.finalize(
+        finalization_input=TransportFinalizationInput(
+            request=ChatAskRequest(question="Что по выручке?", workspace_id="ws-1"),
+            conversation_id="conv-1",
+            completion_kind="runtime_completed",
+            turn=_turn(answer="Готово"),
+            history_persistence=PersistConversationHistory(conversation_id="conv-1"),
+            persisted_user_message_id="user-early",
+        )
+    )
+
+    assert result.response.assistant_message_id == "assistant-1"
+    assert [message["role"] for message in saved_messages] == ["assistant"]
+
+
 def test_streaming_transport_finalization_keeps_cancelled_done_event_without_persist() -> None:
+    persisted_usages: list[dict[str, object]] = []
+
+    def add_token_usage(*, conversation_id, llm_usages):
+        assert conversation_id == "conv-1"
+        persisted_usages.extend(llm_usages)
+
     service = PostAssemblyTransportFinalizationService(
         history_persistence_service=ChatHistoryPersistenceService(
             conversation_manager=SimpleNamespace(
+                add_token_usage=add_token_usage,
                 save_message=lambda **_kwargs: (_ for _ in ()).throw(
                     AssertionError("history persistence must be skipped")
                 )
@@ -97,6 +133,13 @@ def test_streaming_transport_finalization_keeps_cancelled_done_event_without_per
             conversation_id="conv-1",
             completion_kind="cancelled",
             turn=_turn(answer="Request was cancelled", warnings=["cancelled"]),
+            llm_usages=[
+                {
+                    "prompt_tokens": 80,
+                    "completion_tokens": 10,
+                    "total_tokens": 90,
+                }
+            ],
             history_persistence=SkipConversationHistory(reason="cancelled"),
             transport_events=[ThinkingEvent(content="working")],
         )
@@ -110,6 +153,9 @@ def test_streaming_transport_finalization_keeps_cancelled_done_event_without_per
     assert result.terminal.terminal_kind == "done"
     assert result.diagnostics is not None
     assert result.diagnostics.warnings == ["cancelled"]
+    assert persisted_usages == [
+        {"prompt_tokens": 80, "completion_tokens": 10, "total_tokens": 90}
+    ]
 
 
 def test_streaming_transport_finalization_emits_error_for_missing_llm() -> None:

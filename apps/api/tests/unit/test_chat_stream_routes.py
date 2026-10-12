@@ -6,17 +6,17 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 from fastapi.testclient import TestClient
 from rhetorica_api.app.chat_runtime import get_chat_service_factory
 from rhetorica_api.app.main import create_app
 from rhetorica_api.app.routes import chat_stream as chat_stream_routes
-from rhetorica_api.app.routes import confluence_connectors as confluence_connector_routes
 from rhetorica_api.app.routes import connectors as connector_routes
 from rhetorica_api.app.routes import execution as execution_routes
 from rhetorica_api.app.routes import llm_connectors as llm_connector_routes
-from rhetorica_api.app.routes import openmetadata_connectors as openmetadata_connector_routes
 from rhetorica_api.app.settings import settings
 
 
@@ -26,12 +26,11 @@ def _client(tmp_path: Path) -> TestClient:
     execution_routes._runtime.cache_clear()
     connector_routes._repository.cache_clear()
     llm_connector_routes._repository.cache_clear()
-    confluence_connector_routes._repository.cache_clear()
-    openmetadata_connector_routes._repository.cache_clear()
     get_chat_service_factory.cache_clear()
 
     # Clear streaming factory cache if exists
     chat_stream_routes._get_factory.cache_clear()
+    chat_stream_routes._active_chat_runs.clear()
 
     # Create database schema
     from rhetorica_backend.domain.execution import build_execution_service
@@ -72,12 +71,180 @@ def _parse_sse_response(response: httpx.Response) -> list[dict]:
     return events
 
 
+def test_native_sdk_diagnostics_survive_stream_persistence_and_history(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Nested diagnostics must serialize in both conversation state and message history."""
+    from openai.types.responses import (
+        Response,
+        ResponseCompletedEvent,
+        ResponseOutputMessage,
+        ResponseOutputText,
+        ResponseTextDeltaEvent,
+        ResponseUsage,
+    )
+    from rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime import (
+        AgentsSdkTurnRuntime,
+    )
+    from rhetorica_backend.domain.chat.orchestration.final_response_contract import (
+        ChatFinalResponseContractV1,
+    )
+
+    from agents import Model
+
+    model_text = ChatFinalResponseContractV1(answer_markdown="Hello!").model_dump_json()
+
+    class ObservedModel(Model):
+        async def get_response(self, *args, **kwargs):
+            raise AssertionError("This regression exercises streaming")
+
+        async def stream_response(self, *args, **kwargs):
+            yield ResponseTextDeltaEvent.model_construct(
+                type="response.output_text.delta", delta=model_text,
+            )
+            yield ResponseCompletedEvent.model_construct(
+                type="response.completed",
+                response=Response.model_construct(
+                    id="observed-response", model="test-model", status="completed",
+                    output=[ResponseOutputMessage(
+                        id="observed-message", type="message", role="assistant",
+                        status="completed", content=[ResponseOutputText(
+                            type="output_text", text=model_text, annotations=[],
+                        )],
+                    )],
+                    usage=ResponseUsage.model_validate({
+                        "input_tokens": 5, "output_tokens": 2, "total_tokens": 7,
+                        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                    }),
+                ),
+            )
+
+    client = _client(tmp_path)
+    monkeypatch.setattr(
+        AgentsSdkTurnRuntime, "_sdk_model", staticmethod(lambda **_: ObservedModel()),
+    )
+    created = client.post("/v1/admin/llm-connectors", json={
+        "name": "observed-llm", "workspace_id": "default", "is_default": True,
+        "connection": {
+            "base_url": "https://llm.example.test/v1", "model": "test-model",
+            "api_key": "test-key", "extra_settings": {"support_tool_calls": True},
+        },
+    })
+    assert created.status_code == 200
+    conversation_id = None
+    for _ in range(2):
+        response = client.post("/v1/chat/ask/stream", json={
+            "question": "Hello", "workspace_id": "default", "run_sql": False,
+            "conversation_id": conversation_id,
+        })
+        assert response.status_code == 200
+        events = _parse_sse_response(response)
+        assert not [e for e in events if e["_event_type"] == "error"], events
+        done = [e for e in events if e["_event_type"] == "done"]
+        assert len(done) == 1, events
+        assert done[0]["answer"] == "Hello!"
+        conversation_id = done[0]["conversation_id"]
+
+    history = client.get(f"/v1/chat/conversation/{conversation_id}")
+    assert history.status_code == 200, history.text
+    messages = [m for m in history.json()["messages"] if m["role"] == "assistant"]
+    assert len(messages) == 2
+    calls = [m["capability_trace"]["runtime_context"]["llm_calls"][0] for m in messages]
+    assert all(c["diagnostics"]["status"] == "succeeded" for c in calls)
+    assert all(c["diagnostics"]["text_chars"] == len(model_text) for c in calls)
+    assert all(c["usage_reported"] and c["total_tokens"] == 7 for c in calls)
+    assert calls[0]["diagnostics"]["run_id"] != calls[1]["diagnostics"]["run_id"]
+    assert history.json()["token_usage"]["total_tokens"] == 14
+
+
 def test_stream_factory_includes_workspace_skill_repository(tmp_path: Path) -> None:
     _client(tmp_path)
 
     factory = chat_stream_routes._get_factory()
 
     assert factory._workspace_skill_repository is not None
+
+
+def test_stream_factory_includes_mcp_connector_repository(tmp_path: Path) -> None:
+    _client(tmp_path)
+
+    factory = chat_stream_routes._get_factory()
+
+    assert factory._mcp_connector_repository is not None
+
+
+def test_explicit_cancel_endpoint_sets_active_run_signal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _client(tmp_path)
+    run_id = str(uuid4())
+    cancel_event = asyncio.Event()
+    chat_stream_routes._active_chat_runs[run_id] = chat_stream_routes._ActiveChatRun(
+        cancel_event=cancel_event,
+        current_user_id="user-1",
+        workspace_id="default",
+    )
+    monkeypatch.setattr(
+        chat_stream_routes,
+        "resolve_current_user",
+        lambda workspace_id: SimpleNamespace(id="user-1", workspace_id=workspace_id),
+    )
+
+    response = client.post(f"/v1/chat/runs/{run_id}/cancel?workspace_id=default")
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": True}
+    assert cancel_event.is_set() is True
+
+
+def test_stream_endpoint_adds_server_owned_actor_context(tmp_path: Path, monkeypatch) -> None:
+    client = _client(tmp_path)
+    captured_payloads = []
+
+    from rhetorica_backend.contracts.chat import DoneEvent
+
+    class _FakeStreamingOrchestrator:
+        async def stream_ask(self, payload, cancel_event=None):
+            _ = cancel_event
+            captured_payloads.append(payload)
+            yield DoneEvent(answer="ok")
+
+    class _FakeFactory:
+        def create_streaming_orchestrator(self, current_user_id=None):
+            assert current_user_id == "user-1"
+            return _FakeStreamingOrchestrator()
+
+    monkeypatch.setattr(
+        chat_stream_routes,
+        "resolve_current_user",
+        lambda workspace_id: SimpleNamespace(
+            id="user-1",
+            login="analyst",
+            display_name="Analyst User",
+            role="analyst",
+            auth_provider="local",
+            workspace_id=workspace_id,
+        ),
+    )
+    monkeypatch.setattr(chat_stream_routes, "_get_factory", lambda: _FakeFactory())
+
+    response = client.post(
+        "/v1/chat/ask/stream",
+        json={"question": "hi", "workspace_id": "default", "run_sql": False},
+        headers={"Accept": "text/event-stream"},
+    )
+
+    assert response.status_code == 200
+    actor_context = captured_payloads[0].actor_context
+    assert actor_context is not None
+    assert actor_context.source == "web"
+    assert actor_context.login == "analyst"
+    assert actor_context.display_name == "Analyst User"
+    assert actor_context.role == "analyst"
+    assert actor_context.auth_provider == "local"
+    assert actor_context.workspace_id == "default"
 
 
 def test_stream_endpoint_returns_sse_events(tmp_path: Path, monkeypatch) -> None:
@@ -90,6 +257,7 @@ def test_stream_endpoint_returns_sse_events(tmp_path: Path, monkeypatch) -> None
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -137,7 +305,7 @@ def test_stream_endpoint_returns_sse_events(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(
         StreamingChatOrchestrator,
-        "_run_tool_loop_and_collect",
+        "_run_prepared_tool_loop_and_collect",
         mock_run_tool_loop,
     )
 
@@ -179,6 +347,7 @@ def test_stream_endpoint_logs_accepted_request(tmp_path: Path, monkeypatch, capl
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -214,7 +383,7 @@ def test_stream_endpoint_logs_accepted_request(tmp_path: Path, monkeypatch, capl
 
     monkeypatch.setattr(
         StreamingChatOrchestrator,
-        "_run_tool_loop_and_collect",
+        "_run_prepared_tool_loop_and_collect",
         mock_run_tool_loop,
     )
 
@@ -251,7 +420,6 @@ def test_stream_endpoint_rejects_transport_level_connector_pinning(tmp_path: Pat
             "workspace_id": "default",
             "run_sql": True,
             "llm_connector_name": "forced-llm",
-            "metadata_connector_name": "forced-metadata",
             "database_connector_name": "forced-db",
         },
     )
@@ -261,7 +429,6 @@ def test_stream_endpoint_rejects_transport_level_connector_pinning(tmp_path: Pat
     assert isinstance(detail, list)
     locations = {tuple(item["loc"]) for item in detail}
     assert ("body", "llm_connector_name") in locations
-    assert ("body", "metadata_connector_name") in locations
     assert ("body", "database_connector_name") in locations
 
 
@@ -275,6 +442,7 @@ def test_stream_endpoint_creates_conversation(tmp_path: Path, monkeypatch) -> No
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -311,7 +479,7 @@ def test_stream_endpoint_creates_conversation(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(
         StreamingChatOrchestrator,
-        "_run_tool_loop_and_collect",
+        "_run_prepared_tool_loop_and_collect",
         mock_run_tool_loop,
     )
 
@@ -346,6 +514,7 @@ def test_stream_endpoint_with_thinking_tags(tmp_path: Path, monkeypatch) -> None
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -383,7 +552,7 @@ def test_stream_endpoint_with_thinking_tags(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(
         StreamingChatOrchestrator,
-        "_run_tool_loop_and_collect",
+        "_run_prepared_tool_loop_and_collect",
         mock_run_tool_loop_thinking,
     )
 
@@ -418,6 +587,7 @@ def test_stream_endpoint_with_tool_calls(tmp_path: Path, monkeypatch) -> None:
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -427,21 +597,6 @@ def test_stream_endpoint_with_tool_calls(tmp_path: Path, monkeypatch) -> None:
         },
     )
     assert llm_create.status_code == 200
-
-    # Setup metadata connector
-    metadata_create = client.post(
-        "/v1/admin/openmetadata-connectors",
-        json={
-            "name": "test-metadata",
-            "workspace_id": "default",
-            "connection": {
-                "provider": "openmetadata",
-                "base_url": "https://openmetadata.local",
-                "api_token": "token",
-            },
-        },
-    )
-    assert metadata_create.status_code == 200
 
     # Mock LLM responses - first tool call, then final answer
     from rhetorica_backend.contracts.chat import ToolCallEndEvent, ToolCallStartEvent
@@ -459,17 +614,17 @@ def test_stream_endpoint_with_tool_calls(tmp_path: Path, monkeypatch) -> None:
                     "sql": None,
                     "target": None,
                     "selected_database_connector": None,
-                    "metadata_sources": ["openmetadata"],
+                    "metadata_sources": ["mcp"],
                     "context_tables": ["svc.db.schema.table_gmv"],
                     "execution": None,
                     "warnings": [],
                 },
                 "events": [
                     ToolCallStartEvent(
-                        tool_name="fetch_metadata_tables", arguments={"search": "gmv", "limit": 10}
+                        tool_name="catalog__search", arguments={"query": "gmv", "limit": 10}
                     ),
                     ToolCallEndEvent(
-                        tool_name="fetch_metadata_tables",
+                        tool_name="catalog__search",
                         result_summary="Found 1 items",
                         success=True,
                     ),
@@ -479,7 +634,7 @@ def test_stream_endpoint_with_tool_calls(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(
         StreamingChatOrchestrator,
-        "_run_tool_loop_and_collect",
+        "_run_prepared_tool_loop_and_collect",
         mock_run_tool_loop_tools,
     )
 
@@ -503,7 +658,7 @@ def test_stream_endpoint_with_tool_calls(tmp_path: Path, monkeypatch) -> None:
     assert len(tool_end_events) >= 1
 
     # Verify tool name
-    assert tool_start_events[0]["tool_name"] == "fetch_metadata_tables"
+    assert tool_start_events[0]["tool_name"] == "catalog__search"
 
 
 def test_stream_endpoint_error_handling(tmp_path: Path, monkeypatch) -> None:
@@ -560,6 +715,7 @@ def test_stream_endpoint_with_conversation_id(tmp_path: Path, monkeypatch) -> No
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -607,7 +763,7 @@ def test_stream_endpoint_with_conversation_id(tmp_path: Path, monkeypatch) -> No
 
     monkeypatch.setattr(
         StreamingChatOrchestrator,
-        "_run_tool_loop_and_collect",
+        "_run_prepared_tool_loop_and_collect",
         mock_run_tool_loop_conv,
     )
 
@@ -642,6 +798,7 @@ def test_stream_endpoint_keepalive_does_not_cancel_pending_event(
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -693,6 +850,53 @@ def test_stream_endpoint_keepalive_does_not_cancel_pending_event(
     assert done_events[0]["answer"] == "final answer"
 
 
+def test_stream_generator_stops_sse_without_cancelling_turn_when_request_disconnects(
+    monkeypatch,
+) -> None:
+    from rhetorica_backend.contracts.chat import ChatAskRequest, ThinkingEvent
+
+    seen_cancel_events: list[asyncio.Event] = []
+
+    class _DisconnectedRequest:
+        def __init__(self) -> None:
+            self._checks = 0
+
+        async def is_disconnected(self) -> bool:
+            self._checks += 1
+            return self._checks > 1
+
+    class _FakeStreamingOrchestrator:
+        async def stream_ask(self, payload, cancel_event=None):
+            _ = payload
+            seen_cancel_events.append(cancel_event)
+            await asyncio.sleep(1)
+            yield ThinkingEvent(content="should not be sent")
+
+    class _FakeFactory:
+        def create_streaming_orchestrator(self, current_user_id=None):
+            _ = current_user_id
+            return _FakeStreamingOrchestrator()
+
+    monkeypatch.setattr(chat_stream_routes, "_get_factory", lambda: _FakeFactory())
+    monkeypatch.setattr(chat_stream_routes, "SSE_KEEPALIVE_SECONDS", 0.01)
+
+    async def collect() -> list[str]:
+        return [
+            item
+            async for item in chat_stream_routes._stream_event_generator(
+                ChatAskRequest(question="disconnect", workspace_id="default"),
+                current_user_id="user-1",
+                http_request=_DisconnectedRequest(),
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert chunks == []
+    assert len(seen_cancel_events) == 1
+    assert not seen_cancel_events[0].is_set()
+
+
 def test_stream_done_event_contains_execution_payload(
     tmp_path: Path,
     monkeypatch,
@@ -705,6 +909,7 @@ def test_stream_done_event_contains_execution_payload(
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -753,7 +958,7 @@ def test_stream_done_event_contains_execution_payload(
 
     monkeypatch.setattr(
         StreamingChatOrchestrator,
-        "_run_tool_loop_and_collect",
+        "_run_prepared_tool_loop_and_collect",
         mock_run_tool_loop_execution,
     )
 
@@ -779,11 +984,11 @@ def test_stream_done_event_contains_execution_payload(
     assert visualization is None
 
 
-def test_stream_disables_tools_for_small_talk(
+def test_stream_preserves_configured_capabilities_for_small_talk(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Small-talk request should run with empty tool set."""
+    """Question wording must not hide configured capabilities from the agent."""
     client = _client(tmp_path)
 
     llm_create = client.post(
@@ -791,6 +996,7 @@ def test_stream_disables_tools_for_small_talk(
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -821,61 +1027,26 @@ def test_stream_disables_tools_for_small_talk(
     )
     assert db_create.status_code == 200
 
-    metadata_create = client.post(
-        "/v1/admin/openmetadata-connectors",
-        json={
-            "name": "test-metadata",
-            "workspace_id": "default",
-            "connection": {
-                "provider": "openmetadata",
-                "base_url": "https://openmetadata.local",
-                "api_token": "token",
-            },
-        },
-    )
-    assert metadata_create.status_code == 200
+    captured_tool_names: list[set[str]] = []
 
-    from rhetorica_backend.domain.chat.orchestration.streaming_orchestrator import (
-        StreamingChatOrchestrator,
-    )
+    class _FakeStreamedResult:
+        from rhetorica_backend.domain.chat.orchestration.final_response_contract import (
+            ChatFinalResponseContractV1,
+        )
 
-    captured_tools: list[list[dict]] = []
+        final_output = ChatFinalResponseContractV1(answer_markdown="Привет!")
 
-    class _FakeLlmClient:
-        def responses_completion(
-            self,
-            messages=None,
-            input_items=None,
-            tools=None,
-            response_schema=None,
-            previous_response_id=None,
-            tool_choice="auto",
-        ):
-            _ = messages, input_items, response_schema, previous_response_id, tool_choice
-            captured_tools.append(tools if isinstance(tools, list) else [])
-            return type(
-                "Resp",
-                (),
-                {
-                    "response_id": "resp-1",
-                    "output_text": (
-                        '{"answer_markdown":"Привет!","sql":null,'
-                        '"target":null,"claims":[],'
-                        '"evidence":[],"claim_evidence_links":[],'
-                        '"uncertainty_flags":[]}'
-                    ),
-                    "function_calls": [],
-                    "raw_body": {},
-                },
-            )
+        async def stream_events(self):
+            if False:
+                yield None
 
-        def collect_usages(self) -> list:
-            return []
+    def fake_run_streamed(agent, *_args, **_kwargs):
+        captured_tool_names.append({tool.name for tool in agent.tools})
+        return _FakeStreamedResult()
 
     monkeypatch.setattr(
-        StreamingChatOrchestrator,
-        "_create_llm_client",
-        lambda _self, _connection: _FakeLlmClient(),
+        "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.Runner.run_streamed",
+        fake_run_streamed,
     )
 
     response = client.post(
@@ -891,14 +1062,16 @@ def test_stream_disables_tools_for_small_talk(
     done_events = [e for e in events if e.get("_event_type") == "done"]
     assert len(done_events) == 1
     assert done_events[0]["answer"] == "Привет!"
-    assert captured_tools and captured_tools[0] == []
+    assert "run_sql" in captured_tool_names[0]
+    assert "load_mcp_tools" not in captured_tool_names[0]
+    assert "submit_final_answer" not in captured_tool_names[0]
 
 
-def test_stream_disables_run_sql_for_metadata_definition_questions(
+def test_stream_does_not_classify_metadata_definition_questions(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Definition-style metadata questions should not expose run_sql."""
+    """Definition wording must not suppress explicitly allowed SQL capability."""
     client = _client(tmp_path)
 
     llm_create = client.post(
@@ -906,6 +1079,7 @@ def test_stream_disables_run_sql_for_metadata_definition_questions(
         json={
             "name": "test-llm",
             "workspace_id": "default",
+            "is_default": True,
             "connection": {
                 "base_url": "https://api.openai.com/v1",
                 "model": "gpt-4",
@@ -936,61 +1110,26 @@ def test_stream_disables_run_sql_for_metadata_definition_questions(
     )
     assert db_create.status_code == 200
 
-    metadata_create = client.post(
-        "/v1/admin/openmetadata-connectors",
-        json={
-            "name": "test-metadata",
-            "workspace_id": "default",
-            "connection": {
-                "provider": "openmetadata",
-                "base_url": "https://openmetadata.local",
-                "api_token": "token",
-            },
-        },
-    )
-    assert metadata_create.status_code == 200
+    captured_tool_names: list[set[str]] = []
 
-    from rhetorica_backend.domain.chat.orchestration.streaming_orchestrator import (
-        StreamingChatOrchestrator,
-    )
+    class _FakeStreamedResult:
+        from rhetorica_backend.domain.chat.orchestration.final_response_contract import (
+            ChatFinalResponseContractV1,
+        )
 
-    captured_tools: list[list[dict]] = []
+        final_output = ChatFinalResponseContractV1(answer_markdown="ft_order - это факт заказов.")
 
-    class _FakeLlmClient:
-        def responses_completion(
-            self,
-            messages=None,
-            input_items=None,
-            tools=None,
-            response_schema=None,
-            previous_response_id=None,
-            tool_choice="auto",
-        ):
-            _ = messages, input_items, response_schema, previous_response_id, tool_choice
-            captured_tools.append(tools if isinstance(tools, list) else [])
-            return type(
-                "Resp",
-                (),
-                {
-                    "response_id": "resp-1",
-                    "output_text": (
-                        '{"answer_markdown":"ft_order - это факт заказов.","sql":null,'
-                        '"target":null,"claims":[],'
-                        '"evidence":[],"claim_evidence_links":[],'
-                        '"uncertainty_flags":[]}'
-                    ),
-                    "function_calls": [],
-                    "raw_body": {},
-                },
-            )
+        async def stream_events(self):
+            if False:
+                yield None
 
-        def collect_usages(self) -> list:
-            return []
+    def fake_run_streamed(agent, *_args, **_kwargs):
+        captured_tool_names.append({tool.name for tool in agent.tools})
+        return _FakeStreamedResult()
 
     monkeypatch.setattr(
-        StreamingChatOrchestrator,
-        "_create_llm_client",
-        lambda _self, _connection: _FakeLlmClient(),
+        "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.Runner.run_streamed",
+        fake_run_streamed,
     )
 
     response = client.post(
@@ -1006,10 +1145,5 @@ def test_stream_disables_run_sql_for_metadata_definition_questions(
     done_events = [e for e in events if e.get("_event_type") == "done"]
     assert len(done_events) == 1
 
-    tool_names = {
-        tool["function"]["name"]
-        for tool in captured_tools[0]
-        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
-    }
-    assert "run_sql" not in tool_names
-    assert "search_metadata_catalog" in tool_names
+    assert "run_sql" in captured_tool_names[0]
+    assert "load_mcp_tools" not in captured_tool_names[0]

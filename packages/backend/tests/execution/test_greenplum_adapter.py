@@ -13,11 +13,15 @@ class _FakeCursor:
         self.description = [SimpleNamespace(name="value")]
         self.executed_sql: list[str] = []
         self.closed = False
+        self._fetched = False
 
     def execute(self, sql: str) -> None:
         self.executed_sql.append(sql)
 
-    def fetchall(self) -> list[tuple[int]]:
+    def fetchmany(self, _size: int) -> list[tuple[int]]:
+        if self._fetched:
+            return []
+        self._fetched = True
         return [(1,)]
 
     def close(self) -> None:
@@ -38,6 +42,18 @@ class _FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _CaptureConsumer:
+    def __init__(self) -> None:
+        self.columns: list[str] = []
+        self.rows: list[list[Any]] = []
+
+    def start(self, columns) -> None:
+        self.columns = list(columns)
+
+    def write_rows(self, rows) -> None:
+        self.rows.extend([list(row) for row in rows])
 
 
 def test_greenplum_adapter_uses_psycopg_and_strips_metadata_settings(monkeypatch) -> None:
@@ -66,8 +82,6 @@ def test_greenplum_adapter_uses_psycopg_and_strips_metadata_settings(monkeypatch
             secure=True,
             verify=False,
             extra_settings={
-                "metadata_service": "greenplum-prod",
-                "metadata_database": "analytics",
                 "connect_timeout": 30,
                 "application_name": "rhetorica-tests",
             },
@@ -80,17 +94,19 @@ def test_greenplum_adapter_uses_psycopg_and_strips_metadata_settings(monkeypatch
         ),
     )
 
-    result = active.fetch()
+    consumer = _CaptureConsumer()
+    result = active.fetch_streaming(consumer=consumer, preview_row_limit=1)
 
     assert captured["host"] == "greenplum.local"
     assert captured["dbname"] == "dwh"
     assert captured["sslmode"] == "require"
     assert captured["connect_timeout"] == 30
     assert captured["application_name"] == "rhetorica-tests"
-    assert "metadata_service" not in captured
     assert cursor.executed_sql == ["SET statement_timeout = 12000", "SELECT 1"]
     assert result.columns == ["value"]
     assert result.rows == [[1]]
+    assert consumer.columns == ["value"]
+    assert consumer.rows == [[1]]
 
 
 def test_greenplum_adapter_cancel_and_close_delegate_to_connection(monkeypatch) -> None:

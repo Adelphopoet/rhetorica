@@ -9,10 +9,7 @@ def test_preflight_allows_clickhouse_system_tables_without_metadata_context() ->
     service = SemanticSqlPreflightService()
 
     result = service.check(
-        sql=(
-            "SELECT name FROM system.tables "
-            "WHERE database = 'default' AND name LIKE 'ft_main%'"
-        ),
+        sql=("SELECT name FROM system.tables WHERE database = 'default' AND name LIKE 'ft_main%'"),
         dialect="clickhouse",
         engine="clickhouse",
         context_tables=[],
@@ -23,6 +20,94 @@ def test_preflight_allows_clickhouse_system_tables_without_metadata_context() ->
 
     assert result.status == "pass"
     assert result.errors == []
+
+
+def test_preflight_allows_clickhouse_cluster_system_table_functions_without_metadata_context() -> (
+    None
+):
+    service = SemanticSqlPreflightService()
+
+    result = service.check(
+        sql=(
+            "SELECT period, countIf(type = 'QueryFinish') AS finished_queries "
+            "FROM ("
+            "SELECT 'today' AS period, * "
+            "FROM clusterAllReplicas('c9qt89m7gguffpprrpua', system.query_log) "
+            "WHERE event_time >= now() - INTERVAL 1 HOUR"
+            ") "
+            "GROUP BY period"
+        ),
+        dialect="clickhouse",
+        engine="clickhouse",
+        context_tables=[],
+        metadata_table_columns={},
+        requested_connector_name="clickhouse",
+        selected_connector_name="clickhouse",
+    )
+
+    assert result.status == "pass"
+    assert result.errors == []
+
+
+def test_preflight_allows_clickhouse_cluster_system_table_function_string_args() -> None:
+    service = SemanticSqlPreflightService()
+
+    result = service.check(
+        sql=(
+            "SELECT count() "
+            "FROM cluster('c9qt89m7gguffpprrpua', 'system', 'metric_log') "
+            "WHERE event_time >= now() - INTERVAL 15 MINUTE"
+        ),
+        dialect="clickhouse",
+        engine="clickhouse",
+        context_tables=[],
+        metadata_table_columns={},
+        requested_connector_name="clickhouse",
+        selected_connector_name="clickhouse",
+    )
+
+    assert result.status == "pass"
+    assert result.errors == []
+
+
+def test_preflight_allows_clickhouse_remote_system_table_functions_without_metadata_context() -> (
+    None
+):
+    service = SemanticSqlPreflightService()
+
+    result = service.check(
+        sql=(
+            "SELECT hostname(), count() "
+            "FROM remoteSecure('rc1b-example.mdb.yandexcloud.net', system.query_log) "
+            "WHERE event_time >= now() - INTERVAL 1 HOUR"
+        ),
+        dialect="clickhouse",
+        engine="clickhouse",
+        context_tables=[],
+        metadata_table_columns={},
+        requested_connector_name="clickhouse",
+        selected_connector_name="clickhouse",
+    )
+
+    assert result.status == "pass"
+    assert result.errors == []
+
+
+def test_preflight_does_not_treat_trino_remote_function_as_builtin_table() -> None:
+    service = SemanticSqlPreflightService()
+
+    result = service.check(
+        sql="SELECT * FROM remote('host', system.query_log)",
+        dialect="trino",
+        engine="trino",
+        context_tables=[],
+        metadata_table_columns={},
+        requested_connector_name="trino",
+        selected_connector_name="trino",
+    )
+
+    assert result.status == "uncertain"
+    assert [error.code for error in result.errors] == ["metadata_context_missing"]
 
 
 def test_preflight_allows_show_databases_without_metadata_context() -> None:
@@ -42,6 +127,24 @@ def test_preflight_allows_show_databases_without_metadata_context() -> None:
     assert result.errors == []
 
 
+def test_preflight_allows_literal_select_without_metadata_context() -> None:
+    service = SemanticSqlPreflightService()
+
+    result = service.check(
+        sql="SELECT 1 AS test",
+        dialect="clickhouse",
+        engine="clickhouse",
+        context_tables=[],
+        metadata_table_columns={},
+        requested_connector_name="clickhouse",
+        selected_connector_name="clickhouse",
+    )
+
+    assert result.status == "pass"
+    assert result.errors == []
+    assert result.referenced_tables == []
+
+
 def test_preflight_suggests_similar_columns_for_missing_column() -> None:
     service = SemanticSqlPreflightService()
 
@@ -53,9 +156,9 @@ def test_preflight_suggests_similar_columns_for_missing_column() -> None:
         ),
         dialect="clickhouse",
         engine="clickhouse",
-        context_tables=["Sample-ClickHouse.default.dm.ft_order"],
+        context_tables=["Clickhouse-Sales.default.dm.ft_order"],
         metadata_table_columns={
-            "Sample-ClickHouse.default.dm.ft_order": {
+            "Clickhouse-Sales.default.dm.ft_order": {
                 "order_create_dttm",
                 "order_update_dttm",
                 "order_finish_dttm",
@@ -69,7 +172,7 @@ def test_preflight_suggests_similar_columns_for_missing_column() -> None:
     missing_column = next(error for error in result.errors if error.code == "missing_column")
     assert "Similar columns: order_create_dttm" in missing_column.message
     assert missing_column.identifier == "order_created_dttm"
-    assert missing_column.table == "Sample-ClickHouse.default.dm.ft_order"
+    assert missing_column.table == "Clickhouse-Sales.default.dm.ft_order"
     assert "order_create_dttm" in missing_column.suggestions
 
 
@@ -84,9 +187,9 @@ def test_preflight_allows_group_by_select_alias() -> None:
         ),
         dialect="clickhouse",
         engine="clickhouse",
-        context_tables=["Sample-ClickHouse.default.dm.ft_order"],
+        context_tables=["Clickhouse-Sales.default.dm.ft_order"],
         metadata_table_columns={
-            "Sample-ClickHouse.default.dm.ft_order": {
+            "Clickhouse-Sales.default.dm.ft_order": {
                 "order_create_dttm",
             }
         },
@@ -115,14 +218,14 @@ def test_preflight_allows_cte_join_with_physical_tables_only() -> None:
         dialect="clickhouse",
         engine="clickhouse",
         context_tables=[
-            "Sample-ClickHouse.default.dm.ft_order",
-            "Sample-ClickHouse.default.dm.dim_user",
+            "Clickhouse-Sales.default.dm.ft_order",
+            "Clickhouse-Sales.default.dm.dim_user",
         ],
         metadata_table_columns={
-            "Sample-ClickHouse.default.dm.ft_order": {
+            "Clickhouse-Sales.default.dm.ft_order": {
                 "user_id",
             },
-            "Sample-ClickHouse.default.dm.dim_user": {
+            "Clickhouse-Sales.default.dm.dim_user": {
                 "user_id",
                 "segment",
             },
@@ -170,9 +273,9 @@ def test_preflight_allows_clickhouse_cte_analytics_query_with_physical_tables_on
         ),
         dialect="clickhouse",
         engine="clickhouse",
-        context_tables=["Sample-ClickHouse.default.dm.orders_daily_report"],
+        context_tables=["Clickhouse-Sales.default.dm.orders_daily_report"],
         metadata_table_columns={
-            "Sample-ClickHouse.default.dm.orders_daily_report": {
+            "Clickhouse-Sales.default.dm.orders_daily_report": {
                 "report_date",
                 "gmv",
                 "orders",
@@ -205,6 +308,27 @@ def test_preflight_reports_parse_failure_as_failed_sql_not_uncertain_metadata() 
     assert "Unable to parse SQL for semantic preflight" in result.errors[0].message
 
 
+def test_preflight_parse_failure_guides_trino_execution_reference_retry() -> None:
+    service = SemanticSqlPreflightService()
+
+    result = service.check(
+        sql="SELECT MAX(dt_order) FROM DWH-iceberrg.default.mm.ft_mm_order_items",
+        dialect="trino",
+        engine="trino",
+        context_tables=["trino_omni.iceberg.dm_ft.ft_order"],
+        metadata_table_columns={},
+        requested_connector_name="trino",
+        selected_connector_name="trino",
+    )
+
+    assert result.status == "fail"
+    assert result.errors[0].code == "sql_parse_failed"
+    assert "use catalog.schema.table" in result.errors[0].message
+    assert result.errors[0].message.endswith(
+        "For Trino executable SQL, use catalog.schema.table."
+    )
+
+
 def test_preflight_blocks_cross_database_references() -> None:
     service = SemanticSqlPreflightService()
 
@@ -217,15 +341,15 @@ def test_preflight_blocks_cross_database_references() -> None:
         dialect="clickhouse",
         engine="clickhouse",
         context_tables=[
-            "Sample-ClickHouse.default.dm.ft_order",
-            "Sample-ClickHouse.analytics.mart.dim_customer",
+            "Clickhouse-Sales.default.dm.ft_order",
+            "Clickhouse-Sales.analytics.mart.dim_customer",
         ],
         metadata_table_columns={
-            "Sample-ClickHouse.default.dm.ft_order": {
+            "Clickhouse-Sales.default.dm.ft_order": {
                 "order_id",
                 "customer_id",
             },
-            "Sample-ClickHouse.analytics.mart.dim_customer": {
+            "Clickhouse-Sales.analytics.mart.dim_customer": {
                 "customer_id",
                 "segment",
             },
@@ -253,16 +377,16 @@ def test_preflight_uses_fqn_columns_for_schema_qualified_alias_table() -> None:
         dialect="clickhouse",
         engine="clickhouse",
         context_tables=[
-            "Sample-ClickHouse.default.dm.ft_order",
-            "Sample-ClickHouse.default.imp_prod.ft_order",
+            "Clickhouse-Sales.default.dm.ft_order",
+            "Clickhouse-Sales.default.imp_prod.ft_order",
             "dm.ft_order",
         ],
         metadata_table_columns={
-            "Sample-ClickHouse.default.dm.ft_order": {
+            "Clickhouse-Sales.default.dm.ft_order": {
                 "order_create_dttm",
                 "order_id",
             },
-            "Sample-ClickHouse.default.imp_prod.ft_order": {
+            "Clickhouse-Sales.default.imp_prod.ft_order": {
                 "order_id",
             },
         },
@@ -300,9 +424,7 @@ def test_preflight_blocks_clickhouse_prewhere_for_trino() -> None:
         dialect="trino",
         engine="trino",
         context_tables=["DWH-iceberrg.iceberg.iceberg.ft_order"],
-        metadata_table_columns={
-            "DWH-iceberrg.iceberg.iceberg.ft_order": {"order_id"}
-        },
+        metadata_table_columns={"DWH-iceberrg.iceberg.iceberg.ft_order": {"order_id"}},
         requested_connector_name="trino-adhoc",
         selected_connector_name="trino-adhoc",
     )
@@ -320,11 +442,11 @@ def test_preflight_prefers_longest_suffix_match_for_trino_tables() -> None:
         dialect="trino",
         engine="trino",
         context_tables=[
-            "Sample-ClickHouse.default.dm.ft_order",
+            "Clickhouse-Sales.default.dm.ft_order",
             "trino_omni.iceberg.dm_ft.ft_order",
         ],
         metadata_table_columns={
-            "Sample-ClickHouse.default.dm.ft_order": {"order_id"},
+            "Clickhouse-Sales.default.dm.ft_order": {"order_id"},
             "trino_omni.iceberg.dm_ft.ft_order": {"order_source"},
         },
         requested_connector_name="trino-adhoc",

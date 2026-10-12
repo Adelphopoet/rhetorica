@@ -14,8 +14,14 @@ dependencies = [
   "celery>=5.4,<6.0",
   "cryptography>=44.0,<45.0",
   "httpx>=0.28,<1.0",
+  "httpx2>=2.12,<3.0",
+  "langfuse>=4.0,<5.0",
   "mcp>=1.7,<2.0",
+  "openinference-instrumentation-openai-agents>=0.1,<1.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.40,<1.41",
+  "opentelemetry-instrumentation-celery>=0.61b0,<0.62",
   "opentelemetry-sdk>=1.28,<2.0",
+  "openai-agents==0.22.3",
   "orjson>=3.10,<4.0",
   "psycopg[binary]>=3.2,<4.0",
   "pydantic>=2.10,<3.0",
@@ -30,7 +36,13 @@ dependencies = [
   "boto3>=1.36,<2.0",
   "qdrant-client>=1.12,<2.0",
   "fastembed>=0.4,<0.6",
-  "reportlab>=4.4,<5.0"
+  "reportlab>=4.4,<5.0",
+  "plotly>=6.1,<7.0",
+  "kaleido>=1.0,<2.0",
+  "openpyxl>=3.1,<4.0",
+  "xlsxwriter>=3.2,<4.0",
+  "temporalio>=1.32.0",
+  "jsonschema>=4.26.0",
 ]
 
 [project.optional-dependencies]

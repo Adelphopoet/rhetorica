@@ -89,8 +89,19 @@ class ExplainabilityPayloadEnricher:
             if not isinstance(raw_items, list):
                 raw_items = result.get("tables")
             if not isinstance(raw_items, list):
+                raw_items = result.get("items")
+            if not isinstance(raw_items, list):
+                raw_page = result.get("page")
+                raw_items = [raw_page] if isinstance(raw_page, dict) else raw_items
+            if not isinstance(raw_items, list):
                 raw_entity = result.get("entity")
                 raw_items = [raw_entity] if isinstance(raw_entity, dict) else []
+            if not raw_items:
+                raw_file = result.get("file")
+                raw_items = [raw_file] if isinstance(raw_file, dict) else []
+            if not raw_items:
+                raw_blame = result.get("blame")
+                raw_items = [raw_blame] if isinstance(raw_blame, dict) else []
             for item in raw_items[:3]:
                 if not isinstance(item, dict):
                     continue
@@ -130,18 +141,26 @@ class ExplainabilityPayloadEnricher:
         item: dict[str, Any],
         state: ToolOrchestrationState,
     ) -> dict[str, Any] | None:
-        if "confluence" in state.metadata_sources and (
-            isinstance(item.get("url"), str) or isinstance(item.get("excerpt"), str)
+        gitlab_file = cls.evidence_from_gitlab_file_item(item)
+        if gitlab_file is not None:
+            return gitlab_file
+        if "documentation" in state.metadata_sources and (
+            isinstance(item.get("page_ref"), str)
+            or isinstance(item.get("url"), str)
+            or isinstance(item.get("snippet"), str)
+            or isinstance(item.get("content"), str)
         ):
-            reference = str(item.get("url") or item.get("id") or item.get("title") or "")
+            reference = str(item.get("page_ref") or item.get("url") or item.get("title") or "")
             if not reference:
                 return None
             return {
-                "evidence_id": f"e_conf_{abs(hash(reference)) % 100000}",
-                "type": "confluence_page",
+                "evidence_id": f"e_doc_{abs(hash(reference)) % 100000}",
+                "type": "internal_documentation",
                 "reference": reference,
                 "title": FinalPayloadPolicy.to_optional_str(item.get("title")),
-                "snippet": FinalPayloadPolicy.to_optional_str(item.get("excerpt")),
+                "snippet": FinalPayloadPolicy.to_optional_str(
+                    item.get("snippet") or item.get("content")
+                ),
                 "status": "verified",
             }
         if "rag" in state.metadata_sources and (
@@ -173,6 +192,47 @@ class ExplainabilityPayloadEnricher:
                 "status": "verified",
             }
         return None
+
+    @classmethod
+    def evidence_from_gitlab_file_item(cls, item: dict[str, Any]) -> dict[str, Any] | None:
+        project_path = FinalPayloadPolicy.to_optional_str(item.get("project_path"))
+        file_path = FinalPayloadPolicy.to_optional_str(item.get("file_path") or item.get("path"))
+        if project_path is None or file_path is None:
+            return None
+        reference = FinalPayloadPolicy.to_optional_str(item.get("url")) or f"{project_path}:{file_path}"
+        return {
+            "evidence_id": f"e_gitlab_{abs(hash(reference)) % 100000}",
+            "type": "gitlab_file",
+            "reference": reference,
+            "title": file_path,
+            "snippet": cls.gitlab_item_snippet(item),
+            "status": "verified",
+        }
+
+    @staticmethod
+    def gitlab_item_snippet(item: dict[str, Any]) -> str | None:
+        snippet = FinalPayloadPolicy.to_optional_str(item.get("snippet") or item.get("content"))
+        if snippet is not None:
+            return snippet
+        ranges = item.get("ranges")
+        if not isinstance(ranges, list):
+            return None
+        parts: list[str] = []
+        for blame_range in ranges[:3]:
+            if not isinstance(blame_range, dict):
+                continue
+            start_line = blame_range.get("start_line")
+            end_line = blame_range.get("end_line")
+            author = FinalPayloadPolicy.to_optional_str(blame_range.get("author_name"))
+            title = FinalPayloadPolicy.to_optional_str(blame_range.get("title"))
+            line_span = (
+                f"lines {start_line}-{end_line}"
+                if isinstance(start_line, int) and isinstance(end_line, int)
+                else "lines"
+            )
+            detail = ", ".join(part for part in [author, title] if part)
+            parts.append(f"{line_span}: {detail}" if detail else line_span)
+        return "; ".join(parts) if parts else None
 
     @classmethod
     def semantic_candidate_snippet_from_state(

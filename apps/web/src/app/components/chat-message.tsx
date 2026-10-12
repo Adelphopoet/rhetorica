@@ -1,17 +1,18 @@
 "use client";
 
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Avatar, Badge, Button, Tooltip, useToast } from "@rhetorica/ui";
-import { AlertTriangle, Bot, Check, ChevronDown, Circle, CircleOff, Copy, Download, FileCode2, FlaskConical, LoaderCircle, User } from "lucide-react";
+import { Badge, Button, Tooltip, useToast } from "@rhetorica/ui";
+import { AlertTriangle, Check, ChevronDown, CircleOff, Copy, Download, FileCode2, FlaskConical, LoaderCircle, ThumbsDown, ThumbsUp } from "lucide-react";
 import { cn } from "@rhetorica/ui";
+import { DISPLAY_TIME_ZONE } from "@/lib/dateTime";
 import { CollapsibleThinking } from "./streaming-components";
 import { MarkdownMessage } from "./markdown-message";
 import {
   getExecutionPhaseLabel,
   type ChatAskResponse,
+  type ChatFeedbackDetails,
   type ChatDeliveryState,
-  type FeedbackReason,
 } from "@/features/chat/chatViewModel";
 import { copyTextToClipboard } from "@/features/chat/chatCopy";
 import { downloadAnalysisExport, type AnalysisExportFormat } from "@/features/chat/exportApi";
@@ -24,10 +25,7 @@ import type {
   ToolCallEntry,
 } from "@/features/chat/useChatStreaming";
 import type { ClarificationRequest } from "./clarification/clarificationTypes";
-import type {
-  AnalysisCheckpointDigest,
-  AnalysisPlan,
-} from "@/features/chat/streamingTypes";
+import { formatFileSize, type FileArtifactRef } from "@/features/files/fileApi";
 
 const LazyVisualizationChart = lazy(async () => ({
   default: (await import("@/features/charts")).VisualizationChart,
@@ -46,24 +44,19 @@ interface ChatMessageProps {
   isStreaming?: boolean;
   isComplete?: boolean;
   feedback?: "useful" | "wrong" | "unsafe" | "incomplete" | null;
-  feedbackReason?: FeedbackReason | null;
-  feedbackComment?: string | null;
+  feedbackWhatWentWrong?: string | null;
+  feedbackExpectedAnswer?: string | null;
   feedbackLoading?: boolean;
   deliveryState?: ChatDeliveryState;
-  analysisPlan?: AnalysisPlan | null;
-  checkpointDigest?: AnalysisCheckpointDigest | null;
   payload?: ChatAskResponse;
+  files?: FileArtifactRef[];
   clarificationRequest?: ClarificationRequest | null;
-  onApproveAnalysis?: () => void;
-  onResumeAnalysis?: () => void;
-  onCancelAnalysis?: () => void;
   onSelectClarification?: (clarificationId: string, choiceId: string, resolvedValue: string) => void;
   copyText: string;
   onFeedback?: (
     messageId: string,
     feedback: "useful" | "wrong" | "unsafe" | "incomplete",
-    reason?: FeedbackReason | null,
-    comment?: string | null
+    details?: ChatFeedbackDetails
   ) => void;
   onRepairTurn?: (messageId: string) => void;
   /** Called when user clicks "Inspect result" on an assistant message. Passes execution_id if available */
@@ -83,17 +76,13 @@ export function ChatMessageComponent({
   isStreaming = false,
   isComplete = false,
   feedback = null,
-  feedbackReason = null,
-  feedbackComment = null,
+  feedbackWhatWentWrong = null,
+  feedbackExpectedAnswer = null,
   feedbackLoading = false,
   deliveryState = "idle",
-  analysisPlan = null,
-  checkpointDigest = null,
   payload,
+  files = [],
   clarificationRequest,
-  onApproveAnalysis,
-  onResumeAnalysis,
-  onCancelAnalysis,
   onSelectClarification,
   copyText,
   onFeedback,
@@ -105,10 +94,15 @@ export function ChatMessageComponent({
   const [exportingFormat, setExportingFormat] = useState<AnalysisExportFormat | null>(null);
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [showFeedbackDetails, setShowFeedbackDetails] = useState(false);
-  const [selectedReason, setSelectedReason] = useState<FeedbackReason | null>(feedbackReason);
-  const [feedbackCommentText, setFeedbackCommentText] = useState<string>(feedbackComment || "");
+  const [whatWentWrong, setWhatWentWrong] = useState(feedbackWhatWentWrong || "");
+  const [expectedAnswer, setExpectedAnswer] = useState(feedbackExpectedAnswer || "");
+  useEffect(() => {
+    setWhatWentWrong(feedbackWhatWentWrong || "");
+    setExpectedAnswer(feedbackExpectedAnswer || "");
+  }, [id, feedback, feedbackWhatWentWrong, feedbackExpectedAnswer]);
   const isUser = role === "user";
-  const resolvedUserLabel = userLabel?.trim() || "Analyst";
+  const visibleFiles = files.length > 0 ? files : payload?.files ?? [];
+  const resolvedUserLabel = userLabel?.trim() || "Аналитик";
   const hasIntermediateSteps = thinkingBlocks.length > 0 || toolCalls.length > 0 || executionStatuses.length > 0;
   const analysisDocument = payload?.analysis_document ?? null;
   const hasAnalysisReport = !isUser && Boolean(analysisDocument?.blocks.length);
@@ -132,32 +126,9 @@ export function ChatMessageComponent({
     (payload?.claims && payload.claims.length > 0) ||
     (payload?.evidence && payload.evidence.length > 0)
   );
-  const feedbackOptions: Array<{
-    value: "useful" | "wrong" | "unsafe" | "incomplete";
-    label: string;
-  }> = [
-    { value: "useful", label: "Useful" },
-    { value: "wrong", label: "Wrong" },
-    { value: "unsafe", label: "Unsafe" },
-    { value: "incomplete", label: "Incomplete" },
-  ];
-
-  const feedbackReasonOptions: Array<{
-    value: FeedbackReason;
-    label: string;
-    description: string;
-  }> = [
-    { value: "wrong_source", label: "Wrong Source", description: "Wrong table or data source" },
-    { value: "wrong_metric", label: "Wrong Metric", description: "Incorrect calculation logic" },
-    { value: "unsafe_sql", label: "Unsafe SQL", description: "SQL is potentially unsafe" },
-    { value: "incomplete", label: "Incomplete", description: "Missing information or scope" },
-    { value: "bad_chart", label: "Bad Chart", description: "Visualization is wrong" },
-    { value: "other", label: "Other", description: "Other issue" },
-  ];
-
-  const selectedFeedbackLabel = feedbackOptions.find((item) => item.value === feedback)?.label;
-  const canShowReasonSelector = feedback === "wrong" || feedback === "incomplete";
+  const hasNegativeFeedback = feedback !== null && feedback !== "useful";
   const canShowRepairButton = feedback !== null && feedback !== "useful";
+  const canSaveExpandedFeedback = Boolean(whatWentWrong.trim() && expectedAnswer.trim());
   const executionPhase = getExecutionPhaseLabel(executionStatuses);
   const deliveryBadge = (() => {
     if (isUser) {
@@ -166,28 +137,28 @@ export function ChatMessageComponent({
     if (deliveryState === "streaming") {
       return {
         variant: "primary" as const,
-        label: executionPhase ?? "Streaming answer",
+        label: executionPhase ?? "Ответ формируется",
         icon: LoaderCircle,
       };
     }
     if (deliveryState === "complete") {
       return {
         variant: "success" as const,
-        label: executionPhase ?? "Answer ready",
+        label: executionPhase ?? "Ответ готов",
         icon: Check,
       };
     }
     if (deliveryState === "cancelled") {
       return {
         variant: "warning" as const,
-        label: "Generation cancelled",
+        label: "Создание ответа отменено",
         icon: CircleOff,
       };
     }
     if (deliveryState === "error") {
       return {
         variant: "danger" as const,
-        label: executionPhase ?? "Answer failed",
+        label: executionPhase ?? "Не удалось сформировать ответ",
         icon: AlertTriangle,
       };
     }
@@ -203,8 +174,8 @@ export function ChatMessageComponent({
     } catch (error) {
       addToast({
         type: "error",
-        title: "Copy failed",
-        description: error instanceof Error ? error.message : "Message could not be copied.",
+        title: "Не удалось скопировать",
+        description: error instanceof Error ? error.message : "Не удалось скопировать сообщение",
       });
     }
   };
@@ -213,8 +184,8 @@ export function ChatMessageComponent({
     if (!exportConversationId || !exportMessageId) {
       addToast({
         type: "error",
-        title: "Export unavailable",
-        description: "This answer does not have a persisted snapshot yet.",
+        title: "Экспорт недоступен",
+        description: "У ответа ещё нет сохранённого снимка результата",
       });
       return;
     }
@@ -229,56 +200,68 @@ export function ChatMessageComponent({
       });
       addToast({
         type: "success",
-        title: "Export ready",
-        description: `${format.toUpperCase()} snapshot downloaded.`,
+        title: "Экспорт готов",
+        description: `Снимок ${format.toUpperCase()} скачан`,
       });
     } catch (error) {
       addToast({
         type: "error",
-        title: "Export failed",
-        description: error instanceof Error ? error.message : "Unknown export failure.",
+        title: "Не удалось выполнить экспорт",
+        description: error instanceof Error ? error.message : "Неизвестная ошибка экспорта",
       });
     } finally {
       setExportingFormat(null);
     }
   };
 
+  const canRenderFeedback = !isUser && deliveryState === "complete" && id && onFeedback && !clarificationRequest;
+  const copyButton = (
+    <Tooltip content={copied ? "Скопировано" : "Скопировать сообщение"} side="top">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        aria-label="Скопировать сообщение"
+        onClick={() => {
+          void handleCopy();
+        }}
+        className="mr-2 h-8 w-8 border border-border-strong/50 p-0 text-secondary transition hover:bg-elevated hover:text-primary focus:ring-0"
+      >
+        {copied ? (
+          <Check className="h-4 w-4 text-success" />
+        ) : (
+          <Copy className="h-4 w-4" />
+        )}
+      </Button>
+    </Tooltip>
+  );
+
   return (
     <motion.div
+      data-testid={`chat-message-${role}`}
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
       className={cn(
-        "flex gap-3 rounded-[24px] border p-4 shadow-[0_20px_60px_rgba(0,0,0,0.16)]",
+        "flex gap-3 rounded-[24px]",
         isUser
-          ? "border-[#36598a] bg-[linear-gradient(180deg,rgba(17,29,49,0.9),rgba(12,20,34,0.94))]"
-          : "border-[#1f2a3f] bg-[linear-gradient(180deg,rgba(11,17,30,0.88),rgba(9,14,25,0.94))]",
-        deliveryState === "streaming" ? "ring-2 ring-[#5da8ff]/30 ring-opacity-50" : "",
+          ? "border border-accent-border bg-[linear-gradient(180deg,rgb(var(--color-elevated)/0.9),rgb(var(--color-surface)/0.94))] px-5 py-4 shadow-[0_20px_60px_rgb(var(--color-shadow)/calc(0.16*var(--shadow-opacity-scale)))]"
+          : "border border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.88),rgb(var(--color-page)/0.94))] px-5 py-4 shadow-[0_20px_60px_rgb(var(--color-shadow)/calc(0.16*var(--shadow-opacity-scale)))]",
+        !isUser && deliveryState === "streaming" && "ring-2 ring-accent/30",
         className
       )}
     >
-      <Avatar
-        fallback={isUser ? "U" : "AI"}
-        size="md"
-        className={isUser ? "bg-[#5da8ff]/20" : "bg-[#38c67d]/20"}
-      >
-        {isUser ? (
-          <User className="h-5 w-5 text-[#5da8ff]" />
-        ) : (
-          <Bot className="h-5 w-5 text-[#38c67d]" />
-        )}
-      </Avatar>
       <div className="min-w-0 flex-1">
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-[#a9b8d4]">
+          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-secondary">
             {isUser ? resolvedUserLabel : "Rhetorica Assistant"}
           </span>
           {timestamp ? (
-            <span className="text-xs text-[#7484a3]">
+            <span className="text-xs text-muted">
               {timestamp.toLocaleTimeString("en-GB", {
                 hour: "2-digit",
                 minute: "2-digit",
-                timeZone: "UTC",
+                timeZone: DISPLAY_TIME_ZONE,
               })}
             </span>
           ) : null}
@@ -309,16 +292,6 @@ export function ChatMessageComponent({
           />
         )}
 
-        {!isUser && analysisPlan ? (
-          <AnalysisPlanBlock
-            plan={analysisPlan}
-            checkpoint={checkpointDigest}
-            onApprove={onApproveAnalysis}
-            onResume={onResumeAnalysis}
-            onCancel={onCancelAnalysis}
-          />
-        ) : null}
-
         {hasAnalysisReport && analysisDocument ? (
           <AnalysisReport
             document={analysisDocument}
@@ -337,7 +310,7 @@ export function ChatMessageComponent({
         {standaloneVisualization ? (
           <Suspense
             fallback={
-              <div className="min-h-[320px] rounded-xl border border-[#1d2c46] bg-[#09111e]/78" />
+              <div className="min-h-[320px] rounded-xl border border-border bg-surface/[0.78]" />
             }
           >
             <LazyVisualizationChart
@@ -360,7 +333,7 @@ export function ChatMessageComponent({
 
         {/* Final answer - hidden when clarification is pending */}
         {isUser ? (
-          <p className="whitespace-pre-wrap text-sm leading-7 text-[#edf3ff]">{text}</p>
+          <p className="whitespace-pre-wrap text-sm leading-7 text-primary">{text}</p>
         ) : hasAnalysisReport ? (
           null
         ) : clarificationRequest ? (
@@ -368,6 +341,25 @@ export function ChatMessageComponent({
         ) : (
           <MarkdownMessage text={text} />
         )}
+
+        {visibleFiles.length > 0 ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2" aria-label="Файлы сообщения">
+            {visibleFiles.map((file) => (
+              <a
+                key={file.id}
+                href={`/api/files/${encodeURIComponent(file.id)}/content`}
+                download={file.filename}
+                className="flex min-w-0 items-center gap-3 rounded-xl border border-border-strong bg-surface px-3 py-2 text-left transition hover:border-accent hover:bg-elevated"
+              >
+                <Download className="h-4 w-4 shrink-0 text-accent" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm text-primary">{file.filename}</span>
+                  <span className="block text-xs text-secondary">{formatFileSize(file.size_bytes)}</span>
+                </span>
+              </a>
+            ))}
+          </div>
+        ) : null}
 
         {/* Claims with evidence - hidden when clarification is pending */}
         {!isUser && !clarificationRequest && payload?.claims && payload.claims.length > 0 ? (
@@ -386,92 +378,121 @@ export function ChatMessageComponent({
           />
         ) : null}
 
-        {!isUser && deliveryState === "complete" && id && onFeedback && !clarificationRequest ? (
-          <div className="mt-3 flex flex-col gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              {feedbackOptions.map((item) => (
-                <Button
-                  key={item.value}
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    onFeedback(id, item.value);
-                    // Show reason selector for negative feedback
-                    if (item.value === "wrong" || item.value === "incomplete") {
-                      setShowFeedbackDetails(true);
-                    } else {
-                      setShowFeedbackDetails(false);
-                    }
-                  }}
-                  className={cn(
-                    "h-7 px-2.5 transition-all",
-                    feedback === item.value
-                      ? "bg-[#5da8ff]/30 text-white border border-[#5da8ff] shadow-[0_0_0_1px_rgba(93,168,255,0.45)]"
-                      : "text-[#8ea1c3] border border-[#2e3d59]/50"
-                  )}
-                >
-                  {feedback === item.value ? <Check className="h-3.5 w-3.5" /> : null}
-                  {item.label}
-                </Button>
-              ))}
-              <span className="text-xs text-[#8ea1c3]">
-                {feedbackLoading ? "Saving..." : selectedFeedbackLabel ? `Selected: ${selectedFeedbackLabel}` : "Choose reaction"}
-              </span>
+        {canRenderFeedback ? (
+          <div className="mt-5 flex flex-col gap-3">
+            <div className="relative -left-0.5 flex flex-wrap items-center gap-2">
+              {copyButton}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={feedbackLoading}
+                aria-label="Полезно"
+                onClick={() => {
+                  onFeedback(id, "useful");
+                  setShowFeedbackDetails(false);
+                }}
+                className={cn(
+                  "h-8 w-8 p-0 transition-all focus:ring-0",
+                  feedback === "useful"
+                    ? "bg-accent/30 text-primary border border-accent shadow-[0_0_0_1px_rgb(var(--color-accent)/0.45)]"
+                    : "text-secondary border border-border-strong/50"
+                )}
+              >
+                <ThumbsUp className="h-4 w-4" />
+              </Button>
+
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={feedbackLoading}
+                aria-label="Не полезно"
+                aria-pressed={showFeedbackDetails || hasNegativeFeedback}
+                onClick={() => setShowFeedbackDetails(true)}
+                className={cn(
+                  "h-8 w-8 p-0 transition-all focus:ring-0",
+                  showFeedbackDetails || hasNegativeFeedback
+                    ? "bg-accent/30 text-primary border border-accent shadow-[0_0_0_1px_rgb(var(--color-accent)/0.45)]"
+                    : "text-secondary border border-border-strong/50"
+                )}
+              >
+                <ThumbsDown className="h-4 w-4" />
+              </Button>
             </div>
 
-            {/* Reason selector and comment field for negative feedback */}
-            {showFeedbackDetails && canShowReasonSelector ? (
-              <div className="flex flex-col gap-2 rounded-lg border border-[#2e3d59]/50 bg-[#0f1828] p-3">
-                <div className="flex flex-wrap gap-2">
-                  {feedbackReasonOptions.map((option) => (
-                    <Button
-                      key={option.value}
-                      type="button"
-                      size="sm"
-                      variant={selectedReason === option.value ? "secondary" : "ghost"}
-                      onClick={() => setSelectedReason(option.value)}
-                      className={cn(
-                        "h-6 text-xs",
-                        selectedReason === option.value
-                          ? "bg-[#5da8ff]/20 text-white border border-[#5da8ff]"
-                          : "text-[#8ea1c3] border border-[#2e3d59]/50 hover:bg-[#132033]"
-                      )}
-                    >
-                      {option.label}
-                    </Button>
-                  ))}
+            {showFeedbackDetails ? (
+              <form
+                className="flex max-w-xl flex-col gap-4 rounded-2xl border border-border-strong bg-elevated p-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!canSaveExpandedFeedback || feedbackLoading) {
+                    return;
+                  }
+                  onFeedback(id, "wrong", {
+                    whatWentWrong: whatWentWrong.trim(),
+                    expectedAnswer: expectedAnswer.trim(),
+                  });
+                  setShowFeedbackDetails(false);
+                }}
+              >
+                <div className="flex items-start gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-warning/30 bg-warning/10 text-warning">
+                    <ThumbsDown className="h-4 w-4" />
+                  </span>
+                  <span>
+                    <span className="block text-sm font-semibold text-primary">Помогите улучшить ответ</span>
+                    <span className="mt-0.5 block text-xs leading-5 text-secondary">Опишите проблему и ожидаемый результат — этого достаточно для разбора.</span>
+                  </span>
                 </div>
-                <textarea
-                  className="min-h-[60px] w-full resize-none rounded-lg border border-[#2e3d59]/50 bg-[#07101d]/62 px-3 py-2 text-xs text-[#d8e4f8] placeholder:text-[#7484a3] focus:border-[#5da8ff] focus:outline-none"
-                  placeholder="Add a comment (optional)..."
-                  value={feedbackCommentText}
-                  onChange={(e) => setFeedbackCommentText(e.target.value)}
-                />
-                <div className="flex items-center gap-2">
+                <label className="flex flex-col gap-2 text-sm font-medium text-primary" htmlFor={`${id}-what-went-wrong`}>
+                  Что пошло не так? <span className="text-warning" aria-hidden="true">*</span>
+                  <textarea
+                    id={`${id}-what-went-wrong`}
+                    aria-label="Что пошло не так?"
+                    required
+                    className="min-h-[88px] w-full resize-y rounded-xl border border-control-border bg-surface px-3 py-2.5 text-sm font-normal text-primary placeholder:text-muted outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                    placeholder="Например: использована неверная метрика или период"
+                    value={whatWentWrong}
+                    onChange={(event) => setWhatWentWrong(event.target.value)}
+                  />
+                </label>
+                <label className="flex flex-col gap-2 text-sm font-medium text-primary" htmlFor={`${id}-expected-answer`}>
+                  Как нужно было ответить? <span className="text-warning" aria-hidden="true">*</span>
+                  <textarea
+                    id={`${id}-expected-answer`}
+                    aria-label="Как нужно было ответить?"
+                    required
+                    className="min-h-[88px] w-full resize-y rounded-xl border border-control-border bg-surface px-3 py-2.5 text-sm font-normal text-primary placeholder:text-muted outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+                    placeholder="Опишите ожидаемый вывод, данные или формат ответа"
+                    value={expectedAnswer}
+                    onChange={(event) => setExpectedAnswer(event.target.value)}
+                  />
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
                   <Button
-                    type="button"
+                    type="submit"
                     size="sm"
                     variant="secondary"
-                    onClick={() => {
-                      onFeedback(id, feedback!, selectedReason, feedbackCommentText);
-                      setShowFeedbackDetails(false);
-                    }}
-                    className="bg-[#5da8ff]/20 text-white hover:bg-[#5da8ff]/30"
+                    disabled={!canSaveExpandedFeedback || feedbackLoading}
+                    className="bg-accent/20 text-primary hover:bg-accent/30"
                   >
-                    Save
+                    <Check className="h-4 w-4" />
+                    Отправить отзыв
                   </Button>
                   <Button
                     type="button"
                     size="sm"
                     variant="ghost"
-                    onClick={() => setShowFeedbackDetails(false)}
-                    className="text-[#8ea1c3]"
+                    onClick={() => {
+                      setShowFeedbackDetails(false);
+                    }}
+                    className="text-secondary"
                   >
-                    Cancel
+                    Отмена
                   </Button>
                 </div>
-              </div>
+              </form>
             ) : null}
 
             {/* Fix answer button for negative feedback */}
@@ -481,23 +502,33 @@ export function ChatMessageComponent({
                   type="button"
                   size="sm"
                   variant="secondary"
-                  onClick={() => onRepairTurn(id)}
-                  className="gap-2 bg-[#f1b45f]/20 text-[#f1b45f] hover:bg-[#f1b45f]/30 border border-[#f1b45f]/30"
+                  disabled={feedbackLoading}
+                  onClick={() => {
+                    if (!feedbackLoading) {
+                      onRepairTurn(id);
+                    }
+                  }}
+                  className="gap-2 bg-warning/20 text-warning hover:bg-warning/30 border border-warning/30"
                 >
                   <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                   </svg>
-                  Fix Answer
+                  Исправить ответ
                 </Button>
               </div>
             ) : null}
           </div>
         ) : null}
 
+        {!canRenderFeedback ? (
+          <div className="relative -left-0.5 mt-3 flex items-center gap-2">{copyButton}</div>
+        ) : null}
+
+        {canExportReport || (canInspect && onInspectResult) ? (
         <div className="mt-3 flex flex-wrap justify-end gap-2">
           {canExportReport ? (
             <div className="relative inline-flex">
-              <Tooltip content="Export report" side="top">
+              <Tooltip content="Экспорт отчёта" side="top">
                 <Button
                   type="button"
                   variant="ghost"
@@ -505,29 +536,29 @@ export function ChatMessageComponent({
                   disabled={exportingFormat !== null}
                   aria-expanded={isExportMenuOpen}
                   aria-haspopup="menu"
-                  aria-label="Export report"
+                  aria-label="Экспорт отчёта"
                   onClick={() => {
                     setIsExportMenuOpen((current) => !current);
                   }}
-                  className="gap-2 border border-[#2e3d59]/60 px-3 text-[#9db1d3] hover:bg-[#132033] hover:text-white"
+                  className="gap-2 border border-border-strong/60 px-3 text-secondary hover:bg-elevated hover:text-primary"
                 >
                   <Download className="h-4 w-4" />
-                  {exportingFormat ? `Exporting ${exportingFormat.toUpperCase()}` : "Export"}
+                  {exportingFormat ? `Экспорт ${exportingFormat.toUpperCase()}…` : "Экспорт"}
                   <ChevronDown className="h-4 w-4" />
                 </Button>
               </Tooltip>
               {isExportMenuOpen ? (
                 <div
                   role="menu"
-                  aria-label="Export report formats"
-                  className="absolute right-0 top-full z-20 mt-2 min-w-36 overflow-hidden rounded-2xl border border-[#2e3d59] bg-[#0b1423] p-1 shadow-2xl shadow-black/35"
+                  aria-label="Форматы экспорта отчёта"
+                  className="absolute right-0 top-full z-20 mt-2 min-w-36 overflow-hidden rounded-2xl border border-border-strong bg-surface p-1 shadow-2xl shadow-shadow/35"
                 >
                   {(["html", "pdf", "ipynb"] as AnalysisExportFormat[]).map((format) => (
                     <button
                       key={format}
                       type="button"
                       role="menuitem"
-                      className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-semibold uppercase text-[#d5e2fb] transition hover:bg-[#162238] hover:text-[#edf3ff]"
+                      className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-semibold uppercase text-primary transition hover:bg-elevated hover:text-primary"
                       onClick={() => {
                         void handleExport(format);
                       }}
@@ -541,42 +572,24 @@ export function ChatMessageComponent({
             </div>
           ) : null}
           {canInspect && onInspectResult ? (
-            <Tooltip content="Inspect result" side="top">
+            <Tooltip content="Просмотреть результат" side="top">
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                aria-label="Inspect result"
+                aria-label="Просмотреть результат"
                 onClick={() => {
                   onInspectResult(payload?.execution?.execution_id ?? null);
                 }}
-                className="gap-2 border border-[#2e3d59]/60 px-3 text-[#9db1d3] hover:bg-[#132033] hover:text-white"
+                className="gap-2 border border-border-strong/60 px-3 text-secondary hover:bg-elevated hover:text-primary"
               >
                 <FlaskConical className="h-4 w-4" />
-                Inspect
+                Просмотр
               </Button>
             </Tooltip>
           ) : null}
-          <Tooltip content={copied ? "Copied" : "Copy message"} side="top">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label="Copy message"
-              onClick={() => {
-                void handleCopy();
-              }}
-              className="gap-2 border border-[#2e3d59]/60 px-3 text-[#9db1d3] hover:bg-[#132033] hover:text-white"
-            >
-              {copied ? (
-                <Check className="h-4 w-4 text-[#38c67d]" />
-              ) : (
-                <Copy className="h-4 w-4" />
-              )}
-              {copied ? "Copied" : "Copy"}
-            </Button>
-          </Tooltip>
         </div>
+        ) : null}
       </div>
     </motion.div>
   );
@@ -598,19 +611,19 @@ function SqlSnapshotBlock({
   }
 
   return (
-    <details className="mt-3 rounded-xl border border-[#22314d] bg-[#07101d]/62">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-[#9db1d3] marker:hidden">
-        <FileCode2 className="h-4 w-4 text-[#89b7ff]" />
+    <details className="mt-3 rounded-xl border border-border-strong bg-surface/[0.62]">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-secondary marker:hidden">
+        <FileCode2 className="h-4 w-4 text-accent" />
         SQL
-        <span className="ml-auto rounded-full border border-[#2d4268] px-2 py-0.5 text-[11px] normal-case tracking-normal text-[#8fa5c8]">
+        <span className="ml-auto rounded-full border border-border-strong px-2 py-0.5 text-[11px] normal-case tracking-normal text-secondary">
           {engine}
         </span>
       </summary>
-      <div className="border-t border-[#1b2740] p-3">
-        <SqlCodeBlock title={hasDistinctExecutedSql ? "Executed SQL" : "SQL"} sql={primarySql} />
+      <div className="border-t border-border p-3">
+        <SqlCodeBlock title={hasDistinctExecutedSql ? "Выполненный SQL" : "SQL"} sql={primarySql} />
         {hasDistinctExecutedSql && generatedSql ? (
           <div className="mt-3">
-            <SqlCodeBlock title="Original SQL draft" sql={generatedSql} />
+            <SqlCodeBlock title="Исходный черновик SQL" sql={generatedSql} />
           </div>
         ) : null}
       </div>
@@ -621,96 +634,12 @@ function SqlSnapshotBlock({
 function SqlCodeBlock({ title, sql }: { title: string; sql: string }) {
   return (
     <section>
-      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#7f93b4]">
+      <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-secondary">
         {title}
       </p>
-      <pre className="max-h-[360px] overflow-auto rounded-lg border border-[#1b2740] bg-[#050b14] p-3 text-xs leading-6 text-[#dbe8ff]">
+      <pre className="max-h-[360px] overflow-auto rounded-lg border border-border bg-page p-3 text-xs leading-6 text-primary">
         <code>{sql}</code>
       </pre>
-    </section>
-  );
-}
-
-function AnalysisPlanBlock({
-  plan,
-  checkpoint,
-  onApprove,
-  onResume,
-  onCancel,
-}: {
-  plan: AnalysisPlan;
-  checkpoint?: AnalysisCheckpointDigest | null;
-  onApprove?: () => void;
-  onResume?: () => void;
-  onCancel?: () => void;
-}) {
-  const statusLabel = checkpoint?.status ?? plan.status;
-  const pendingApproval = checkpoint?.budget_state?.pending_approval;
-  const canApprove = statusLabel === "awaiting_user" && Boolean(pendingApproval);
-  const canResume = !canApprove && ["blocked", "awaiting_user", "failed"].includes(statusLabel);
-  const canCancel = ["planned", "running", "blocked", "awaiting_user"].includes(statusLabel);
-  return (
-    <section className="mb-3 rounded-lg border border-[#2e3d59] bg-[#0f1828] p-3">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-[#a9b8d4]">
-          Plan
-        </h3>
-        <div className="flex shrink-0 items-center gap-2">
-          {canApprove && onApprove ? (
-            <Button size="sm" variant="secondary" onClick={onApprove}>
-              Approve
-            </Button>
-          ) : null}
-          {canResume && onResume ? (
-            <Button size="sm" variant="secondary" onClick={onResume}>
-              Resume
-            </Button>
-          ) : null}
-          {canCancel && onCancel ? (
-            <Button size="sm" variant="ghost" onClick={onCancel}>
-              Cancel
-            </Button>
-          ) : null}
-          <Badge variant={statusLabel === "completed" ? "success" : "primary"}>
-            {statusLabel}
-          </Badge>
-        </div>
-      </div>
-      {pendingApproval?.reason ? (
-        <div className="mb-2 text-xs text-[#f1b45f]">{pendingApproval.reason}</div>
-      ) : null}
-      <ol className="space-y-2">
-        {plan.steps.map((step) => {
-          const isRunning = step.status === "running";
-          const isDone = step.status === "done";
-          const StepIcon = isDone ? Check : isRunning ? LoaderCircle : Circle;
-          return (
-            <li key={step.id} className="flex items-start gap-2 text-sm text-[#d8e4f8]">
-              <StepIcon
-                className={cn(
-                  "mt-0.5 h-4 w-4 shrink-0",
-                  isDone ? "text-[#38c67d]" : "text-[#5da8ff]",
-                  isRunning ? "animate-spin" : ""
-                )}
-              />
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span>{step.title}</span>
-                  <span className="text-xs text-[#7484a3]">{step.status}</span>
-                </div>
-                {step.evidence_ids.length > 0 ? (
-                  <div className="mt-1 text-xs text-[#8ea1c3]">
-                    Evidence: {step.evidence_ids.join(", ")}
-                  </div>
-                ) : null}
-                {step.blocker ? (
-                  <div className="mt-1 text-xs text-[#f1b45f]">{step.blocker}</div>
-                ) : null}
-              </div>
-            </li>
-          );
-        })}
-      </ol>
     </section>
   );
 }

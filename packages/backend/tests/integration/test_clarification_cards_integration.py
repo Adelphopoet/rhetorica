@@ -96,7 +96,7 @@ class TestAmbiguousConnectorTypedClarification:
         )
 
         capability_surface = SimpleNamespace(
-            available_tools=["run_sql", "fetch_metadata_tables"],
+            available_tools=["run_sql", "catalog__tables"],
             degraded_capabilities=[],
             policy_decisions=[],
         )
@@ -163,7 +163,7 @@ class TestAmbiguousConnectorTypedClarification:
         )
 
         capability_surface = SimpleNamespace(
-            available_tools=["run_sql", "fetch_metadata_tables"],
+            available_tools=["run_sql", "catalog__tables"],
             degraded_capabilities=[],
             policy_decisions=[],
         )

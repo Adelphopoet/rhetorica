@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from rhetorica_backend.contracts.chat import (
@@ -7,11 +8,6 @@ from rhetorica_backend.contracts.chat import (
     ChatAskRequest,
     OptimizationTrace,
     ThinkingEvent,
-)
-from rhetorica_backend.domain.chat.orchestration.analysis_artifacts import (
-    AnalysisCheckpointLifecycle,
-    AnalysisPlan,
-    AnalysisPlanStep,
 )
 from rhetorica_backend.domain.chat.orchestration.capability_registry import (
     WorkspaceCapabilitySurface,
@@ -40,6 +36,7 @@ from rhetorica_backend.domain.chat.orchestration.turn_builder import (
 class _RecordingAssembler:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.saved_user_messages: list[dict[str, object]] = []
 
     def assemble_turn(self, **kwargs):
         self.calls.append(kwargs)
@@ -63,6 +60,12 @@ class _RecordingAssembler:
             warnings=list(kwargs["warnings"]),
         )
 
+    def save_user_to_history(self, **kwargs) -> str | None:
+        self.saved_user_messages.append(kwargs)
+        if kwargs.get("conversation_id") is None:
+            return None
+        return f"user-{len(self.saved_user_messages)}"
+
 
 def _session(
     *,
@@ -80,46 +83,44 @@ def _session(
         db_connectors=[SimpleNamespace(name="warehouse")],
         workspace_snapshot=WorkspaceToolingSnapshot(
             has_db_connectors=True,
-            metadata_configured=True,
-            metadata_connector_names=["ometa"],
             rag_configured=False,
-            confluence_configured=False,
-            confluence_connector_names=[],
-            jira_configured=False,
-            jira_connector_names=[],
         ),
         capability_surface=WorkspaceCapabilitySurface(
             available_tools=["run_sql"],
             degraded_capabilities=[],
             policy_decisions=["prompt_mode:sql"],
         ),
-        conversation_history=[{"role": "assistant", "content": "prev"}],
+        agent_session=SimpleNamespace(session_id=conversation_id),
         warnings=list(warnings or []),
         llm_capability_profile=llm_capability_profile,
         resolved_llm_connector_name=resolved_llm_connector_name,
     )
 
 
-def test_session_turn_flow_short_circuits_capability_question() -> None:
+def test_session_turn_flow_routes_capability_question_through_runtime() -> None:
     request = ChatAskRequest(
         question="Что ты умеешь?",
         workspace_id="ws-1",
     )
     assembler = _RecordingAssembler()
     runtime_calls: list[object] = []
+    prepared_turn = SimpleNamespace(
+        messages=[{"role": "user", "content": request.question}],
+        tools=[{"function": {"name": "list_tool_groups"}}],
+        state=ToolOrchestrationState(),
+        tool_executor=object(),
+    )
     service = OrchestrationSessionTurnFlowService(
         session_factory=SimpleNamespace(
             build=lambda *_args, **_kwargs: _session(
                 request=request,
-                llm_connection=None,
+                llm_connection=SimpleNamespace(model="gpt-5", extra_settings={}),
                 warnings=["history_trimmed"],
             )
         ),
-        turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: None),
+        turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: prepared_turn),
         response_assembler=assembler,
         create_llm_client=lambda _connection: object(),
-        is_capabilities_question=lambda question: "умеешь" in question.lower(),
-        build_capabilities_answer=lambda **_kwargs: "Я умею:\n- выполнять SQL",
         requires_metadata_lookup=lambda _request: False,
     )
 
@@ -127,16 +128,58 @@ def test_session_turn_flow_short_circuits_capability_question() -> None:
         request=request,
         create_conversation_without_llm=False,
         state_factory=ToolOrchestrationState,
-        execute_runtime=lambda _runtime: runtime_calls.append(_runtime),
+        execute_runtime=lambda runtime: runtime_calls.append(runtime)
+        or RuntimeExecutionResult(llm_payload={"answer": "Ответ модели"}),
     )
 
-    assert result.completion_kind == "capability_question"
-    assert result.turn.answer == "Я умею:\n- выполнять SQL"
+    assert result.completion_kind == "runtime_completed"
+    assert result.turn.answer == "Ответ модели"
     assert result.turn.warnings == ["history_trimmed"]
-    assert result.history_persistence == PersistConversationHistory(
-        conversation_id="conv-1"
+    assert result.persisted_user_message_id == "user-1"
+    assert result.history_persistence == PersistConversationHistory(conversation_id="conv-1")
+    assert assembler.saved_user_messages[0]["conversation_id"] == "conv-1"
+    assert len(runtime_calls) == 1
+    assert runtime_calls[0].messages == prepared_turn.messages
+
+
+def test_session_turn_flow_async_routes_capability_question_through_runtime() -> None:
+    request = ChatAskRequest(question="What can you do?", workspace_id="ws-1")
+    prepared_turn = SimpleNamespace(
+        messages=[{"role": "user", "content": request.question}],
+        tools=[{"function": {"name": "list_tool_groups"}}],
+        state=ToolOrchestrationState(),
+        tool_executor=object(),
     )
-    assert runtime_calls == []
+    runtime_calls: list[object] = []
+    service = OrchestrationSessionTurnFlowService(
+        session_factory=SimpleNamespace(
+            build=lambda *_args, **_kwargs: _session(
+                request=request,
+                llm_connection=SimpleNamespace(model="gpt-5", extra_settings={}),
+            )
+        ),
+        turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: prepared_turn),
+        response_assembler=_RecordingAssembler(),
+        create_llm_client=lambda _connection: object(),
+        requires_metadata_lookup=lambda _request: False,
+    )
+
+    async def execute_runtime(runtime):
+        runtime_calls.append(runtime)
+        return RuntimeExecutionResult(llm_payload={"answer": "Model capabilities"})
+
+    result = asyncio.run(
+        service.run_async(
+            request=request,
+            create_conversation_without_llm=False,
+            state_factory=ToolOrchestrationState,
+            execute_runtime=execute_runtime,
+        )
+    )
+
+    assert result.completion_kind == "runtime_completed"
+    assert result.turn.answer == "Model capabilities"
+    assert len(runtime_calls) == 1
 
 
 def test_session_turn_flow_short_circuits_missing_llm_before_runtime() -> None:
@@ -157,8 +200,6 @@ def test_session_turn_flow_short_circuits_missing_llm_before_runtime() -> None:
         turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: None),
         response_assembler=assembler,
         create_llm_client=lambda _connection: object(),
-        is_capabilities_question=lambda _question: False,
-        build_capabilities_answer=lambda **_kwargs: "unused",
         requires_metadata_lookup=lambda _request: False,
     )
 
@@ -172,9 +213,39 @@ def test_session_turn_flow_short_circuits_missing_llm_before_runtime() -> None:
     assert result.completion_kind == "llm_connector_missing"
     assert result.turn.answer == "LLM connector is not configured. Add it in admin."
     assert result.turn.warnings == ["llm_connector_missing"]
-    assert result.history_persistence == SkipConversationHistory(
-        reason="missing_conversation_id"
+    assert result.persisted_user_message_id is None
+    assert result.history_persistence == SkipConversationHistory(reason="missing_conversation_id")
+    assert runtime_calls == []
+
+
+def test_session_turn_flow_async_short_circuits_missing_llm_before_runtime() -> None:
+    request = ChatAskRequest(question="Покажи выручку", workspace_id="ws-1")
+    runtime_calls: list[object] = []
+    service = OrchestrationSessionTurnFlowService(
+        session_factory=SimpleNamespace(
+            build=lambda *_args, **_kwargs: _session(
+                request=request,
+                llm_connection=None,
+                conversation_id=None,
+            )
+        ),
+        turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: None),
+        response_assembler=_RecordingAssembler(),
+        create_llm_client=lambda _connection: object(),
+        requires_metadata_lookup=lambda _request: False,
     )
+
+    result = asyncio.run(
+        service.run_async(
+            request=request,
+            create_conversation_without_llm=False,
+            state_factory=ToolOrchestrationState,
+            execute_runtime=lambda runtime: runtime_calls.append(runtime),
+        )
+    )
+
+    assert result.completion_kind == "llm_connector_missing"
+    assert result.turn.warnings == ["llm_connector_missing"]
     assert runtime_calls == []
 
 
@@ -189,7 +260,6 @@ def test_session_turn_flow_prepares_runtime_and_postprocesses_payload() -> None:
         tools=[{"function": {"name": "run_sql"}}],
         state=ToolOrchestrationState(),
         tool_executor=object(),
-        protocol_repair_enabled=True,
     )
     seen_prepare_kwargs: dict[str, object] = {}
     seen_runtime: list[object] = []
@@ -211,15 +281,11 @@ def test_session_turn_flow_prepares_runtime_and_postprocesses_payload() -> None:
         ),
         response_assembler=assembler,
         create_llm_client=lambda connection: {"client_for": connection.model},
-        is_capabilities_question=lambda _question: False,
-        build_capabilities_answer=lambda **_kwargs: "unused",
         requires_metadata_lookup=lambda current_request: current_request.run_sql,
-        postprocess_llm_payload=lambda **kwargs: seen_postprocess.append(
-            {
-                **kwargs,
-                "warnings": list(kwargs["warnings"]),
-            }
-        )
+        postprocess_llm_payload=lambda **kwargs: seen_postprocess.append({
+            **kwargs,
+            "warnings": list(kwargs["warnings"]),
+        })
         or {
             **kwargs["llm_payload"],
             "answer": f"{kwargs['llm_payload']['answer']} [postprocessed]",
@@ -244,7 +310,7 @@ def test_session_turn_flow_prepares_runtime_and_postprocesses_payload() -> None:
     )
 
     assert seen_prepare_kwargs["request"] == request
-    assert seen_prepare_kwargs["workspace_snapshot"].metadata_connector_names == ["ometa"]
+    assert seen_prepare_kwargs["workspace_snapshot"].has_db_connectors is True
     assert seen_prepare_kwargs["initial_warnings"] == ["history_trimmed"]
     assert seen_prepare_kwargs["state_factory"] is ToolOrchestrationState
     assert seen_runtime[0].llm_client == {"client_for": "gpt-5"}
@@ -254,7 +320,8 @@ def test_session_turn_flow_prepares_runtime_and_postprocesses_payload() -> None:
     assert seen_runtime[0].tools == [{"function": {"name": "run_sql"}}]
     assert seen_runtime[0].state is prepared_turn.state
     assert seen_runtime[0].tool_executor is prepared_turn.tool_executor
-    assert seen_runtime[0].protocol_repair_enabled is True
+    assert assembler.saved_user_messages[0]["conversation_id"] == "conv-1"
+    assert assembler.saved_user_messages[0]["request"] == request
     assert seen_postprocess[0]["warnings"] == ["history_trimmed", "runtime_warning"]
     assert result.completion_kind == "runtime_completed"
     assert isinstance(result.transport_artifact, StreamingRuntimeTransportArtifact)
@@ -267,9 +334,8 @@ def test_session_turn_flow_prepares_runtime_and_postprocesses_payload() -> None:
         "runtime_warning",
         "payload_postprocessed",
     ]
-    assert result.history_persistence == PersistConversationHistory(
-        conversation_id="conv-1"
-    )
+    assert result.persisted_user_message_id == "user-1"
+    assert result.history_persistence == PersistConversationHistory(conversation_id="conv-1")
 
 
 def test_session_turn_flow_does_not_preflight_structured_output_for_toolless_turn() -> None:
@@ -279,22 +345,19 @@ def test_session_turn_flow_does_not_preflight_structured_output_for_toolless_tur
         tools=[],
         state=ToolOrchestrationState(),
         tool_executor=object(),
-        protocol_repair_enabled=False,
     )
     runtime_calls: list[object] = []
     service = OrchestrationSessionTurnFlowService(
         session_factory=SimpleNamespace(
             build=lambda *_args, **_kwargs: _session(
                 request=request,
-                llm_connection=SimpleNamespace(model="MagnitCopilot", extra_settings={}),
+                llm_connection=SimpleNamespace(model="ExampleReasoningModel", extra_settings={}),
                 llm_capability_profile=SimpleNamespace(supports=set()),
             )
         ),
         turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: prepared_turn),
         response_assembler=_RecordingAssembler(),
         create_llm_client=lambda _connection: object(),
-        is_capabilities_question=lambda _question: False,
-        build_capabilities_answer=lambda **_kwargs: "unused",
         requires_metadata_lookup=lambda _request: False,
     )
 
@@ -318,7 +381,6 @@ def test_session_turn_flow_does_not_fail_fast_on_llm_transport_contract() -> Non
         tools=[{"function": {"name": "run_sql"}}],
         state=ToolOrchestrationState(),
         tool_executor=object(),
-        protocol_repair_enabled=True,
     )
     runtime_calls: list[object] = []
     service = OrchestrationSessionTurnFlowService(
@@ -326,21 +388,17 @@ def test_session_turn_flow_does_not_fail_fast_on_llm_transport_contract() -> Non
             build=lambda *_args, **_kwargs: _session(
                 request=request,
                 llm_connection=SimpleNamespace(
-                    model="MagnitCopilot",
+                    model="ExampleReasoningModel",
                     endpoint_path="/chat/completions",
                     extra_settings={},
                 ),
-                llm_capability_profile=SimpleNamespace(
-                    supports={"structured_output"}
-                ),
-                resolved_llm_connector_name="default-gpt",
+                llm_capability_profile=SimpleNamespace(supports={"structured_output"}),
+                resolved_llm_connector_name="example-llm",
             )
         ),
         turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: prepared_turn),
         response_assembler=_RecordingAssembler(),
         create_llm_client=lambda _connection: object(),
-        is_capabilities_question=lambda _question: False,
-        build_capabilities_answer=lambda **_kwargs: "unused",
         requires_metadata_lookup=lambda _request: False,
     )
 
@@ -353,64 +411,9 @@ def test_session_turn_flow_does_not_fail_fast_on_llm_transport_contract() -> Non
     )
 
     assert len(runtime_calls) == 1
+    assert runtime_calls[0].request.llm_connector_name == "example-llm"
     assert result.turn.answer == "runtime answer"
     assert result.turn.warnings == []
-
-
-def test_session_turn_flow_persists_compact_checkpoint_before_runtime() -> None:
-    request = ChatAskRequest(question="Почему упала выручка?", workspace_id="ws-1")
-    plan = AnalysisPlan(
-        plan_id="plan-1",
-        goal="Почему упала выручка?",
-        status="planned",
-        steps=[AnalysisPlanStep(id="baseline", title="Build baseline")],
-        required_evidence=["execution_result"],
-    )
-    state = ToolOrchestrationState(
-        analysis_plan=plan,
-        checkpoint=AnalysisCheckpointLifecycle().start(
-            run_id="run-1",
-            plan_id="plan-1",
-        ),
-    )
-    prepared_turn = SimpleNamespace(
-        messages=[],
-        tools=[],
-        state=state,
-        tool_executor=object(),
-        protocol_repair_enabled=False,
-    )
-    persisted: list[dict[str, object]] = []
-    service = OrchestrationSessionTurnFlowService(
-        session_factory=SimpleNamespace(
-            build=lambda *_args, **_kwargs: _session(
-                request=request,
-                llm_connection=SimpleNamespace(model="gpt-5", extra_settings={}),
-            )
-        ),
-        turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: prepared_turn),
-        response_assembler=_RecordingAssembler(),
-        create_llm_client=lambda _connection: object(),
-        is_capabilities_question=lambda _question: False,
-        build_capabilities_answer=lambda **_kwargs: "unused",
-        requires_metadata_lookup=lambda _request: False,
-        checkpoint_persistence_service=SimpleNamespace(
-            persist_runtime_state=lambda **kwargs: persisted.append(kwargs)
-        ),
-    )
-
-    service.run(
-        request=request,
-        create_conversation_without_llm=True,
-        state_factory=ToolOrchestrationState,
-        execute_runtime=lambda _runtime: RuntimeExecutionResult(
-            llm_payload={"answer": "done"}
-        ),
-    )
-
-    assert persisted[0]["conversation_id"] == "conv-1"
-    assert persisted[0]["state"] is state
-    assert state.conversation_id == "conv-1"
 
 
 def test_session_turn_flow_marks_cancelled_runtime_as_non_persistent() -> None:
@@ -424,7 +427,6 @@ def test_session_turn_flow_marks_cancelled_runtime_as_non_persistent() -> None:
         tools=[],
         state=ToolOrchestrationState(),
         tool_executor=object(),
-        protocol_repair_enabled=False,
     )
     service = OrchestrationSessionTurnFlowService(
         session_factory=SimpleNamespace(
@@ -436,8 +438,6 @@ def test_session_turn_flow_marks_cancelled_runtime_as_non_persistent() -> None:
         turn_builder=SimpleNamespace(prepare_turn=lambda **_kwargs: prepared_turn),
         response_assembler=assembler,
         create_llm_client=lambda _connection: object(),
-        is_capabilities_question=lambda _question: False,
-        build_capabilities_answer=lambda **_kwargs: "unused",
         requires_metadata_lookup=lambda _request: False,
     )
 
@@ -455,4 +455,5 @@ def test_session_turn_flow_marks_cancelled_runtime_as_non_persistent() -> None:
 
     assert result.completion_kind == "cancelled"
     assert result.turn.warnings == ["cancelled"]
+    assert result.persisted_user_message_id == "user-1"
     assert result.history_persistence == SkipConversationHistory(reason="cancelled")

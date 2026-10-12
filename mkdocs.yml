@@ -7,6 +7,9 @@ nav:
   - Architecture:
       - Overview: architecture/architecture.md
       - Database Structure: architecture/database_structure.md
+      - ADR:
+          - 0001 Monorepo Layout: architecture/adr/0001-monorepo-layout.md
+          - 0002 Backend Bounded Contexts: architecture/adr/0002-bounded-contexts.md
   - Development:
       - Local Development: development/local_development.md
       - Repository Layout: development/repository_layout.md

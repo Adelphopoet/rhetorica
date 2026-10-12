@@ -36,7 +36,7 @@ export async function downloadAnalysisExport(args: {
     } catch {
       detail = await response.text();
     }
-    throw new Error(detail || `Export failed with status ${response.status}`);
+    throw new Error(detail || `Не удалось экспортировать, статус ${response.status}`);
   }
 
   const blob = await response.blob();

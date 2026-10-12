@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 from rhetorica_backend.contracts.chat import ChatAskRequest
 from rhetorica_backend.contracts.connectors import ConnectorItem
@@ -31,7 +30,6 @@ from rhetorica_backend.domain.chat.orchestration.tool_execution_runtime_sql_poli
 def _connector(
     *,
     name: str,
-    service: str,
     database: str,
     schema: str,
 ) -> ConnectorItem:
@@ -46,11 +44,7 @@ def _connector(
             port=9000,
             username="default",
             database=database,
-            extra_settings={
-                "metadata_service": service,
-                "metadata_database": database,
-                "metadata_schema": schema,
-            },
+            schema=schema,
         ),
         has_password=False,
         created_at=now,
@@ -75,24 +69,18 @@ def _runtime_services() -> tuple[
 
 def test_runtime_connector_policy_prefers_connector_from_context_table_scope() -> None:
     connector_scope_policy, _, _ = _runtime_services()
-    policy = ToolExecutionRuntimeConnectorPolicy(
-        connector_scope_policy=connector_scope_policy
-    )
+    policy = ToolExecutionRuntimeConnectorPolicy(connector_scope_policy=connector_scope_policy)
     warehouse = _connector(
         name="warehouse",
-        service="Sample-ClickHouse",
         database="analytics",
         schema="dm",
     )
     mart = _connector(
         name="mart",
-        service="Sample-ClickHouse",
         database="analytics_mart",
         schema="dm",
     )
-    state = ToolOrchestrationState(
-        context_tables=["Sample-ClickHouse.analytics_mart.dm.sales_orders"]
-    )
+    state = ToolOrchestrationState(context_tables=["mart.analytics_mart.dm.sales_orders"])
 
     selected = policy.prefer_context_connector(
         request=ChatAskRequest(question="Revenue?", workspace_id="ws-1", run_sql=True),
@@ -108,41 +96,21 @@ def test_runtime_connector_policy_prefers_connector_from_context_table_scope() -
 
 
 def test_metadata_runtime_service_repairs_missing_context_from_runtime_lookup() -> None:
-    connector_scope_policy, metadata_context_service, runtime_sql_policy = (
-        _runtime_services()
-    )
+    connector_scope_policy, metadata_context_service, runtime_sql_policy = _runtime_services()
     connector = _connector(
         name="warehouse",
-        service="Sample-ClickHouse",
         database="analytics",
         schema="dm",
     )
-    metadata_connection = SimpleNamespace(
-        mcp_tables_url=None,
-        service_name="Sample-ClickHouse",
-        database_name="analytics",
-        schema_name="dm",
-    )
-    metadata_resolver = SimpleNamespace(
-        resolve_connection=lambda **_kwargs: metadata_connection
-    )
     runtime_table = TableContext(
         source="runtime",
-        fqn="Sample-ClickHouse.analytics.dm.sales_orders",
+        fqn="dm.sales_orders",
         columns=["order_id"],
-        service="Sample-ClickHouse",
+        service="warehouse",
         database="analytics",
         schema="dm",
     )
     service = ToolExecutionMetadataRuntimeService(
-        metadata_resolver=metadata_resolver,
-        metadata_table_loader=SimpleNamespace(fetch_tables=lambda **_kwargs: ([], [])),
-        metadata_catalog_search_service=SimpleNamespace(
-            search_catalog=lambda **_kwargs: ([], [])
-        ),
-        metadata_ranking_service=SimpleNamespace(
-            filter_tables=lambda **_kwargs: []
-        ),
         connector_scope_policy=connector_scope_policy,
         metadata_context_service=metadata_context_service,
         runtime_sql_policy=runtime_sql_policy,
@@ -155,7 +123,6 @@ def test_metadata_runtime_service_repairs_missing_context_from_runtime_lookup() 
         request=ChatAskRequest(
             question="Revenue?",
             workspace_id="ws-1",
-            metadata_connector_name="metadata",
             run_sql=True,
         ),
         state=state,
@@ -165,9 +132,7 @@ def test_metadata_runtime_service_repairs_missing_context_from_runtime_lookup() 
     )
 
     assert repaired is True
-    assert state.context_tables == ["Sample-ClickHouse.analytics.dm.sales_orders"]
-    assert state.metadata_table_columns == {
-        "sample-clickhouse.analytics.dm.sales_orders": {"order_id"}
-    }
-    assert state.metadata_sources == {"openmetadata", "runtime"}
+    assert state.context_tables == ["dm.sales_orders"]
+    assert state.metadata_table_columns == {"dm.sales_orders": {"order_id"}}
+    assert state.metadata_sources == {"runtime"}
     assert state.selected_database_connector == "warehouse"

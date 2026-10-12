@@ -1,5 +1,8 @@
 "use client";
 
+import { pluralize } from "@/lib/plural";
+import { ThemeSelector } from "@/features/theme/ThemeSelector";
+import { buildLlmExtraSettings, parseLlmHeaders } from "./llmSettings";
 import Link from "next/link";
 import {
   startTransition,
@@ -13,6 +16,7 @@ import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
 import {
   Alert,
   Button,
+  buttonVariants,
   Card,
   CardContent,
   CardDescription,
@@ -25,13 +29,12 @@ import {
   useToast,
 } from "@rhetorica/ui";
 import {
-  ArrowRight,
   BookText,
   CheckCircle2,
   Clock3,
   Database,
   Edit,
-  Layers,
+  GitBranch,
   MessageSquare,
   Plus,
   Search,
@@ -39,14 +42,18 @@ import {
   Shield,
   Sparkles,
   Trash2,
-  UserRound,
   Users,
   Workflow,
+  X,
   XCircle,
+  Activity,
 } from "lucide-react";
 
+import { AgentSheet } from "./AgentSheet";
 import { ConnectorSheet } from "./ConnectorSheet";
 import { SkillSheet } from "./SkillSheet";
+import { UserRateLimitDialog } from "./UserRateLimitDialog";
+import { useSessionNonce } from "./useSheetSession";
 import {
   buildReadinessModel,
   formatDateTime,
@@ -63,30 +70,31 @@ import type {
   AdminPageData,
   AdminSectionId,
   AnyConnectorItem,
+  AirflowConnectorItem,
   ConnectorType,
-  ConfluenceConnectorItem,
+  DatabaseExtraSetting,
   DatabaseConnectorItem,
-  JiraConnectorItem,
+  DocumentationConnectorItem,
+  GitLabConnectorItem,
+  KubernetesConnectorItem,
   LlmConnectorItem,
   LocalUserItem,
   MattermostConnectorItem,
-  OpenMetadataConnectorItem,
-  RagInsightReviewItem,
+  McpConnectorItem,
+  VictoriaMetricsConnectorItem,
   WorkspaceSkillItem,
 } from "./types";
-import { ScenarioEditorModal } from "../components/scenario-editor-modal";
 import {
   archiveScenario,
-  createScenario,
-  updateScenario,
-  type SaveScenarioPayload,
   type ScenarioDefinition,
 } from "@/features/scenarios/scenariosApi";
+import type { AgentProfile } from "@/features/agents/agentsApi";
 
 type DeleteIntent =
   | { kind: "connector"; id: string; connectorType: ConnectorType; title: string }
   | { kind: "skill"; id: string; title: string }
   | { kind: "user"; user: LocalUserItem }
+  | { kind: "agent"; agent: AgentProfile }
   | { kind: "scenario"; scenario: ScenarioDefinition };
 
 type SectionMeta = {
@@ -95,37 +103,45 @@ type SectionMeta = {
   description: string;
 };
 
+const MAX_MANUAL_SKILL_CONTENT_BYTES = 32_768;
+
+const SETUP_STATUS_FILTER_LABELS: Record<SetupStatusFilter, string> = {
+  all: "Все",
+  ready: "Готовые",
+  attention: "Требуют внимания",
+};
+
 const SECTION_META: SectionMeta[] = [
   {
     id: "overview",
-    label: "Overview",
-    description: "Readiness, blockers, next moves",
+    label: "Обзор",
+    description: "Готовность, блокеры, следующие шаги",
   },
   {
     id: "setup",
-    label: "Setup",
-    description: "Connectors and runtime wiring",
+    label: "Настройки",
+    description: "Подключения и настройка выполнения",
   },
   {
     id: "governance",
-    label: "Governance",
-    description: "Official scenarios and skills",
+    label: "Управление",
+    description: "Официальные сценарии и навыки",
   },
   {
     id: "access",
-    label: "Access",
-    description: "Local users and permissions",
+    label: "Доступ",
+    description: "Локальные пользователи и права",
   },
   {
     id: "review",
-    label: "Review",
-    description: "Pending RAG insight verification",
+    label: "Проверка",
+    description: "Проверка инсайтов RAG",
   },
 ];
 
 function parseErrorText(text: string, fallbackStatus: number) {
   if (!text) {
-    return `Request failed with status ${fallbackStatus}`;
+    return `Запрос завершился с кодом ${fallbackStatus}`;
   }
 
   try {
@@ -138,7 +154,7 @@ function parseErrorText(text: string, fallbackStatus: number) {
     return text;
   }
 
-  return `Request failed with status ${fallbackStatus}`;
+  return `Запрос завершился с кодом ${fallbackStatus}`;
 }
 
 async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
@@ -161,13 +177,19 @@ function connectorEndpoint(type: ConnectorType, id?: string, workspaceId?: strin
       ? "/api/admin/connectors"
       : type === "llm"
         ? "/api/admin/llm-connectors"
-        : type === "metadata"
-          ? "/api/admin/openmetadata-connectors"
-          : type === "confluence"
-            ? "/api/admin/confluence-connectors"
-            : type === "jira"
-              ? "/api/admin/jira-connectors"
-              : "/api/admin/mattermost-connectors";
+        : type === "documentation"
+              ? "/api/admin/documentation-connectors"
+      : type === "gitlab"
+        ? "/api/admin/gitlab-connectors"
+      : type === "mcp"
+        ? "/api/admin/mcp-connectors"
+      : type === "airflow"
+        ? "/api/admin/airflow-connectors"
+        : type === "kubernetes"
+          ? "/api/admin/kubernetes-connectors"
+          : type === "victoriametrics"
+            ? "/api/admin/victoriametrics-connectors"
+          : "/api/admin/mattermost-connectors";
 
   if (!id) {
     return base;
@@ -189,7 +211,7 @@ function normalizeDatabaseEngine(value: FormDataEntryValue | null): DatabaseConn
 }
 
 function putStringSetting(
-  settings: Record<string, string | number | boolean>,
+  settings: Record<string, unknown>,
   key: string,
   value: FormDataEntryValue | null
 ) {
@@ -200,7 +222,7 @@ function putStringSetting(
 }
 
 function putNumberSetting(
-  settings: Record<string, string | number | boolean>,
+  settings: Record<string, unknown>,
   key: string,
   value: FormDataEntryValue | null
 ) {
@@ -210,11 +232,148 @@ function putNumberSetting(
   }
 }
 
-function buildDatabaseExtraSettings(formData: FormData): Record<string, string | number | boolean> {
-  const settings: Record<string, string | number | boolean> = {};
-  putStringSetting(settings, "metadata_service", formData.get("metadata_service"));
-  putStringSetting(settings, "metadata_database", formData.get("metadata_database"));
-  putStringSetting(settings, "metadata_schema", formData.get("metadata_schema"));
+function optionalNumber(value: FormDataEntryValue | null): number | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function optionalText(value: FormDataEntryValue | null): string | null {
+  const raw = String(value ?? "").trim();
+  return raw ? raw : null;
+}
+
+function splitCommaList(value: FormDataEntryValue | null): string[] {
+  return String(value ?? "")
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseJsonArrayField(value: FormDataEntryValue | null): unknown[] {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return [];
+  }
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("Ожидался массив JSON");
+  }
+  return parsed;
+}
+
+function parseJsonObjectField(value: FormDataEntryValue | null): Record<string, string> {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return {};
+  }
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value === "string" && key.trim() && value.trim()) {
+      result[key.trim()] = value.trim();
+    }
+  }
+  return result;
+}
+
+function parseMcpSecretHeaders(value: FormDataEntryValue | null) {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return null;
+  }
+  return parseJsonArrayField(value)
+    .filter((item): item is { name: string; value: string; mode?: string } => {
+      return (
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as { name?: unknown }).name === "string" &&
+        typeof (item as { value?: unknown }).value === "string"
+      );
+    })
+    .map((item) => ({
+      name: item.name.trim(),
+      value: item.value.trim(),
+      mode: item.mode === "bearer" ? "bearer" : "raw",
+    }))
+    .filter((item) => item.name && item.value);
+}
+
+function selectedValues(formData: FormData, fieldName: string): string[] {
+  return formData.getAll(fieldName).map(String).filter(Boolean);
+}
+
+function withManualSkillUseWhen(markdown: string, useWhen: string) {
+  const trimmedUseWhen = useWhen.trim();
+  if (!trimmedUseWhen) {
+    return markdown;
+  }
+  const escapedUseWhen = JSON.stringify(trimmedUseWhen);
+  const lines = markdown.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") {
+    return `---\nuse_when: ${escapedUseWhen}\n---\n\n${markdown}`;
+  }
+  const closingIndex = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+  if (closingIndex < 0) {
+    return `---\nuse_when: ${escapedUseWhen}\n---\n\n${markdown}`;
+  }
+  const frontmatter = lines.slice(1, closingIndex);
+  const body = lines.slice(closingIndex);
+  const useWhenIndex = frontmatter.findIndex((line) => line.trim().startsWith("use_when:"));
+  if (useWhenIndex >= 0) {
+    frontmatter[useWhenIndex] = `use_when: ${escapedUseWhen}`;
+  } else {
+    frontmatter.push(`use_when: ${escapedUseWhen}`);
+  }
+  return ["---", ...frontmatter, ...body].join("\n");
+}
+
+function utf8ByteLength(value: string) {
+  return new TextEncoder().encode(value).length;
+}
+
+function isDatabaseExtraSetting(value: unknown): value is DatabaseExtraSetting {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return true;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(
+    (item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+  );
+}
+
+function parseDatabaseAdditionalSettings(
+  value: FormDataEntryValue | null
+): Record<string, DatabaseExtraSetting> {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return {};
+  }
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Дополнительные настройки должны быть объектом JSON");
+  }
+  const settings: Record<string, DatabaseExtraSetting> = {};
+  for (const [rawKey, settingValue] of Object.entries(parsed)) {
+    const key = rawKey.trim();
+    if (!key || !isDatabaseExtraSetting(settingValue)) {
+      throw new Error(`Недопустимый параметр настройки: ${rawKey || "<empty>"}`);
+    }
+    settings[key] = settingValue;
+  }
+  return settings;
+}
+
+function buildDatabaseExtraSettings(formData: FormData): Record<string, DatabaseExtraSetting> {
+  const settings = parseDatabaseAdditionalSettings(formData.get("additional_settings_json"));
   putNumberSetting(settings, "query_timeout_seconds", formData.get("query_timeout_seconds"));
   if (normalizeDatabaseEngine(formData.get("engine")) === "impala") {
     putStringSetting(settings, "auth_type", formData.get("auth_type"));
@@ -227,6 +386,48 @@ function buildDatabaseExtraSettings(formData: FormData): Record<string, string |
     }
   }
   return settings;
+}
+
+function collectDatabaseExtraCredentials(
+  formData: FormData
+): Record<string, string | null> | null {
+  if (normalizeDatabaseEngine(formData.get("engine")) !== "trino") {
+    return null;
+  }
+  const names = formData.getAll("extra_credential_name").map((value) => String(value).trim());
+  const values = formData.getAll("extra_credential_value").map((value) => String(value));
+  const stored = formData.getAll("extra_credential_stored").map((value) => value === "true");
+  const credentials: Record<string, string | null> = {};
+  names.forEach((name, index) => {
+    if (!name) {
+      throw new Error("Требуется имя дополнительных учётных данных Trino");
+    }
+    if (Object.prototype.hasOwnProperty.call(credentials, name)) {
+      throw new Error(`Повторяющиеся учётные данные Trino: ${name}`);
+    }
+    const secret = values[index] ?? "";
+    if (!secret && !stored[index]) {
+      throw new Error(`Требуется значение для новых учётных данных Trino: ${name}`);
+    }
+    credentials[name] = secret || null;
+  });
+  return credentials;
+}
+
+function collectLlmApiKeys(formData: FormData) {
+  const keys = formData
+    .getAll("api_keys")
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+  return keys.length > 0 ? keys : null;
+}
+
+function collectRetainedLlmApiKeyIndexes(formData: FormData) {
+  const indexes = formData
+    .getAll("retained_api_key_indexes")
+    .map((value) => Number(String(value)))
+    .filter((value) => Number.isInteger(value) && value >= 0);
+  return indexes.length > 0 ? indexes : null;
 }
 
 function buildConnectorSaveBody(
@@ -253,15 +454,34 @@ function buildConnectorSaveBody(
       name: item.name,
       workspace_id: workspaceId,
       is_active: isActive,
+      is_default: item.is_default,
       connection: {
         ...item.connection,
         api_key: null,
+        api_keys: null,
+        retained_api_key_indexes: null,
         extra_settings: item.connection.extra_settings ?? {},
       },
     };
   }
-  if (type === "metadata") {
-    const item = connector as OpenMetadataConnectorItem;
+  if (type === "documentation") {
+    const item = connector as DocumentationConnectorItem;
+    return {
+      name: item.name,
+      workspace_id: workspaceId,
+      is_active: isActive,
+      visible_to_default_assistant: item.visible_to_default_assistant,
+      connection: {
+        ...item.connection,
+        api_token: null,
+        embedding_api_key: null,
+        qdrant_api_key: null,
+        extra_settings: item.connection.extra_settings ?? {},
+      },
+    };
+  }
+  if (type === "gitlab") {
+    const item = connector as GitLabConnectorItem;
     return {
       name: item.name,
       workspace_id: workspaceId,
@@ -273,28 +493,56 @@ function buildConnectorSaveBody(
       },
     };
   }
-  if (type === "confluence") {
-    const item = connector as ConfluenceConnectorItem;
+  if (type === "mcp") {
+    const item = connector as McpConnectorItem;
     return {
       name: item.name,
       workspace_id: workspaceId,
       is_active: isActive,
       connection: {
         ...item.connection,
-        api_token: null,
+        secret_headers: null,
         extra_settings: item.connection.extra_settings ?? {},
       },
     };
   }
-  if (type === "jira") {
-    const item = connector as JiraConnectorItem;
+  if (type === "airflow") {
+    const item = connector as AirflowConnectorItem;
     return {
       name: item.name,
       workspace_id: workspaceId,
       is_active: isActive,
       connection: {
         ...item.connection,
-        api_token: null,
+        password: null,
+        extra_settings: item.connection.extra_settings ?? {},
+      },
+    };
+  }
+  if (type === "kubernetes") {
+    const item = connector as KubernetesConnectorItem;
+    return {
+      name: item.name,
+      workspace_id: workspaceId,
+      is_active: isActive,
+      visible_to_default_assistant: item.visible_to_default_assistant,
+      connection: {
+        ...item.connection,
+        bearer_token: null,
+        extra_settings: item.connection.extra_settings ?? {},
+      },
+    };
+  }
+  if (type === "victoriametrics") {
+    const item = connector as VictoriaMetricsConnectorItem;
+    return {
+      name: item.name,
+      workspace_id: workspaceId,
+      is_active: isActive,
+      visible_to_default_assistant: item.visible_to_default_assistant,
+      connection: {
+        ...item.connection,
+        bearer_token: null,
         extra_settings: item.connection.extra_settings ?? {},
       },
     };
@@ -320,10 +568,10 @@ function SectionBadge({
   children: React.ReactNode;
 }) {
   const map = {
-    primary: "bg-[#5da8ff]/16 text-[#b8d9ff] border-[#5da8ff]/28",
-    success: "bg-[#38c67d]/16 text-[#8ae0b0] border-[#38c67d]/24",
-    warning: "bg-[#f2b14b]/14 text-[#ffd386] border-[#f2b14b]/28",
-    danger: "bg-[#ff6d7c]/16 text-[#ffb2bb] border-[#ff6d7c]/24",
+    primary: "bg-accent/[0.16] text-accent border-accent/[0.28]",
+    success: "bg-success/[0.16] text-success border-success/[0.24]",
+    warning: "bg-warning/[0.14] text-warning border-warning/[0.28]",
+    danger: "bg-danger/[0.16] text-danger border-danger/[0.24]",
   };
 
   return (
@@ -350,13 +598,13 @@ function SectionShell({
     <section className="grid gap-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#6e84a8]">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted">
             {eyebrow}
           </p>
-          <h2 className="mt-2 text-2xl font-semibold tracking-[-0.03em] text-[#eef4ff]">
+          <h2 className="mt-2 text-2xl font-semibold tracking-[-0.03em] text-primary">
             {title}
           </h2>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-[#8ea3c5]">{description}</p>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-secondary">{description}</p>
         </div>
         {actions ? <div className="flex flex-wrap gap-3">{actions}</div> : null}
       </div>
@@ -379,22 +627,22 @@ function MetricCard({
   caption: string;
 }) {
   const map = {
-    primary: "border-[#295289] bg-[radial-gradient(circle_at_top_right,rgba(93,168,255,0.16),transparent_34%),linear-gradient(180deg,rgba(9,15,27,0.98),rgba(8,12,22,0.98))] text-[#8fb9ff]",
-    success: "border-[#214e3b] bg-[radial-gradient(circle_at_top_right,rgba(56,198,125,0.16),transparent_34%),linear-gradient(180deg,rgba(9,15,27,0.98),rgba(8,12,22,0.98))] text-[#7bdca5]",
-    warning: "border-[#5b4720] bg-[radial-gradient(circle_at_top_right,rgba(242,177,75,0.16),transparent_34%),linear-gradient(180deg,rgba(9,15,27,0.98),rgba(8,12,22,0.98))] text-[#ffd178]",
-    danger: "border-[#5b2730] bg-[radial-gradient(circle_at_top_right,rgba(255,109,124,0.16),transparent_34%),linear-gradient(180deg,rgba(9,15,27,0.98),rgba(8,12,22,0.98))] text-[#ffb2bb]",
+    primary: "border-accent-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-accent)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-accent",
+    success: "border-success-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-success)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-success",
+    warning: "border-warning-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-warning)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-warning",
+    danger: "border-danger-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-danger)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-danger",
   };
 
   return (
-    <Card className={`border ${map[tone]} shadow-[0_18px_48px_rgba(0,0,0,0.28)]`}>
+    <Card className={`border ${map[tone]} shadow-[0_18px_48px_rgb(var(--color-shadow)/calc(0.28*var(--shadow-opacity-scale)))]`}>
       <CardContent className="flex items-start gap-4 p-5">
         <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-current/20 bg-current/10">
           {icon}
         </div>
         <div className="space-y-1">
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#6e84a8]">{title}</p>
-          <div className="text-3xl font-semibold tracking-[-0.04em] text-[#eef4ff]">{value}</div>
-          <p className="text-sm leading-6 text-[#8ea3c5]">{caption}</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">{title}</p>
+          <div className="text-3xl font-semibold tracking-[-0.04em] text-primary">{value}</div>
+          <p className="text-sm leading-6 text-secondary">{caption}</p>
         </div>
       </CardContent>
     </Card>
@@ -411,8 +659,8 @@ function InfoPanel({
   children: React.ReactNode;
 }) {
   return (
-    <Card className="min-w-0 overflow-hidden border-[#182438] bg-[linear-gradient(180deg,rgba(10,16,29,0.96),rgba(8,12,22,0.98))]">
-      <CardHeader className="min-w-0 border-b border-[#182438]">
+    <Card className="min-w-0 overflow-hidden border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
+      <CardHeader className="min-w-0 border-b border-border">
         <CardTitle className="min-w-0 break-words text-lg">{title}</CardTitle>
         {description ? <CardDescription className="min-w-0 break-words">{description}</CardDescription> : null}
       </CardHeader>
@@ -423,7 +671,7 @@ function InfoPanel({
 
 function ReviewTag({ children }: { children: React.ReactNode }) {
   return (
-    <span className="inline-flex rounded-full border border-[#263750] bg-[#0b1322] px-2.5 py-1 text-xs text-[#b5c7e3]">
+    <span className="inline-flex rounded-full border border-border-strong bg-surface px-2.5 py-1 text-xs text-primary">
       {children}
     </span>
   );
@@ -432,13 +680,17 @@ function ReviewTag({ children }: { children: React.ReactNode }) {
 export function AdminPageClient({
   databaseConnectors: initialDb,
   llmConnectors: initialLlm,
-  openMetadataConnectors: initialOm,
-  confluenceConnectors: initialConfluence,
-  jiraConnectors: initialJira,
+  documentationConnectors: initialDocumentation,
+  gitlabConnectors: initialGitLab,
+  mcpConnectors: initialMcp,
+  airflowConnectors: initialAirflow,
+  kubernetesConnectors: initialKubernetes,
+  victoriametricsConnectors: initialVictoriaMetrics,
   mattermostConnectors: initialMattermost,
   pendingInsights: initialPending,
   scenarios: initialScenarios,
   workspaceSkills: initialWorkspaceSkills,
+  agents: initialAgents = [],
   localUsers: initialLocalUsers,
   currentUserId,
   workspaceId,
@@ -448,13 +700,19 @@ export function AdminPageClient({
   const [activeSection, setActiveSection] = useState<AdminSectionId>("overview");
   const [databaseConnectors, setDatabaseConnectors] = useState(initialDb);
   const [llmConnectors, setLlmConnectors] = useState(initialLlm);
-  const [openMetadataConnectors, setOpenMetadataConnectors] = useState(initialOm);
-  const [confluenceConnectors, setConfluenceConnectors] = useState(initialConfluence);
-  const [jiraConnectors, setJiraConnectors] = useState(initialJira);
+  const [documentationConnectors, setDocumentationConnectors] = useState(initialDocumentation);
+  const [gitlabConnectors, setGitLabConnectors] = useState(initialGitLab);
+  const [mcpConnectors, setMcpConnectors] = useState(initialMcp);
+  const [airflowConnectors, setAirflowConnectors] = useState(initialAirflow);
+  const [kubernetesConnectors, setKubernetesConnectors] = useState(initialKubernetes);
+  const [victoriametricsConnectors, setVictoriaMetricsConnectors] = useState(
+    initialVictoriaMetrics
+  );
   const [mattermostConnectors, setMattermostConnectors] = useState(initialMattermost);
   const [pendingInsights, setPendingInsights] = useState(initialPending);
   const [scenarios, setScenarios] = useState(initialScenarios);
   const [workspaceSkills, setWorkspaceSkills] = useState(sortSkills(initialWorkspaceSkills));
+  const [agents, setAgents] = useState(initialAgents);
   const [localUsers, setLocalUsers] = useState(sortUsers(initialLocalUsers));
 
   const [setupSearch, setSetupSearch] = useState("");
@@ -465,19 +723,27 @@ export function AdminPageClient({
   const [editingConnector, setEditingConnector] = useState<AnyConnectorItem | null>(null);
   const [connectorSaving, setConnectorSaving] = useState(false);
   const [connectorStatusPendingId, setConnectorStatusPendingId] = useState<string | null>(null);
+  const [documentationSyncPendingId, setDocumentationSyncPendingId] = useState<string | null>(null);
   const [connectorError, setConnectorError] = useState<string | null>(null);
+  const [connectorSessionNonce, bumpConnectorSessionNonce] = useSessionNonce();
 
   const [skillSheetOpen, setSkillSheetOpen] = useState(false);
   const [editingSkill, setEditingSkill] = useState<WorkspaceSkillItem | null>(null);
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillError, setSkillError] = useState<string | null>(null);
+  const [skillSessionNonce, bumpSkillSessionNonce] = useSessionNonce();
 
-  const [scenarioEditorOpen, setScenarioEditorOpen] = useState(false);
-  const [editingScenario, setEditingScenario] = useState<ScenarioDefinition | null>(null);
-  const [scenarioSaving, setScenarioSaving] = useState(false);
+  const [agentSheetOpen, setAgentSheetOpen] = useState(false);
+  const [editingAgent, setEditingAgent] = useState<AgentProfile | null>(null);
+  const [agentSaving, setAgentSaving] = useState(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [agentSessionNonce, bumpAgentSessionNonce] = useSessionNonce();
 
   const [userSaving, setUserSaving] = useState(false);
   const [userError, setUserError] = useState<string | null>(null);
+  const [rateLimitUser, setRateLimitUser] = useState<LocalUserItem | null>(null);
+  const [rateLimitSaving, setRateLimitSaving] = useState(false);
+  const [rateLimitError, setRateLimitError] = useState<string | null>(null);
 
   const [selectedReviewId, setSelectedReviewId] = useState<string | null>(initialPending[0]?.id ?? null);
   const [reviewPendingId, setReviewPendingId] = useState<string | null>(null);
@@ -493,9 +759,12 @@ export function AdminPageClient({
       buildReadinessModel({
         databaseConnectors,
         llmConnectors,
-        openMetadataConnectors,
-        confluenceConnectors,
-        jiraConnectors,
+        documentationConnectors,
+        gitlabConnectors,
+        mcpConnectors,
+        airflowConnectors,
+        kubernetesConnectors,
+        victoriametricsConnectors,
         mattermostConnectors,
         pendingInsights,
         scenarios,
@@ -503,13 +772,16 @@ export function AdminPageClient({
         localUsers,
       }),
     [
-      confluenceConnectors,
       mattermostConnectors,
       databaseConnectors,
-      jiraConnectors,
+      documentationConnectors,
+      gitlabConnectors,
+      mcpConnectors,
+      airflowConnectors,
+      kubernetesConnectors,
+      victoriametricsConnectors,
       llmConnectors,
       localUsers,
-      openMetadataConnectors,
       pendingInsights,
       scenarios,
       workspaceSkills,
@@ -529,27 +801,39 @@ export function AdminPageClient({
       llm: llmConnectors.filter((item) =>
         matchesConnectorFilter(item, "llm", deferredSetupSearch, setupStatus)
       ),
-      metadata: openMetadataConnectors.filter((item) =>
-        matchesConnectorFilter(item, "metadata", deferredSetupSearch, setupStatus)
+      documentation: documentationConnectors.filter((item) =>
+        matchesConnectorFilter(item, "documentation", deferredSetupSearch, setupStatus)
       ),
-      confluence: confluenceConnectors.filter((item) =>
-        matchesConnectorFilter(item, "confluence", deferredSetupSearch, setupStatus)
+      gitlab: gitlabConnectors.filter((item) =>
+        matchesConnectorFilter(item, "gitlab", deferredSetupSearch, setupStatus)
       ),
-      jira: jiraConnectors.filter((item) =>
-        matchesConnectorFilter(item, "jira", deferredSetupSearch, setupStatus)
+      mcp: mcpConnectors.filter((item) =>
+        matchesConnectorFilter(item, "mcp", deferredSetupSearch, setupStatus)
+      ),
+      airflow: airflowConnectors.filter((item) =>
+        matchesConnectorFilter(item, "airflow", deferredSetupSearch, setupStatus)
+      ),
+      kubernetes: kubernetesConnectors.filter((item) =>
+        matchesConnectorFilter(item, "kubernetes", deferredSetupSearch, setupStatus)
+      ),
+      victoriametrics: victoriametricsConnectors.filter((item) =>
+        matchesConnectorFilter(item, "victoriametrics", deferredSetupSearch, setupStatus)
       ),
       mattermost: mattermostConnectors.filter((item) =>
         matchesConnectorFilter(item, "mattermost", deferredSetupSearch, setupStatus)
       ),
     }),
     [
-      confluenceConnectors,
       databaseConnectors,
       deferredSetupSearch,
-      jiraConnectors,
+      documentationConnectors,
+      gitlabConnectors,
+      mcpConnectors,
+      airflowConnectors,
+      kubernetesConnectors,
+      victoriametricsConnectors,
       llmConnectors,
       mattermostConnectors,
-      openMetadataConnectors,
       setupStatus,
     ]
   );
@@ -596,6 +880,18 @@ export function AdminPageClient({
     setSkillSheetOpen(true);
   };
 
+  const openCreateAgentSheet = () => {
+    setAgentError(null);
+    setEditingAgent(null);
+    setAgentSheetOpen(true);
+  };
+
+  const openEditAgentSheet = (agent: AgentProfile) => {
+    setAgentError(null);
+    setEditingAgent(agent);
+    setAgentSheetOpen(true);
+  };
+
   async function handleConnectorSubmit(formData: FormData) {
     const connectorType = String(formData.get("connector_type") ?? "") as ConnectorType;
     const connectorId = String(formData.get("connector_id") ?? "").trim() || undefined;
@@ -623,12 +919,14 @@ export function AdminPageClient({
                 port: Number(String(formData.get("port") ?? "8123")),
                 username: String(formData.get("username") ?? "").trim(),
                 password: String(formData.get("password") ?? "").trim() || null,
+                usage_description: optionalText(formData.get("usage_description")),
                 database: String(formData.get("database") ?? "").trim() || null,
                 catalog: String(formData.get("catalog") ?? "").trim() || null,
                 schema: String(formData.get("schema") ?? "").trim() || null,
                 secure: formData.get("secure") !== null,
                 verify: formData.get("verify") !== null,
                 extra_settings: buildDatabaseExtraSettings(formData),
+                extra_credentials: collectDatabaseExtraCredentials(formData),
               },
             }),
           }
@@ -638,6 +936,10 @@ export function AdminPageClient({
           setDatabaseConnectors((current) => upsertById(current, savedConnector as DatabaseConnectorItem));
         });
       } else if (connectorType === "llm") {
+        const existingExtraSettings =
+          editingConnector != null && editingConnector.id === connectorId
+            ? ((editingConnector as LlmConnectorItem).connection.extra_settings ?? {})
+            : {};
         savedConnector = await requestJson<LlmConnectorItem>(
           connectorEndpoint(connectorType, connectorId, workspaceId),
           {
@@ -647,58 +949,41 @@ export function AdminPageClient({
               name: String(formData.get("name") ?? "").trim(),
               workspace_id: workspaceId,
               is_active: formData.get("is_active") !== null,
+              is_default: formData.get("is_default") !== null,
               connection: {
                 base_url: String(formData.get("base_url") ?? "").trim(),
                 model: String(formData.get("model") ?? "").trim(),
-                api_key: String(formData.get("api_key") ?? "").trim() || null,
+                api_key: null,
+                api_keys: collectLlmApiKeys(formData),
+                retained_api_key_indexes: collectRetainedLlmApiKeyIndexes(formData),
                 endpoint_path: String(formData.get("endpoint_path") ?? "").trim() || "/chat/completions",
                 verify_tls: formData.get("verify_tls") !== null,
-                temperature: Number(String(formData.get("temperature") ?? "0.1")),
-                max_tokens: Number(String(formData.get("max_tokens") ?? "1200")),
-                headers: {},
-                extra_settings: {},
+                temperature: optionalNumber(formData.get("temperature")),
+                top_p: optionalNumber(formData.get("top_p")),
+                reasoning_effort: String(formData.get("reasoning_effort") ?? "") || null,
+                max_tokens: optionalNumber(formData.get("max_tokens")),
+                max_tokens_parameter:
+                  String(formData.get("max_tokens_parameter") ?? "max_tokens") ===
+                  "max_completion_tokens"
+                    ? "max_completion_tokens"
+                    : "max_tokens",
+                headers: parseLlmHeaders(formData.get("llm_headers_json")),
+                extra_settings: buildLlmExtraSettings(formData, existingExtraSettings),
               },
             }),
           }
         );
 
         startTransition(() => {
-          setLlmConnectors((current) => upsertById(current, savedConnector as LlmConnectorItem));
-        });
-      } else if (connectorType === "metadata") {
-        savedConnector = await requestJson<OpenMetadataConnectorItem>(
-          connectorEndpoint(connectorType, connectorId, workspaceId),
-          {
-            method: isEdit ? "PUT" : "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: String(formData.get("name") ?? "").trim(),
-              workspace_id: workspaceId,
-              is_active: formData.get("is_active") !== null,
-              connection: {
-                provider: "openmetadata",
-                base_url: String(formData.get("base_url") ?? "").trim(),
-                api_token: String(formData.get("api_token") ?? "").trim() || null,
-                verify_tls: formData.get("verify_tls") !== null,
-                mcp_tables_url: String(formData.get("mcp_tables_url") ?? "").trim() || null,
-                service_name: String(formData.get("service_name") ?? "").trim() || null,
-                database_name: String(formData.get("database_name") ?? "").trim() || null,
-                schema_name: String(formData.get("schema_name") ?? "").trim() || null,
-                table_limit: Number(String(formData.get("table_limit") ?? "200")),
-                fields: "columns,database,databaseSchema",
-                extra_settings: {},
-              },
-            }),
-          }
-        );
-
-        startTransition(() => {
-          setOpenMetadataConnectors((current) =>
-            upsertById(current, savedConnector as OpenMetadataConnectorItem)
+          setLlmConnectors((current) =>
+            upsertLlmConnector(current, savedConnector as LlmConnectorItem)
           );
         });
-      } else if (connectorType === "confluence") {
-        savedConnector = await requestJson<ConfluenceConnectorItem>(
+      } else if (connectorType === "documentation") {
+        const authTypeValue = String(formData.get("auth_type") ?? "none");
+        const authType =
+          authTypeValue === "bearer" || authTypeValue === "basic" ? authTypeValue : "none";
+        savedConnector = await requestJson<DocumentationConnectorItem>(
           connectorEndpoint(connectorType, connectorId, workspaceId),
           {
             method: isEdit ? "PUT" : "POST",
@@ -707,15 +992,36 @@ export function AdminPageClient({
               name: String(formData.get("name") ?? "").trim(),
               workspace_id: workspaceId,
               is_active: formData.get("is_active") !== null,
+              visible_to_default_assistant: formData.get("visible_to_default_assistant") !== null,
               connection: {
-                provider: "confluence",
+                provider: "docsy_hugo",
                 base_url: String(formData.get("base_url") ?? "").trim(),
-                username: String(formData.get("username") ?? "").trim() || null,
-                api_token: String(formData.get("api_token") ?? "").trim() || null,
-                auth_type: String(formData.get("auth_type") ?? "bearer") === "basic" ? "basic" : "bearer",
+                index_url: optionalText(formData.get("index_url")),
+                content_format: "markdown",
+                username: optionalText(formData.get("username")),
+                api_token: optionalText(formData.get("api_token")),
+                usage_description: optionalText(formData.get("usage_description")),
+                auth_type: authType,
                 verify_tls: formData.get("verify_tls") !== null,
-                space_key: String(formData.get("space_key") ?? "").trim() || null,
-                page_limit: Number(String(formData.get("page_limit") ?? "10")),
+                include_paths: splitCommaList(formData.get("include_paths")),
+                exclude_paths: splitCommaList(formData.get("exclude_paths")),
+                sync_enabled: formData.get("sync_enabled") !== null,
+                sync_interval_minutes: Number(String(formData.get("sync_interval_minutes") ?? "60")),
+                qdrant_base_url: String(formData.get("qdrant_base_url") ?? "").trim() || "http://qdrant:6333",
+                qdrant_api_key: optionalText(formData.get("qdrant_api_key")),
+                qdrant_collection_name:
+                  String(formData.get("qdrant_collection_name") ?? "").trim() || "documentation_chunks",
+                qdrant_prefer_grpc: formData.get("qdrant_prefer_grpc") !== null,
+                vector_size: Number(String(formData.get("vector_size") ?? "1024")),
+                embedding_base_url: optionalText(formData.get("embedding_base_url")),
+                embedding_api_key: optionalText(formData.get("embedding_api_key")),
+                embedding_model:
+                  String(formData.get("embedding_model") ?? "").trim() || "BAAI/bge-small-en-v1.5",
+                embedding_endpoint_path:
+                  String(formData.get("embedding_endpoint_path") ?? "").trim() || "/v1/embeddings",
+                embedding_timeout_seconds: Number(
+                  String(formData.get("embedding_timeout_seconds") ?? "120")
+                ),
                 extra_settings: {},
               },
             }),
@@ -723,12 +1029,12 @@ export function AdminPageClient({
         );
 
         startTransition(() => {
-          setConfluenceConnectors((current) =>
-            upsertById(current, savedConnector as ConfluenceConnectorItem)
+          setDocumentationConnectors((current) =>
+            upsertById(current, savedConnector as DocumentationConnectorItem)
           );
         });
-      } else if (connectorType === "jira") {
-        savedConnector = await requestJson<JiraConnectorItem>(
+      } else if (connectorType === "gitlab") {
+        savedConnector = await requestJson<GitLabConnectorItem>(
           connectorEndpoint(connectorType, connectorId, workspaceId),
           {
             method: isEdit ? "PUT" : "POST",
@@ -738,17 +1044,15 @@ export function AdminPageClient({
               workspace_id: workspaceId,
               is_active: formData.get("is_active") !== null,
               connection: {
-                provider: "jira",
+                provider: "gitlab",
                 base_url: String(formData.get("base_url") ?? "").trim(),
-                username: String(formData.get("username") ?? "").trim() || null,
                 api_token: String(formData.get("api_token") ?? "").trim() || null,
-                auth_type: String(formData.get("auth_type") ?? "bearer") === "basic" ? "basic" : "bearer",
+                use_when: String(formData.get("use_when") ?? "").trim(),
                 verify_tls: formData.get("verify_tls") !== null,
-                project_keys: String(formData.get("project_keys") ?? "")
-                  .split(",")
-                  .map((item) => item.trim())
-                  .filter(Boolean),
-                issue_limit: Number(String(formData.get("issue_limit") ?? "10")),
+                default_project_paths: splitCommaList(formData.get("default_project_paths")),
+                default_group_paths: splitCommaList(formData.get("default_group_paths")),
+                search_limit: Number(String(formData.get("search_limit") ?? "5")),
+                read_max_tokens: Number(String(formData.get("read_max_tokens") ?? "1600")),
                 extra_settings: {},
               },
             }),
@@ -756,8 +1060,158 @@ export function AdminPageClient({
         );
 
         startTransition(() => {
-          setJiraConnectors((current) =>
-            upsertById(current, savedConnector as JiraConnectorItem)
+          setGitLabConnectors((current) =>
+            upsertById(current, savedConnector as GitLabConnectorItem)
+          );
+        });
+      } else if (connectorType === "mcp") {
+        const providerValue = String(formData.get("provider") ?? "generic");
+        savedConnector = await requestJson<McpConnectorItem>(
+          connectorEndpoint(connectorType, connectorId, workspaceId),
+          {
+            method: isEdit ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: String(formData.get("name") ?? "").trim(),
+              workspace_id: workspaceId,
+              is_active: formData.get("is_active") !== null,
+              visible_to_external_mcp: formData.get("visible_to_external_mcp") !== null,
+              connection: {
+                provider:
+                  providerValue === "jira" ||
+                  providerValue === "confluence" ||
+                  providerValue === "gitlab"
+                    ? providerValue
+                    : "generic",
+                transport: "streamable-http",
+                url: String(formData.get("url") ?? "").trim(),
+                verify_tls: formData.get("verify_tls") !== null,
+                headers: parseJsonObjectField(formData.get("headers_json")),
+                secret_headers: parseMcpSecretHeaders(formData.get("secret_headers_json")),
+                enabled_groups: optionalText(formData.get("enabled_groups")),
+                allowed_tool_names: splitCommaList(formData.get("allowed_tool_names")),
+                timeout_seconds: Number(String(formData.get("timeout_seconds") ?? "30")),
+                tool_name_prefix: optionalText(formData.get("tool_name_prefix")),
+                llm_connector_name: optionalText(formData.get("llm_connector_name")),
+                usage_description: optionalText(formData.get("usage_description")),
+                extra_settings: {},
+              },
+            }),
+          }
+        );
+
+        startTransition(() => {
+          setMcpConnectors((current) => upsertById(current, savedConnector as McpConnectorItem));
+        });
+      } else if (connectorType === "airflow") {
+        savedConnector = await requestJson<AirflowConnectorItem>(
+          connectorEndpoint(connectorType, connectorId, workspaceId),
+          {
+            method: isEdit ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: String(formData.get("name") ?? "").trim(),
+              workspace_id: workspaceId,
+              is_active: formData.get("is_active") !== null,
+              connection: {
+                provider: "airflow",
+                base_url: String(formData.get("base_url") ?? "").trim(),
+                username: String(formData.get("username") ?? "").trim(),
+                password: String(formData.get("password") ?? "").trim() || null,
+                use_when: String(formData.get("use_when") ?? "").trim(),
+                auth_type: "basic",
+                verify_tls: formData.get("verify_tls") !== null,
+                api_path: String(formData.get("api_path") ?? "").trim() || "/api/v1",
+                dag_limit: Number(String(formData.get("dag_limit") ?? "25")),
+                dag_run_limit: Number(String(formData.get("dag_run_limit") ?? "20")),
+                task_limit: Number(String(formData.get("task_limit") ?? "50")),
+                log_max_chars: Number(String(formData.get("log_max_chars") ?? "8000")),
+                timeout_seconds: Number(String(formData.get("timeout_seconds") ?? "20")),
+                extra_settings: {},
+              },
+            }),
+          }
+        );
+
+        startTransition(() => {
+          setAirflowConnectors((current) =>
+            upsertById(current, savedConnector as AirflowConnectorItem)
+          );
+        });
+      } else if (connectorType === "kubernetes") {
+        savedConnector = await requestJson<KubernetesConnectorItem>(
+          connectorEndpoint(connectorType, connectorId, workspaceId),
+          {
+            method: isEdit ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: String(formData.get("name") ?? "").trim(),
+              workspace_id: workspaceId,
+              is_active: formData.get("is_active") !== null,
+              visible_to_default_assistant:
+                formData.get("visible_to_default_assistant") !== null,
+              connection: {
+                provider: "kubernetes",
+                base_url: String(formData.get("base_url") ?? "").trim(),
+                bearer_token: String(formData.get("bearer_token") ?? "").trim() || null,
+                use_when: String(formData.get("use_when") ?? "").trim(),
+                auth_type: "bearer",
+                verify_tls: formData.get("verify_tls") !== null,
+                namespace_allowlist: splitCommaList(formData.get("namespace_allowlist")),
+                default_limit: Number(String(formData.get("default_limit") ?? "25")),
+                max_limit: Number(String(formData.get("max_limit") ?? "100")),
+                log_max_chars: Number(String(formData.get("log_max_chars") ?? "8000")),
+                timeout_seconds: Number(String(formData.get("timeout_seconds") ?? "20")),
+                extra_settings: {},
+              },
+            }),
+          }
+        );
+
+        startTransition(() => {
+          setKubernetesConnectors((current) =>
+            upsertById(current, savedConnector as KubernetesConnectorItem)
+          );
+        });
+      } else if (connectorType === "victoriametrics") {
+        const authType = formData.get("auth_type") === "bearer" ? "bearer" : "none";
+        savedConnector = await requestJson<VictoriaMetricsConnectorItem>(
+          connectorEndpoint(connectorType, connectorId, workspaceId),
+          {
+            method: isEdit ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: String(formData.get("name") ?? "").trim(),
+              workspace_id: workspaceId,
+              is_active: formData.get("is_active") !== null,
+              visible_to_default_assistant:
+                formData.get("visible_to_default_assistant") !== null,
+              connection: {
+                provider: "victoriametrics",
+                base_url: String(formData.get("base_url") ?? "").trim(),
+                bearer_token: String(formData.get("bearer_token") ?? "").trim() || null,
+                use_when: String(formData.get("use_when") ?? "").trim(),
+                auth_type: authType,
+                verify_tls: formData.get("verify_tls") !== null,
+                query_path:
+                  String(formData.get("query_path") ?? "").trim() ||
+                  "/prometheus/api/v1/query",
+                query_range_path:
+                  String(formData.get("query_range_path") ?? "").trim() ||
+                  "/prometheus/api/v1/query_range",
+                templates: parseJsonArrayField(formData.get("templates")),
+                timeout_seconds: Number(String(formData.get("timeout_seconds") ?? "20")),
+                max_series: Number(String(formData.get("max_series") ?? "20")),
+                max_datapoints: Number(String(formData.get("max_datapoints") ?? "300")),
+                extra_settings: {},
+              },
+            }),
+          }
+        );
+
+        startTransition(() => {
+          setVictoriaMetricsConnectors((current) =>
+            upsertById(current, savedConnector as VictoriaMetricsConnectorItem)
           );
         });
       } else {
@@ -770,6 +1224,7 @@ export function AdminPageClient({
               name: String(formData.get("name") ?? "").trim(),
               workspace_id: workspaceId,
               is_active: formData.get("is_active") !== null,
+              agent_id: String(formData.get("agent_id") ?? "").trim() || null,
               connection: {
                 provider: "mattermost",
                 base_url: String(formData.get("base_url") ?? "").trim(),
@@ -777,6 +1232,10 @@ export function AdminPageClient({
                 bot_username: String(formData.get("bot_username") ?? "").trim() || null,
                 verify_tls: formData.get("verify_tls") !== null,
                 listen_enabled: formData.get("listen_enabled") !== null,
+                send_sql_enabled: formData.get("send_sql_enabled") !== null,
+                ambient_listen_enabled: formData.get("ambient_listen_enabled") !== null,
+                ambient_channel_ids: splitCommaList(formData.get("ambient_channel_ids")),
+                ambient_decision_prompt: optionalText(formData.get("ambient_decision_prompt")),
                 extra_settings: {},
               },
             }),
@@ -792,13 +1251,14 @@ export function AdminPageClient({
 
       setConnectorSheetOpen(false);
       setEditingConnector(null);
+      bumpConnectorSessionNonce();
       addToast({
         type: "success",
-        title: isEdit ? "Connector updated" : "Connector created",
-        description: `${savedConnector.name} is now in the workspace config.`,
+        title: isEdit ? "Подключение обновлено" : "Подключение создано",
+        description: `${savedConnector.name} теперь в конфигурации рабочего пространства`,
       });
     } catch (error) {
-      setConnectorError(error instanceof Error ? error.message : "Connector save failed");
+      setConnectorError(error instanceof Error ? error.message : "Не удалось сохранить подключение");
     } finally {
       setConnectorSaving(false);
     }
@@ -809,6 +1269,47 @@ export function AdminPageClient({
     setSkillError(null);
 
     const skillId = String(formData.get("skill_id") ?? "").trim();
+    const sourceKind = String(formData.get("source_kind") ?? "github_markdown_url");
+    const capabilityFamily = String(
+      formData.get("capability_family") ?? "sql_optimization_advisor"
+    );
+    const manualMarkdown = String(formData.get("content_markdown") ?? "");
+    const manualUseWhen = String(formData.get("use_when") ?? "").trim();
+    const manualContentMarkdown =
+      sourceKind === "manual_markdown"
+        ? withManualSkillUseWhen(manualMarkdown, manualUseWhen)
+        : "";
+    if (
+      sourceKind === "manual_markdown" &&
+      utf8ByteLength(manualContentMarkdown) > MAX_MANUAL_SKILL_CONTENT_BYTES
+    ) {
+      setSkillError("Текст навыка слишком велик после добавления подсказки о применении");
+      setSkillSaving(false);
+      return;
+    }
+    const payload = {
+      workspace_id: workspaceId,
+      name: String(formData.get("name") ?? "").trim(),
+      capability_family: capabilityFamily,
+      engine_scope:
+        capabilityFamily === "chat_instruction"
+          ? "any"
+          : String(formData.get("engine_scope") ?? "clickhouse"),
+      priority: Number(String(formData.get("priority") ?? "100")),
+      source_kind: sourceKind,
+      status: String(formData.get("status") ?? "active"),
+      visible_to_default_assistant:
+        capabilityFamily === "chat_instruction"
+          ? formData.get("visible_to_default_assistant") !== null
+          : true,
+      ...(sourceKind === "manual_markdown"
+        ? {
+            content_markdown: manualContentMarkdown,
+          }
+        : {
+            source_url: String(formData.get("source_url") ?? "").trim(),
+          }),
+    };
 
     try {
       const saved = await requestJson<WorkspaceSkillItem>(
@@ -816,16 +1317,7 @@ export function AdminPageClient({
         {
           method: skillId ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            workspace_id: workspaceId,
-            name: String(formData.get("name") ?? "").trim(),
-            capability_family: "sql_optimization_advisor",
-            engine_scope: String(formData.get("engine_scope") ?? "clickhouse"),
-            priority: Number(String(formData.get("priority") ?? "100")),
-            source_kind: "github_markdown_url",
-            source_url: String(formData.get("source_url") ?? "").trim(),
-            status: String(formData.get("status") ?? "active"),
-          }),
+          body: JSON.stringify(payload),
         }
       );
 
@@ -834,15 +1326,74 @@ export function AdminPageClient({
       });
       setSkillSheetOpen(false);
       setEditingSkill(null);
+      bumpSkillSessionNonce();
       addToast({
         type: "success",
-        title: skillId ? "Skill updated" : "Skill created",
-        description: `${saved.name} is ready for runtime validation.`,
+        title: skillId ? "Навык обновлён" : "Навык создан",
+        description: `${saved.name} готов к проверке`,
       });
     } catch (error) {
-      setSkillError(error instanceof Error ? error.message : "Skill save failed");
+      setSkillError(error instanceof Error ? error.message : "Не удалось сохранить навык");
     } finally {
       setSkillSaving(false);
+    }
+  }
+
+  async function handleAgentSubmit(formData: FormData) {
+    setAgentSaving(true);
+    setAgentError(null);
+    const agentId = String(formData.get("agent_id") ?? "").trim();
+
+    try {
+      const saved = await requestJson<AgentProfile>(
+        agentId ? `/api/admin/agents/${agentId}?workspace_id=${workspaceId}` : "/api/admin/agents",
+        {
+          method: agentId ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workspace_id: workspaceId,
+            slug: String(formData.get("slug") ?? "").trim(),
+            title: String(formData.get("title") ?? "").trim(),
+            description: String(formData.get("description") ?? "").trim() || null,
+            admin_prompt: String(formData.get("admin_prompt") ?? "").trim() || null,
+            is_active: formData.get("is_active") !== null,
+            llm_connector_name: String(formData.get("llm_connector_name") ?? "").trim() || null,
+            allowed_database_connector_names: selectedValues(formData, "database_connectors"),
+            allowed_documentation_connector_names: selectedValues(formData, "documentation_connectors"),
+            allowed_gitlab_connector_names: selectedValues(formData, "gitlab_connectors"),
+            allowed_mcp_connector_names: selectedValues(formData, "mcp_connectors"),
+            allowed_airflow_connector_names: selectedValues(formData, "airflow_connectors"),
+            allowed_kubernetes_connector_names: selectedValues(formData, "kubernetes_connectors"),
+            allowed_victoriametrics_connector_names: selectedValues(
+              formData,
+              "victoriametrics_connectors"
+            ),
+            allowed_workspace_skill_ids: selectedValues(formData, "workspace_skill_ids"),
+            allowed_rag_connector_names: [],
+            settings: {
+              run_sql_allowed: formData.get("run_sql_allowed") !== null,
+              temperature: optionalNumber(formData.get("temperature")),
+              max_tokens: optionalNumber(formData.get("max_tokens")),
+            },
+          }),
+        }
+      );
+
+      startTransition(() => {
+        setAgents((current) => upsertById(current, saved));
+      });
+      setAgentSheetOpen(false);
+      setEditingAgent(null);
+      bumpAgentSessionNonce();
+      addToast({
+        type: "success",
+        title: agentId ? "Агент обновлён" : "Агент создан",
+        description: saved.title,
+      });
+    } catch (error) {
+      setAgentError(error instanceof Error ? error.message : "Не удалось сохранить агента");
+    } finally {
+      setAgentSaving(false);
     }
   }
 
@@ -867,17 +1418,27 @@ export function AdminPageClient({
         if (type === "database") {
           setDatabaseConnectors((current) => upsertById(current, savedConnector as DatabaseConnectorItem));
         } else if (type === "llm") {
-          setLlmConnectors((current) => upsertById(current, savedConnector as LlmConnectorItem));
-        } else if (type === "metadata") {
-          setOpenMetadataConnectors((current) =>
-            upsertById(current, savedConnector as OpenMetadataConnectorItem)
+          setLlmConnectors((current) =>
+            upsertLlmConnector(current, savedConnector as LlmConnectorItem)
           );
-        } else if (type === "confluence") {
-          setConfluenceConnectors((current) =>
-            upsertById(current, savedConnector as ConfluenceConnectorItem)
+        } else if (type === "documentation") {
+          setDocumentationConnectors((current) =>
+            upsertById(current, savedConnector as DocumentationConnectorItem)
           );
-        } else if (type === "jira") {
-          setJiraConnectors((current) => upsertById(current, savedConnector as JiraConnectorItem));
+        } else if (type === "gitlab") {
+          setGitLabConnectors((current) => upsertById(current, savedConnector as GitLabConnectorItem));
+        } else if (type === "mcp") {
+          setMcpConnectors((current) => upsertById(current, savedConnector as McpConnectorItem));
+        } else if (type === "airflow") {
+          setAirflowConnectors((current) => upsertById(current, savedConnector as AirflowConnectorItem));
+        } else if (type === "kubernetes") {
+          setKubernetesConnectors((current) =>
+            upsertById(current, savedConnector as KubernetesConnectorItem)
+          );
+        } else if (type === "victoriametrics") {
+          setVictoriaMetricsConnectors((current) =>
+            upsertById(current, savedConnector as VictoriaMetricsConnectorItem)
+          );
         } else {
           setMattermostConnectors((current) =>
             upsertById(current, savedConnector as MattermostConnectorItem)
@@ -886,17 +1447,69 @@ export function AdminPageClient({
       });
       addToast({
         type: "success",
-        title: isActive ? "Connector activated" : "Connector disabled",
-        description: `${savedConnector.name} ${isActive ? "is available to runtime." : "is hidden from runtime."}`,
+        title: isActive ? "Подключение включено" : "Подключение отключено",
+        description: `${savedConnector.name} ${isActive ? "доступно при выполнении" : "скрыто от выполнения"}`,
       });
     } catch (error) {
       addToast({
         type: "error",
-        title: "Connector status failed",
-        description: error instanceof Error ? error.message : "Status update failed",
+        title: "Не удалось изменить статус подключения",
+        description: error instanceof Error ? error.message : "Не удалось обновить статус",
       });
     } finally {
       setConnectorStatusPendingId(null);
+    }
+  }
+
+  async function handleDocumentationSync(connector: DocumentationConnectorItem) {
+    setDocumentationSyncPendingId(connector.id);
+
+    try {
+      await requestJson<unknown>(
+        `/api/admin/documentation-connectors/${connector.id}/sync?workspace_id=${workspaceId}`,
+        { method: "POST" }
+      );
+      addToast({
+        type: "success",
+        title: "Синхронизация документации поставлена в очередь",
+        description: connector.name,
+      });
+    } catch (error) {
+      addToast({
+        type: "error",
+        title: "Не удалось синхронизировать документацию",
+        description: error instanceof Error ? error.message : "Не удалось запустить синхронизацию",
+      });
+    } finally {
+      setDocumentationSyncPendingId(null);
+    }
+  }
+
+  async function handleMcpSync(connector: McpConnectorItem) {
+    setDocumentationSyncPendingId(connector.id);
+
+    try {
+      await requestJson<unknown>(
+        `/api/admin/mcp-connectors/${connector.id}/sync?workspace_id=${workspaceId}`,
+        { method: "POST" }
+      );
+      const refreshed = await requestJson<McpConnectorItem[]>(
+        `/api/admin/mcp-connectors?workspace_id=${workspaceId}&limit=200`
+      );
+      startTransition(() => setMcpConnectors(refreshed));
+      addToast({
+        type: "success",
+        title: "Инструменты MCP синхронизированы",
+        description: connector.name,
+      });
+    } catch (error) {
+      addToast({
+        type: "error",
+        title: "Не удалось синхронизировать MCP",
+        description: error instanceof Error ? error.message : "Не удалось синхронизировать",
+      });
+    } finally {
+      setDocumentationSyncPendingId(null);
     }
   }
 
@@ -912,6 +1525,7 @@ export function AdminPageClient({
       auth_provider: "local",
       auth_subject: `local:${login}`,
       display_name: String(formData.get("display_name") ?? "").trim() || null,
+      api_rate_limit_per_hour: null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -942,16 +1556,78 @@ export function AdminPageClient({
       form.reset();
       addToast({
         type: "success",
-        title: "User created",
-        description: `${createdUser.login} can sign in now.`,
+        title: "Пользователь создан",
+        description: `${createdUser.login} теперь может войти`,
       });
     } catch (error) {
       startTransition(() => {
         setLocalUsers((current) => current.filter((item) => item.id !== tempId));
       });
-      setUserError(error instanceof Error ? error.message : "User create failed");
+      setUserError(error instanceof Error ? error.message : "Не удалось создать пользователя");
     } finally {
       setUserSaving(false);
+    }
+  }
+
+  async function handleSaveUserRateLimit(requestsPerHour: number | null) {
+    if (!rateLimitUser) {
+      return;
+    }
+    setRateLimitSaving(true);
+    setRateLimitError(null);
+    try {
+      const updated = await requestJson<LocalUserItem>(
+        `/api/admin/users/${rateLimitUser.id}/rate-limit`,
+        requestsPerHour == null
+          ? { method: "DELETE" }
+          : {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ requests_per_hour: requestsPerHour }),
+            }
+      );
+      startTransition(() => {
+        setLocalUsers((current) =>
+          sortUsers(current.map((item) => (item.id === updated.id ? updated : item)))
+        );
+      });
+      setRateLimitUser(null);
+      addToast({
+        type: "success",
+        title: requestsPerHour == null ? "Лимит API отключён" : "Лимит API сохранён",
+        description:
+          requestsPerHour == null
+            ? `${updated.login} без ограничений.`
+            : `${updated.login}: ${requestsPerHour} запросов за последние 60 минут.`,
+      });
+    } catch (error) {
+      setRateLimitError(error instanceof Error ? error.message : "Не удалось обновить лимит API");
+    } finally {
+      setRateLimitSaving(false);
+    }
+  }
+
+  async function handleResetUserRateLimit() {
+    if (!rateLimitUser) {
+      return;
+    }
+    setRateLimitSaving(true);
+    setRateLimitError(null);
+    try {
+      const updated = await requestJson<LocalUserItem>(
+        `/api/admin/users/${rateLimitUser.id}/rate-limit/reset`,
+        { method: "POST" }
+      );
+      setRateLimitUser(updated);
+      addToast({
+        type: "success",
+        title: "Лимит API сброшен",
+        description: `${updated.login} снова доступен полный лимит запросов за последние 60 минут.`,
+      });
+    } catch (error) {
+      setRateLimitError(error instanceof Error ? error.message : "Не удалось сбросить использование API");
+    } finally {
+      setRateLimitSaving(false);
     }
   }
 
@@ -976,46 +1652,16 @@ export function AdminPageClient({
       });
       addToast({
         type: action === "approve" ? "success" : "warning",
-        title: action === "approve" ? "Insight verified" : "Insight rejected",
+        title: action === "approve" ? "Инсайт подтверждён" : "Инсайт отклонён",
         description: removed.summary,
       });
     } catch (error) {
       startTransition(() => {
         setPendingInsights(existing);
       });
-      setReviewError(error instanceof Error ? error.message : "Review action failed");
+      setReviewError(error instanceof Error ? error.message : "Не удалось обработать инсайт");
     } finally {
       setReviewPendingId(null);
-    }
-  }
-
-  async function handleScenarioSubmit(payload: SaveScenarioPayload, scenarioId?: string) {
-    setScenarioSaving(true);
-    try {
-      const saved = scenarioId
-        ? await updateScenario(scenarioId, {
-            workspace_id: payload.workspace_id,
-            title: payload.title,
-            summary: payload.summary,
-            description: payload.description,
-            prompt_template: payload.prompt_template,
-            input_schema: payload.input_schema,
-            tool_policy: payload.tool_policy,
-            default_connector_bindings: payload.default_connector_bindings,
-            status: payload.status,
-          })
-        : await createScenario(payload);
-
-      startTransition(() => {
-        setScenarios((current) => upsertById(current, saved));
-      });
-      addToast({
-        type: "success",
-        title: scenarioId ? "Scenario updated" : "Scenario created",
-        description: `${saved.title} is in governance now.`,
-      });
-    } finally {
-      setScenarioSaving(false);
     }
   }
 
@@ -1070,10 +1716,10 @@ export function AdminPageClient({
           }
         }
 
-        if (deleteIntent.connectorType === "metadata") {
-          const previous = openMetadataConnectors;
+        if (deleteIntent.connectorType === "documentation") {
+          const previous = documentationConnectors;
           startTransition(() => {
-            setOpenMetadataConnectors((current) =>
+            setDocumentationConnectors((current) =>
               current.filter((item) => item.id !== deleteIntent.id)
             );
           });
@@ -1085,16 +1731,16 @@ export function AdminPageClient({
             );
           } catch (error) {
             startTransition(() => {
-              setOpenMetadataConnectors(previous);
+              setDocumentationConnectors(previous);
             });
             throw error;
           }
         }
 
-        if (deleteIntent.connectorType === "confluence") {
-          const previous = confluenceConnectors;
+        if (deleteIntent.connectorType === "gitlab") {
+          const previous = gitlabConnectors;
           startTransition(() => {
-            setConfluenceConnectors((current) =>
+            setGitLabConnectors((current) =>
               current.filter((item) => item.id !== deleteIntent.id)
             );
           });
@@ -1106,16 +1752,16 @@ export function AdminPageClient({
             );
           } catch (error) {
             startTransition(() => {
-              setConfluenceConnectors(previous);
+              setGitLabConnectors(previous);
             });
             throw error;
           }
         }
 
-        if (deleteIntent.connectorType === "jira") {
-          const previous = jiraConnectors;
+        if (deleteIntent.connectorType === "mcp") {
+          const previous = mcpConnectors;
           startTransition(() => {
-            setJiraConnectors((current) =>
+            setMcpConnectors((current) =>
               current.filter((item) => item.id !== deleteIntent.id)
             );
           });
@@ -1127,7 +1773,70 @@ export function AdminPageClient({
             );
           } catch (error) {
             startTransition(() => {
-              setJiraConnectors(previous);
+              setMcpConnectors(previous);
+            });
+            throw error;
+          }
+        }
+
+        if (deleteIntent.connectorType === "airflow") {
+          const previous = airflowConnectors;
+          startTransition(() => {
+            setAirflowConnectors((current) =>
+              current.filter((item) => item.id !== deleteIntent.id)
+            );
+          });
+
+          try {
+            await requestJson<unknown>(
+              connectorEndpoint(deleteIntent.connectorType, deleteIntent.id, workspaceId),
+              { method: "DELETE" }
+            );
+          } catch (error) {
+            startTransition(() => {
+              setAirflowConnectors(previous);
+            });
+            throw error;
+          }
+        }
+
+        if (deleteIntent.connectorType === "kubernetes") {
+          const previous = kubernetesConnectors;
+          startTransition(() => {
+            setKubernetesConnectors((current) =>
+              current.filter((item) => item.id !== deleteIntent.id)
+            );
+          });
+
+          try {
+            await requestJson<unknown>(
+              connectorEndpoint(deleteIntent.connectorType, deleteIntent.id, workspaceId),
+              { method: "DELETE" }
+            );
+          } catch (error) {
+            startTransition(() => {
+              setKubernetesConnectors(previous);
+            });
+            throw error;
+          }
+        }
+
+        if (deleteIntent.connectorType === "victoriametrics") {
+          const previous = victoriametricsConnectors;
+          startTransition(() => {
+            setVictoriaMetricsConnectors((current) =>
+              current.filter((item) => item.id !== deleteIntent.id)
+            );
+          });
+
+          try {
+            await requestJson<unknown>(
+              connectorEndpoint(deleteIntent.connectorType, deleteIntent.id, workspaceId),
+              { method: "DELETE" }
+            );
+          } catch (error) {
+            startTransition(() => {
+              setVictoriaMetricsConnectors(previous);
             });
             throw error;
           }
@@ -1156,7 +1865,7 @@ export function AdminPageClient({
 
         addToast({
           type: "success",
-          title: "Connector deleted",
+          title: "Подключение удалено",
           description: deleteIntent.title,
         });
       }
@@ -1173,7 +1882,7 @@ export function AdminPageClient({
           });
           addToast({
             type: "success",
-            title: "Skill deleted",
+            title: "Навык удалён",
             description: deleteIntent.title,
           });
         } catch (error) {
@@ -1196,7 +1905,7 @@ export function AdminPageClient({
           });
           addToast({
             type: "success",
-            title: "User deleted",
+            title: "Пользователь удалён",
             description: deleteIntent.user.login,
           });
         } catch (error) {
@@ -1226,7 +1935,7 @@ export function AdminPageClient({
           });
           addToast({
             type: "success",
-            title: "Scenario archived",
+            title: "Сценарий отправлен в архив",
             description: deleteIntent.scenario.title,
           });
         } catch (error) {
@@ -1237,153 +1946,97 @@ export function AdminPageClient({
         }
       }
 
+      if (deleteIntent.kind === "agent") {
+        const previous = agents;
+        startTransition(() => {
+          setAgents((current) => current.filter((agent) => agent.id !== deleteIntent.agent.id));
+        });
+        try {
+          await requestJson(`/api/admin/agents/${deleteIntent.agent.id}?workspace_id=${workspaceId}`, {
+            method: "DELETE",
+          });
+          addToast({
+            type: "success",
+            title: "Агент удалён",
+            description: deleteIntent.agent.title,
+          });
+        } catch (error) {
+          startTransition(() => {
+            setAgents(previous);
+          });
+          throw error;
+        }
+      }
+
       setDeleteIntent(null);
     } catch (error) {
       addToast({
         type: "error",
-        title: "Delete failed",
-        description: error instanceof Error ? error.message : "Unknown error",
+        title: "Не удалось удалить",
+        description: error instanceof Error ? error.message : "Неизвестная ошибка",
       });
     } finally {
       setDeletePending(false);
     }
   }
 
-  const nextActions = buildNextActions({
-    readiness,
-    pendingInsights,
-    onNavigate: (section) => {
-      startSectionTransition(() => setActiveSection(section));
-    },
-    onAddDatabase: () => openCreateConnectorSheet("database"),
-    onAddLlm: () => openCreateConnectorSheet("llm"),
-    onReviewQueue: () => startSectionTransition(() => setActiveSection("review")),
-    onAddScenario: () => {
-      setEditingScenario(null);
-      setScenarioEditorOpen(true);
-    },
-  });
-
   return (
     <>
-      <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,rgba(93,168,255,0.18),transparent_28%),radial-gradient(circle_at_20%_0%,rgba(31,49,81,0.32),transparent_30%),linear-gradient(180deg,#070b14_0%,#060810_100%)] px-4 py-5 text-[#edf3ff] md:px-6 lg:px-8">
+      <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,rgb(var(--color-accent)/0.18),transparent_28%),radial-gradient(circle_at_20%_0%,rgb(var(--color-hover)/0.32),transparent_30%),linear-gradient(180deg,rgb(var(--color-page))_0%,rgb(var(--color-page))_100%)] px-4 py-5 text-primary md:px-6 lg:px-8">
         <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-6">
-          <section className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(360px,0.9fr)]">
-            <Card className="overflow-hidden border-[#22334d] bg-[radial-gradient(circle_at_top_right,rgba(93,168,255,0.18),transparent_30%),linear-gradient(180deg,rgba(10,16,29,0.98),rgba(8,12,22,0.98))]">
-              <CardContent className="grid gap-6 p-6 lg:grid-cols-[minmax(0,1fr)_320px] lg:p-7">
-                <div className="space-y-5">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <SectionBadge tone="primary">/admin</SectionBadge>
-                    <SectionBadge tone={readiness.blockers.length === 0 ? "success" : "warning"}>
-                      {readiness.blockers.length === 0 ? "ready" : `${readiness.blockers.length} blockers`}
-                    </SectionBadge>
-                    <span className="text-sm text-[#8ea3c5]">Workspace `{workspaceId}`</span>
-                  </div>
-                  <div className="space-y-3">
-                    <h1 className="max-w-3xl text-4xl font-semibold tracking-[-0.05em] text-[#f3f7ff]">
-                      Admin that tells you what is broken, what is missing, and what to do next.
-                    </h1>
-                    <p className="max-w-2xl text-sm leading-7 text-[#8ea3c5]">
-                      Connect runtime infrastructure, govern analyst workflows, control access, and clear the review queue without scrolling through junk.
+          <header className="relative rounded-2xl border border-border bg-surface/[0.92] px-4 py-4 shadow-[0_18px_52px_rgb(var(--color-shadow)/calc(0.24*var(--shadow-opacity-scale)))] md:px-5">
+            <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <SectionBadge tone={readiness.blockers.length === 0 ? "success" : "warning"}>
+                    {readiness.blockers.length === 0 ? "готов" : `блокеров: ${readiness.blockers.length}`}
+                  </SectionBadge>
+                  <span className="min-w-0 truncate text-sm text-secondary">Рабочее пространство `{workspaceId}`</span>
+                </div>
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                  <div className="min-w-0">
+                    <h1 className="mt-6 text-2xl font-semibold text-primary md:text-3xl">Администрирование</h1>
+                    <p className="mt-2 max-w-2xl text-sm leading-6 text-secondary">
+                      Настройка выполнения, управление, доступ и проверка — в одном месте.
                     </p>
                   </div>
-                  <div className="flex flex-wrap gap-3">
-                    <Button onClick={() => startSectionTransition(() => setActiveSection("setup"))}>
-                      Fix setup
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => startSectionTransition(() => setActiveSection("review"))}
-                    >
-                      Open review queue
-                    </Button>
-                    <Link
-                      href="/"
-                      className="inline-flex h-10 items-center justify-center rounded-lg border border-[#304664] bg-[#0b1322] px-4 text-sm font-medium text-[#d7e6ff] transition hover:bg-[#132033]"
-                    >
-                      Back to workspace
-                    </Link>
-                  </div>
                 </div>
-                <div className="rounded-[28px] border border-[#20324e] bg-[#09111f]/92 p-5 shadow-[0_20px_60px_rgba(0,0,0,0.28)]">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#6e84a8]">
-                    Readiness strip
-                  </p>
-                  <div className="mt-3 flex items-end justify-between gap-3">
-                    <div>
-                      <div className="text-4xl font-semibold tracking-[-0.06em] text-[#f1f6ff]">
-                        {readiness.readinessScore}%
-                      </div>
-                      <p className="mt-1 text-sm text-[#8ea3c5]">
-                        {readiness.completedChecks}/{readiness.totalChecks} core checks passed
-                      </p>
-                    </div>
-                    <Sparkles className="h-8 w-8 text-[#5da8ff]" />
-                  </div>
-                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-[#121d31]">
-                    <div
-                      className="h-full rounded-full bg-[linear-gradient(90deg,#5da8ff,#8fe2ff)]"
-                      style={{ width: `${readiness.readinessScore}%` }}
-                    />
-                  </div>
-                  <div className="mt-5 grid gap-3">
-                    <div className="flex items-center justify-between rounded-2xl border border-[#1c2a42] bg-[#0b1322] px-3 py-3">
-                      <span className="text-sm text-[#b4c6e2]">Secure connections</span>
-                      <span className="text-sm font-semibold text-[#eef4ff]">
-                        {readiness.totalSecureConnections}/{readiness.totalConnections}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-2xl border border-[#1c2a42] bg-[#0b1322] px-3 py-3">
-                      <span className="text-sm text-[#b4c6e2]">Published scenarios</span>
-                      <span className="text-sm font-semibold text-[#eef4ff]">
-                        {readiness.publishedScenarioCount}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-2xl border border-[#1c2a42] bg-[#0b1322] px-3 py-3">
-                      <span className="text-sm text-[#b4c6e2]">Active skills</span>
-                      <span className="text-sm font-semibold text-[#eef4ff]">
-                        {readiness.activeSkillCount}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <InfoPanel
-              title="Next actions"
-              description="The page should drive the operator. Here it does."
-            >
-              <div className="grid gap-3">
-                {nextActions.length > 0 ? (
-                  nextActions.map((action) => (
-                    <button
-                      key={action.title}
-                      type="button"
-                      onClick={action.onClick}
-                      className="flex items-center justify-between rounded-[22px] border border-[#22334e] bg-[#0b1322] px-4 py-4 text-left transition hover:border-[#35537a] hover:bg-[#0d1729]"
-                    >
-                      <div>
-                        <p className="text-sm font-medium text-[#eef4ff]">{action.title}</p>
-                        <p className="mt-1 text-sm leading-6 text-[#8ea3c5]">{action.description}</p>
-                      </div>
-                      <ArrowRight className="h-4 w-4 flex-shrink-0 text-[#8fb9ff]" />
-                    </button>
-                  ))
-                ) : (
-                  <EmptyState
-                    icon={<CheckCircle2 className="h-5 w-5" />}
-                    title="No obvious fires"
-                    description="Core setup is in place. You can keep tuning governance and review cadence."
-                    className="border-[#1f3a2d] bg-[linear-gradient(180deg,rgba(7,18,16,0.92),rgba(6,13,12,0.98))]"
-                  />
-                )}
               </div>
-            </InfoPanel>
-          </section>
 
-          <div className="sticky top-4 z-20 rounded-[28px] border border-[#1d2940] bg-[#08101d]/88 p-2 backdrop-blur-xl">
-            <div className="grid gap-2 md:grid-cols-5">
+              <div className="flex flex-wrap justify-end gap-2">
+                <ThemeSelector />
+                <Button onClick={() => startSectionTransition(() => setActiveSection("setup"))}>
+                  Исправить настройки
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => startSectionTransition(() => setActiveSection("review"))}
+                >
+                  Очистить очередь проверки
+                </Button>
+              </div>
+              <Link
+                href="/"
+                aria-label="Перейти в рабочее пространство"
+                title="Перейти в рабочее пространство"
+                className="absolute right-4 top-4 z-10 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent/50 bg-elevated text-primary shadow-[0_10px_28px_rgb(var(--color-accent)/0.14)] transition hover:bg-border-strong md:right-5"
+              >
+                <X className="h-4 w-4" />
+              </Link>
+            </div>
+          </header>
+
+          <div className="flex flex-wrap gap-2 rounded-xl border border-border bg-surface/70 p-2">
+            <CompactSummaryStat label="Оценка готовности" value={`${readiness.readinessScore}%`} />
+            <CompactSummaryStat
+              label="Защищено"
+              value={`${readiness.totalSecureConnections}/${readiness.totalConnections}`}
+            />
+            <CompactSummaryStat label="Проверка" value={pendingInsights.length} />
+          </div>
+
+          <div className="sticky top-4 z-20 rounded-2xl border border-border bg-surface/90 p-1.5 backdrop-blur-xl">
+            <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-5">
               {SECTION_META.map((section) => {
                 const isActive = section.id === activeSection;
                 return (
@@ -1392,14 +2045,14 @@ export function AdminPageClient({
                     type="button"
                     aria-pressed={isActive}
                     onClick={() => startSectionTransition(() => setActiveSection(section.id))}
-                    className={`rounded-[20px] px-4 py-3 text-left transition ${
+                    className={`rounded-xl px-3 py-2.5 text-left transition ${
                       isActive
-                        ? "bg-[linear-gradient(180deg,rgba(93,168,255,0.18),rgba(16,30,50,0.98))] text-white shadow-[0_10px_28px_rgba(93,168,255,0.18)]"
-                        : "bg-transparent text-[#8ea3c5] hover:bg-[#0d1729] hover:text-white"
+                        ? "bg-elevated text-primary shadow-[0_10px_28px_rgb(var(--color-accent)/0.16)]"
+                        : "bg-transparent text-secondary hover:bg-surface hover:text-primary"
                     }`}
                   >
                     <div className="text-sm font-medium">{section.label}</div>
-                    <div className="mt-1 text-xs leading-5 opacity-80">{section.description}</div>
+                    <div className="mt-1 hidden text-xs leading-5 opacity-80 xl:block">{section.description}</div>
                   </button>
                 );
               })}
@@ -1417,56 +2070,56 @@ export function AdminPageClient({
             >
               {activeSection === "overview" ? (
                 <SectionShell
-                  eyebrow="Overview"
-                  title="Operate the workspace, not the page"
-                  description="Readiness and triage first. Fancy vanity counters can go to hell."
+                  eyebrow="Обзор"
+                  title="Управляйте рабочим пространством, а не страницей"
+                  description="Сначала готовность и разбор, ниже дополнительные счётчики"
                 >
                   <div className="grid gap-4 xl:grid-cols-4">
                     <MetricCard
                       icon={<Sparkles className="h-5 w-5" />}
-                      title="Readiness"
+                      title="Готовность"
                       value={`${readiness.readinessScore}%`}
-                      caption="Weighted against core runtime and governance checks"
+                      caption="Взвешено по базовым проверкам выполнения и управления"
                       tone="primary"
                     />
                     <MetricCard
                       icon={<Shield className="h-5 w-5" />}
-                      title="Secure connections"
+                      title="Защищённые подключения"
                       value={`${readiness.totalSecureConnections}/${readiness.totalConnections}`}
-                      caption="TLS-enabled connectors currently configured"
+                      caption="Подключения с включённым TLS"
                       tone={readiness.totalSecureConnections === readiness.totalConnections ? "success" : "warning"}
                     />
                     <MetricCard
                       icon={<Workflow className="h-5 w-5" />}
-                      title="Published scenarios"
+                      title="Опубликованные сценарии"
                       value={readiness.publishedScenarioCount}
-                      caption="Official workflows that analysts can actually use"
+                      caption="Официальные процессы, доступные аналитикам"
                       tone={readiness.publishedScenarioCount > 0 ? "success" : "warning"}
                     />
                     <MetricCard
                       icon={<Clock3 className="h-5 w-5" />}
-                      title="Review queue"
+                      title="Очередь проверки"
                       value={pendingInsights.length}
-                      caption="Pending insight verification items"
+                      caption="Инсайты, ожидающие проверки"
                       tone={pendingInsights.length === 0 ? "success" : "warning"}
                     />
                   </div>
 
                   <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
                     <InfoPanel
-                      title="Critical blockers"
-                      description="These items keep readiness score down and usually block analyst value."
+                      title="Критические блокеры"
+                      description="Эти пункты снижают готовность и обычно мешают аналитикам"
                     >
                       {readiness.blockers.length > 0 ? (
                         <div className="grid gap-3">
                           {readiness.blockers.map((blocker) => (
                             <div
                               key={blocker}
-                              className="rounded-[22px] border border-[#4b2830] bg-[#1a0f15] px-4 py-4"
+                              className="rounded-[22px] border border-danger-border bg-purple-subtle px-4 py-4"
                             >
                               <div className="flex items-start gap-3">
-                                <XCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-[#ff7d8b]" />
-                                <p className="text-sm leading-6 text-[#ffd7dd]">{blocker}</p>
+                                <XCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-danger" />
+                                <p className="text-sm leading-6 text-danger">{blocker}</p>
                               </div>
                             </div>
                           ))}
@@ -1474,26 +2127,29 @@ export function AdminPageClient({
                       ) : (
                         <EmptyState
                           icon={<CheckCircle2 className="h-5 w-5" />}
-                          title="No blockers"
-                          description="Setup is clean enough. Keep the review queue and governance layer disciplined."
-                          className="border-[#1f3a2d] bg-[linear-gradient(180deg,rgba(7,18,16,0.92),rgba(6,13,12,0.98))]"
+                          title="Блокеров нет"
+                          description="Настройки в порядке. Держите очередь проверки и слой управления под контролем"
+                          className="border-success-border bg-[linear-gradient(180deg,rgb(var(--color-cyan-subtle)/0.92),rgb(var(--color-cyan-subtle)/0.98))]"
                         />
                       )}
                     </InfoPanel>
 
                     <InfoPanel
-                      title="System pulse"
-                      description="Fast glance at the pieces that matter."
+                      title="Состояние системы"
+                      description="Быстрый взгляд на важные части"
                     >
                       <div className="grid gap-3">
-                        <SummaryRow label="Database connectors" value={databaseConnectors.length} />
-                        <SummaryRow label="LLM connectors" value={llmConnectors.length} />
-                        <SummaryRow label="OpenMetadata connectors" value={openMetadataConnectors.length} />
-                        <SummaryRow label="Confluence connectors" value={confluenceConnectors.length} />
-                        <SummaryRow label="Jira connectors" value={jiraConnectors.length} />
-                        <SummaryRow label="Tag connectors" value={mattermostConnectors.length} />
-                        <SummaryRow label="Active skills" value={readiness.activeSkillCount} />
-                        <SummaryRow label="Local users" value={localUsers.length} />
+                        <SummaryRow label="Подключения к базам данных" value={databaseConnectors.length} />
+                        <SummaryRow label="Подключения LLM" value={llmConnectors.length} />
+                        <SummaryRow label="Подключения документации" value={documentationConnectors.length} />
+                        <SummaryRow label="Подключения GitLab" value={gitlabConnectors.length} />
+                        <SummaryRow label="Подключения MCP" value={mcpConnectors.length} />
+                        <SummaryRow label="Подключения Airflow" value={airflowConnectors.length} />
+                        <SummaryRow label="Подключения Kubernetes" value={kubernetesConnectors.length} />
+                        <SummaryRow label="Подключения VictoriaMetrics" value={victoriametricsConnectors.length} />
+                        <SummaryRow label="Подключения Tag" value={mattermostConnectors.length} />
+                        <SummaryRow label="Активные навыки" value={readiness.activeSkillCount} />
+                        <SummaryRow label="Локальные пользователи" value={localUsers.length} />
                       </div>
                     </InfoPanel>
                   </div>
@@ -1502,30 +2158,54 @@ export function AdminPageClient({
 
               {activeSection === "setup" ? (
                 <SectionShell
-                  eyebrow="Setup"
-                  title="Runtime configuration"
-                  description="Search, filter, edit, and delete connectors without reloading the whole damned page."
+                  eyebrow="Настройки"
+                  title="Конфигурация выполнения"
+                  description="Поиск, фильтрация, редактирование и удаление подключений без перехода со страницы"
                   actions={
                     <>
                       <Button onClick={() => openCreateConnectorSheet("database")}>
                         <Plus className="h-4 w-4" />
-                        Add database
+                        Добавить базу данных
                       </Button>
                       <Button variant="outline" onClick={() => openCreateConnectorSheet("llm")}>
                         <Plus className="h-4 w-4" />
-                        Add LLM
+                        Добавить LLM
+                      </Button>
+                      <Button variant="outline" onClick={() => openCreateConnectorSheet("documentation")}>
+                        <Plus className="h-4 w-4" />
+                        Добавить документацию
+                      </Button>
+                      <Button variant="outline" onClick={() => openCreateConnectorSheet("gitlab")}>
+                        <Plus className="h-4 w-4" />
+                        Добавить GitLab
+                      </Button>
+                      <Button variant="outline" onClick={() => openCreateConnectorSheet("mcp")}>
+                        <Plus className="h-4 w-4" />
+                        Добавить MCP
+                      </Button>
+                      <Button variant="outline" onClick={() => openCreateConnectorSheet("airflow")}>
+                        <Plus className="h-4 w-4" />
+                        Добавить Airflow
+                      </Button>
+                      <Button variant="outline" onClick={() => openCreateConnectorSheet("kubernetes")}>
+                        <Plus className="h-4 w-4" />
+                        Добавить K8s
+                      </Button>
+                      <Button variant="outline" onClick={() => openCreateConnectorSheet("victoriametrics")}>
+                        <Plus className="h-4 w-4" />
+                        Добавить VM
                       </Button>
                     </>
                   }
                 >
-                  <Card className="border-[#1d2940] bg-[#09111f]/92">
+                  <Card className="border-border bg-surface/[0.92]">
                     <CardContent className="grid gap-4 p-5 lg:grid-cols-[minmax(260px,1fr)_auto] lg:items-center">
                       <div className="relative">
-                        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#6e84a8]" />
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                         <Input
                           value={setupSearch}
                           onChange={(event) => setSetupSearch(event.target.value)}
-                          placeholder="Search by connector name, host, model, URL, or service"
+                          placeholder="Поиск по названию подключения, хосту, модели, URL или сервису"
                           className="pl-9"
                         />
                       </div>
@@ -1537,20 +2217,20 @@ export function AdminPageClient({
                             onClick={() => setSetupStatus(filter)}
                             className={`rounded-full border px-3 py-2 text-sm transition ${
                               setupStatus === filter
-                                ? "border-[#5da8ff]/40 bg-[#5da8ff]/16 text-[#eef4ff]"
-                                : "border-[#263750] bg-[#0b1322] text-[#9bb0cf] hover:border-[#35537a] hover:text-white"
+                                ? "border-accent/40 bg-accent/[0.16] text-primary"
+                                : "border-border-strong bg-surface text-secondary hover:border-border-strong hover:text-primary"
                             }`}
                           >
-                            {filter}
+                            {SETUP_STATUS_FILTER_LABELS[filter]}
                           </button>
                         ))}
                       </div>
                     </CardContent>
                   </Card>
 
-                  <div className="grid gap-4 xl:grid-cols-5">
+                  <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
                     <ConnectorTypeSummaryCard
-                      title="Database"
+                      title="База данных"
                       count={databaseConnectors.length}
                       readyCount={databaseConnectors.filter((item) => getConnectorHealth(item, "database") === "ready").length}
                       icon={<Database className="h-5 w-5" />}
@@ -1564,25 +2244,46 @@ export function AdminPageClient({
                       onAdd={() => openCreateConnectorSheet("llm")}
                     />
                     <ConnectorTypeSummaryCard
-                      title="OpenMetadata"
-                      count={openMetadataConnectors.length}
-                      readyCount={openMetadataConnectors.filter((item) => getConnectorHealth(item, "metadata") === "ready").length}
-                      icon={<Layers className="h-5 w-5" />}
-                      onAdd={() => openCreateConnectorSheet("metadata")}
-                    />
-                    <ConnectorTypeSummaryCard
-                      title="Confluence"
-                      count={confluenceConnectors.length}
-                      readyCount={confluenceConnectors.filter((item) => getConnectorHealth(item, "confluence") === "ready").length}
+                      title="Документация"
+                      count={documentationConnectors.length}
+                      readyCount={documentationConnectors.filter((item) => getConnectorHealth(item, "documentation") === "ready").length}
                       icon={<BookText className="h-5 w-5" />}
-                      onAdd={() => openCreateConnectorSheet("confluence")}
+                      onAdd={() => openCreateConnectorSheet("documentation")}
                     />
                     <ConnectorTypeSummaryCard
-                      title="Jira"
-                      count={jiraConnectors.length}
-                      readyCount={jiraConnectors.filter((item) => getConnectorHealth(item, "jira") === "ready").length}
+                      title="GitLab"
+                      count={gitlabConnectors.length}
+                      readyCount={gitlabConnectors.filter((item) => getConnectorHealth(item, "gitlab") === "ready").length}
+                      icon={<BookText className="h-5 w-5" />}
+                      onAdd={() => openCreateConnectorSheet("gitlab")}
+                    />
+                    <ConnectorTypeSummaryCard
+                      title="MCP"
+                      count={mcpConnectors.length}
+                      readyCount={mcpConnectors.filter((item) => getConnectorHealth(item, "mcp") === "ready").length}
                       icon={<Workflow className="h-5 w-5" />}
-                      onAdd={() => openCreateConnectorSheet("jira")}
+                      onAdd={() => openCreateConnectorSheet("mcp")}
+                    />
+                    <ConnectorTypeSummaryCard
+                      title="Airflow"
+                      count={airflowConnectors.length}
+                      readyCount={airflowConnectors.filter((item) => getConnectorHealth(item, "airflow") === "ready").length}
+                      icon={<Workflow className="h-5 w-5" />}
+                      onAdd={() => openCreateConnectorSheet("airflow")}
+                    />
+                    <ConnectorTypeSummaryCard
+                      title="Kubernetes"
+                      count={kubernetesConnectors.length}
+                      readyCount={kubernetesConnectors.filter((item) => getConnectorHealth(item, "kubernetes") === "ready").length}
+                      icon={<Server className="h-5 w-5" />}
+                      onAdd={() => openCreateConnectorSheet("kubernetes")}
+                    />
+                    <ConnectorTypeSummaryCard
+                      title="VictoriaMetrics"
+                      count={victoriametricsConnectors.length}
+                      readyCount={victoriametricsConnectors.filter((item) => getConnectorHealth(item, "victoriametrics") === "ready").length}
+                      icon={<Clock3 className="h-5 w-5" />}
+                      onAdd={() => openCreateConnectorSheet("victoriametrics")}
                     />
                     <ConnectorTypeSummaryCard
                       title="Tag"
@@ -1598,20 +2299,23 @@ export function AdminPageClient({
                       [
                         ["database", filteredConnectorCollections.database],
                         ["llm", filteredConnectorCollections.llm],
-                        ["metadata", filteredConnectorCollections.metadata],
-                        ["confluence", filteredConnectorCollections.confluence],
-                        ["jira", filteredConnectorCollections.jira],
+                        ["documentation", filteredConnectorCollections.documentation],
+                        ["gitlab", filteredConnectorCollections.gitlab],
+                        ["mcp", filteredConnectorCollections.mcp],
+                        ["airflow", filteredConnectorCollections.airflow],
+                        ["kubernetes", filteredConnectorCollections.kubernetes],
+                        ["victoriametrics", filteredConnectorCollections.victoriametrics],
                         ["mattermost", filteredConnectorCollections.mattermost],
                       ] as [ConnectorType, AnyConnectorItem[]][]
                     ).map(([type, items]) => (
                       <InfoPanel
                         key={type}
-                        title={`${getConnectorTypeLabel(type)} connectors`}
-                        description={`${items.length} items match current filters.`}
+                        title={`Подключения: ${getConnectorTypeLabel(type)}`}
+                        description={`${items.length} записей соответствуют фильтрам`}
                       >
                         {items.length > 0 ? (
                           <LayoutGroup>
-                            <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                            <div className="grid gap-4 xl:grid-cols-2">
                               {items.map((connector) => (
                                 <motion.div key={connector.id} layout>
                                   <ConnectorCard
@@ -1630,6 +2334,14 @@ export function AdminPageClient({
                                         title: connector.name,
                                       })
                                     }
+                                    onSync={
+                                      type === "documentation"
+                                        ? () => void handleDocumentationSync(connector as DocumentationConnectorItem)
+                                        : type === "mcp"
+                                          ? () => void handleMcpSync(connector as McpConnectorItem)
+                                        : undefined
+                                    }
+                                    syncPending={documentationSyncPendingId === connector.id}
                                   />
                                 </motion.div>
                               ))}
@@ -1637,12 +2349,12 @@ export function AdminPageClient({
                           </LayoutGroup>
                         ) : (
                           <EmptyState
-                            icon={type === "database" ? <Database className="h-5 w-5" /> : type === "llm" ? <Server className="h-5 w-5" /> : type === "metadata" ? <Layers className="h-5 w-5" /> : <BookText className="h-5 w-5" />}
-                            title={`No ${getConnectorTypeLabel(type).toLowerCase()} connectors for this filter`}
-                            description="Either the search is too narrow or the setup is actually empty."
+                            icon={connectorTypeIcon(type)}
+                            title={`Нет подключений: ${getConnectorTypeLabel(type)}`}
+                            description="Либо поиск слишком узкий, либо подключений нет"
                             action={
                               <Button size="sm" onClick={() => openCreateConnectorSheet(type)}>
-                                Add {getConnectorTypeLabel(type)}
+                                Добавить подключение
                               </Button>
                             }
                           />
@@ -1655,31 +2367,59 @@ export function AdminPageClient({
 
               {activeSection === "governance" ? (
                 <SectionShell
-                  eyebrow="Governance"
-                  title="What analysts are allowed to run"
-                  description="Official scenarios and workspace skills belong together. One defines workflow, the other defines runtime guidance."
+                  eyebrow="Управление"
+                  title="Что разрешено запускать аналитикам"
+                  description="Официальные сценарии и навыки рабочего пространства работают вместе. Первые задают процесс, вторые — правила выполнения"
                   actions={
                     <>
-                      <Button
-                        onClick={() => {
-                          setEditingScenario(null);
-                          setScenarioEditorOpen(true);
-                        }}
-                      >
+                      <Button onClick={openCreateAgentSheet}>
                         <Plus className="h-4 w-4" />
-                        Add official scenario
+                        Добавить агента
                       </Button>
+                      <Link href="/scenarios/new?scope=official" className={buttonVariants({ variant: "outline" })}>
+                        <Plus className="h-4 w-4" />
+                        Добавить официальный сценарий
+                      </Link>
                       <Button variant="outline" onClick={openCreateSkillSheet}>
                         <Plus className="h-4 w-4" />
-                        Add skill
+                        Добавить навык
                       </Button>
                     </>
                   }
                 >
+                  <InfoPanel
+                    title="Агенты"
+                    description="Профили чата для разных пользователей со списками разрешённых подключений и дополнительными подсказками промпта"
+                  >
+                    {agents.length > 0 ? (
+                      <div className="grid gap-3 lg:grid-cols-2">
+                        {agents.map((agent) => (
+                          <AgentCard
+                            key={agent.id}
+                            agent={agent}
+                            onEdit={() => openEditAgentSheet(agent)}
+                            onDelete={() => setDeleteIntent({ kind: "agent", agent })}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <EmptyState
+                        icon={<Sparkles className="h-5 w-5" />}
+                        title="Нет агентов"
+                        description="Создайте первый управляемый профиль чата"
+                        action={
+                          <Button size="sm" onClick={openCreateAgentSheet}>
+                            Добавить агента
+                          </Button>
+                        }
+                      />
+                    )}
+                  </InfoPanel>
+
                   <div className="grid gap-4 xl:grid-cols-2">
                     <InfoPanel
-                      title="Official scenarios"
-                      description="Published flows visible to analysts and expected to behave."
+                      title="Официальные сценарии"
+                      description="Опубликованные процессы, видимые аналитикам, с ожидаемым поведением"
                     >
                       {officialScenarios.length > 0 ? (
                         <div className="grid gap-4">
@@ -1688,8 +2428,7 @@ export function AdminPageClient({
                               key={scenario.id}
                               scenario={scenario}
                               onEdit={() => {
-                                setEditingScenario(scenario);
-                                setScenarioEditorOpen(true);
+                                window.location.assign(`/scenarios/${scenario.id}`);
                               }}
                               onArchive={() => setDeleteIntent({ kind: "scenario", scenario })}
                             />
@@ -1698,29 +2437,23 @@ export function AdminPageClient({
                       ) : (
                         <EmptyState
                           icon={<Workflow className="h-5 w-5" />}
-                          title="No official scenarios"
-                          description="If analysts have no trusted workflows, governance is just a slide deck."
+                          title="Официальных сценариев нет"
+                          description="Без доверенных процессов у аналитиков управление остаётся только на бумаге"
                           action={
-                            <Button
-                              size="sm"
-                              onClick={() => {
-                                setEditingScenario(null);
-                                setScenarioEditorOpen(true);
-                              }}
-                            >
-                              Create scenario
-                            </Button>
+                            <Link href="/scenarios/new?scope=official" className={buttonVariants({ size: "sm" })}>
+                              Создать сценарий
+                            </Link>
                           }
                         />
                       )}
                     </InfoPanel>
 
                     <InfoPanel
-                      title="Workspace skills"
-                      description="Optimization playbooks and tuning guidance attached to the workspace runtime."
+                      title="Навыки рабочего пространства"
+                      description="Playbooks оптимизации и рекомендации по настройке, привязанные к выполнению рабочего пространства"
                     >
                       {workspaceSkills.length > 0 ? (
-                        <div className="grid gap-4">
+                        <div className="grid max-h-[min(70vh,48rem)] gap-4 overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]">
                           {workspaceSkills.map((skill) => (
                             <SkillCard
                               key={skill.id}
@@ -1739,11 +2472,11 @@ export function AdminPageClient({
                       ) : (
                         <EmptyState
                           icon={<BookText className="h-5 w-5" />}
-                          title="No workspace skills"
-                          description="Runtime guidance is empty right now. That's lazy governance."
+                          title="Навыков рабочего пространства нет"
+                          description="Правил выполнения пока нет"
                           action={
                             <Button size="sm" onClick={openCreateSkillSheet}>
-                              Add skill
+                              Добавить навык
                             </Button>
                           }
                         />
@@ -1755,25 +2488,25 @@ export function AdminPageClient({
 
               {activeSection === "access" ? (
                 <SectionShell
-                  eyebrow="Access"
-                  title="Local accounts and privilege shape"
-                  description="User creation stays quick. Destructive actions get a real confirmation flow instead of a caveman browser popup."
+                  eyebrow="Доступ"
+                  title="Локальные учётные записи и роли"
+                  description="Создавайте локальных пользователей и проверяйте права без поиска по карточкам"
                 >
-                  <div className="grid gap-4 xl:grid-cols-[minmax(340px,0.8fr)_minmax(0,1.2fr)]">
+                  <div className="grid gap-4">
                     <InfoPanel
-                      title="Create local user"
-                      description="Admin-only access path for local auth workspaces."
+                      title="Создание локального пользователя"
+                      description="Роль по умолчанию — аналитик. Повышайте осознанно"
                     >
                       <form
                         onSubmit={(event) => {
                           event.preventDefault();
                           void handleCreateLocalUser(new FormData(event.currentTarget), event.currentTarget);
                         }}
-                        className="grid gap-4"
+                        className="grid gap-3 lg:grid-cols-[minmax(160px,1fr)_minmax(180px,1fr)_160px_minmax(180px,1fr)_auto] lg:items-end"
                       >
-                        <Input data-autofocus label="Login" name="login" placeholder="new-analyst" required />
+                        <Input data-autofocus label="Логин" name="login" placeholder="new-analyst" required />
                         <Input
-                          label="Password"
+                          label="Пароль"
                           type="password"
                           name="password"
                           minLength={8}
@@ -1781,93 +2514,52 @@ export function AdminPageClient({
                           required
                         />
                         <label>
-                          <span className="mb-2 block text-sm font-medium text-[#c7d8f4]">Role</span>
+                          <span className="mb-2 block text-sm font-medium text-primary">Роль</span>
                           <select
                             name="role"
-                            defaultValue="admin"
-                            className="flex h-10 w-full rounded-lg border border-[#2e3d59] bg-[#090e1a] px-3 py-2 text-sm text-[#edf3ff] outline-none transition focus:border-transparent focus:ring-2 focus:ring-[#5da8ff]"
+                            defaultValue="analyst"
+                            className="flex h-10 w-full rounded-lg border border-control-border bg-surface px-3 py-2 text-sm text-primary outline-none transition focus:border-transparent focus:ring-2 focus:ring-accent"
                           >
-                            <option value="admin">admin</option>
-                            <option value="analyst">analyst</option>
+                            <option value="analyst">аналитик</option>
+                            <option value="admin">администратор</option>
                           </select>
                         </label>
-                        <Input label="Display name" name="display_name" placeholder="Platform Admin" />
+                        <Input label="Отображаемое имя" name="display_name" placeholder="Platform Admin" />
 
                         {userError ? (
-                          <Alert variant="danger" title="Create failed" description={userError} />
+                          <div className="lg:col-span-5">
+                            <Alert variant="danger" title="Ошибка создания" description={userError} />
+                          </div>
                         ) : null}
 
-                        <div className="flex items-center justify-end">
-                          <Button type="submit" isLoading={userSaving}>
-                            Create user
+                        <div className="flex items-center justify-end lg:justify-start">
+                          <Button type="submit" isLoading={userSaving} className="w-full lg:w-auto">
+                            Создать пользователя
                           </Button>
                         </div>
                       </form>
                     </InfoPanel>
 
                     <InfoPanel
-                      title="Current users"
-                      description="Deletion is optimistic, but rollback-safe if the backend refuses."
+                      title="Текущие пользователи"
+                      description="Удаление применяется сразу, но откатывается, если бэкенд отклонит запрос"
                     >
                       {localUsers.length > 0 ? (
-                        <div className="grid gap-4 md:grid-cols-2">
-                          {localUsers.map((user) => (
-                            <Card
-                              key={user.id}
-                              className="border-[#182438] bg-[linear-gradient(180deg,rgba(10,16,29,0.96),rgba(8,12,22,0.98))]"
-                            >
-                              <CardContent className="grid gap-4 p-5">
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="flex items-center gap-3">
-                                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-[#22334e] bg-[#0b1322] text-[#8fb9ff]">
-                                      <UserRound className="h-5 w-5" />
-                                    </div>
-                                    <div>
-                                      <p className="text-base font-medium text-[#eef4ff]">{user.login}</p>
-                                      <p className="text-sm text-[#8ea3c5]">{user.display_name ?? "—"}</p>
-                                    </div>
-                                  </div>
-                                  <div className="flex gap-2">
-                                    <SectionBadge tone={user.role === "admin" ? "warning" : "primary"}>
-                                      {user.role}
-                                    </SectionBadge>
-                                    <SectionBadge tone={user.is_active ? "success" : "danger"}>
-                                      {user.is_active ? "active" : "disabled"}
-                                    </SectionBadge>
-                                  </div>
-                                </div>
-                                <dl className="grid gap-3 text-sm text-[#b4c6e2]">
-                                  <SummaryRow label="Provider" value={user.auth_provider} />
-                                  <SummaryRow label="Subject" value={user.auth_subject} monospace />
-                                  <SummaryRow label="Created" value={formatShortDate(user.created_at)} />
-                                </dl>
-                                <div className="flex justify-end">
-                                  <button
-                                    type="button"
-                                    title={user.id === currentUserId ? "Current user cannot be deleted" : "Delete"}
-                                    disabled={user.id === currentUserId}
-                                    onClick={() => {
-                                      if (user.id === currentUserId) {
-                                        setUserError("Current user cannot be deleted");
-                                        return;
-                                      }
-                                      setDeleteIntent({ kind: "user", user });
-                                    }}
-                                    className="inline-flex h-10 items-center justify-center rounded-xl border border-[#4a2930] bg-[#1a0f15] px-4 text-sm font-medium text-[#ffb2bb] transition hover:bg-[#24131b] disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    <Trash2 className="mr-2 h-4 w-4" />
-                                    Delete
-                                  </button>
-                                </div>
-                              </CardContent>
-                            </Card>
-                          ))}
-                        </div>
+                        <LocalUsersTable
+                          users={localUsers}
+                          currentUserId={currentUserId}
+                          onConfigureRateLimit={(user) => {
+                            setRateLimitError(null);
+                            setRateLimitUser(user);
+                          }}
+                          onDelete={(user) => setDeleteIntent({ kind: "user", user })}
+                          onCurrentUserDelete={() => setUserError("Текущего пользователя нельзя удалить")}
+                        />
                       ) : (
                         <EmptyState
                           icon={<Users className="h-5 w-5" />}
-                          title="No users"
-                          description="That means local auth is barely configured."
+                          title="Пользователей нет"
+                          description="В локальной аутентификации пока нет учётных записей"
                         />
                       )}
                     </InfoPanel>
@@ -1877,19 +2569,19 @@ export function AdminPageClient({
 
               {activeSection === "review" ? (
                 <SectionShell
-                  eyebrow="Review"
-                  title="Pending insight verification queue"
-                  description="Queue on the left, detail on the right. High-confidence junk gets rejected fast. Good material gets verified faster."
+                  eyebrow="Проверка"
+                  title="Очередь проверки инсайтов"
+                  description="Очередь слева, детали справа, подтверждение или отклонение на одном экране"
                 >
                   {reviewError ? (
-                    <Alert variant="danger" title="Review action failed" description={reviewError} />
+                    <Alert variant="danger" title="Не удалось выполнить действие проверки" description={reviewError} />
                   ) : null}
 
                   {pendingInsights.length > 0 && selectedReview ? (
                     <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
                       <InfoPanel
-                        title="Queue"
-                        description={`${pendingInsights.length} pending items`}
+                        title="Очередь"
+                        description={`Ожидает проверки: ${pendingInsights.length} ${pluralize(pendingInsights.length, ["инсайт", "инсайта", "инсайтов"])}`}
                       >
                         <LayoutGroup>
                           <div className="grid gap-3">
@@ -1903,14 +2595,14 @@ export function AdminPageClient({
                                   onClick={() => setSelectedReviewId(item.id)}
                                   className={`rounded-[22px] border px-4 py-4 text-left transition ${
                                     isSelected
-                                      ? "border-[#4a79b6] bg-[#10203a]"
-                                      : "border-[#22334e] bg-[#0b1322] hover:border-[#35537a] hover:bg-[#0d1729]"
+                                      ? "border-accent bg-elevated"
+                                      : "border-border-strong bg-surface hover:border-border-strong hover:bg-surface"
                                   }`}
                                 >
                                   <div className="flex items-start justify-between gap-3">
                                     <div className="min-w-0">
-                                      <p className="truncate text-sm font-medium text-[#eef4ff]">{item.summary}</p>
-                                      <p className="mt-1 line-clamp-2 text-sm leading-6 text-[#8ea3c5]">
+                                      <p className="truncate text-sm font-medium text-primary">{item.summary}</p>
+                                      <p className="mt-1 line-clamp-2 text-sm leading-6 text-secondary">
                                         {item.answer_excerpt}
                                       </p>
                                     </div>
@@ -1918,7 +2610,7 @@ export function AdminPageClient({
                                       <SectionBadge tone={item.llm_confidence >= 0.8 ? "warning" : "primary"}>
                                         {item.llm_confidence.toFixed(2)}
                                       </SectionBadge>
-                                      <ReviewTag>{item.likes_count} likes</ReviewTag>
+                                      <ReviewTag>{item.likes_count} отметок</ReviewTag>
                                     </div>
                                   </div>
                                 </motion.button>
@@ -1930,45 +2622,45 @@ export function AdminPageClient({
 
                       <InfoPanel
                         title={selectedReview.summary}
-                        description={`Created ${formatDateTime(selectedReview.created_at)} • confidence ${selectedReview.llm_confidence.toFixed(2)}`}
+                        description={`Создано ${formatDateTime(selectedReview.created_at)} • уверенность ${selectedReview.llm_confidence.toFixed(2)}`}
                       >
                         <div className="grid gap-5">
                           <div className="grid gap-4 lg:grid-cols-3">
-                            <SummaryStat label="Likes" value={selectedReview.likes_count} />
-                            <SummaryStat label="Tables" value={selectedReview.context_tables.length} />
-                            <SummaryStat label="Sources" value={selectedReview.metadata_sources.length} />
+                            <SummaryStat label="Отметки" value={selectedReview.likes_count} />
+                            <SummaryStat label="Таблицы" value={selectedReview.context_tables.length} />
+                            <SummaryStat label="Источники" value={selectedReview.metadata_sources.length} />
                           </div>
 
-                          <DetailBlock title="Reason" content={selectedReview.llm_reason} />
-                          <DetailBlock title="Answer excerpt" content={selectedReview.answer_excerpt} />
+                          <DetailBlock title="Обоснование" content={selectedReview.llm_reason} />
+                          <DetailBlock title="Фрагмент ответа" content={selectedReview.answer_excerpt} />
                           {selectedReview.generated_sql ? (
-                            <DetailCodeBlock title="Generated SQL" content={selectedReview.generated_sql} />
+                            <DetailCodeBlock title="Сгенерированный SQL" content={selectedReview.generated_sql} />
                           ) : null}
                           {selectedReview.article_markdown ? (
-                            <DetailCodeBlock title="Article draft" content={selectedReview.article_markdown} />
+                            <DetailCodeBlock title="Черновик статьи" content={selectedReview.article_markdown} />
                           ) : null}
 
                           <div className="grid gap-4 lg:grid-cols-2">
-                            <TagList title="Context tables" items={selectedReview.context_tables} />
-                            <TagList title="Metadata sources" items={selectedReview.metadata_sources} />
-                            <TagList title="Keywords" items={selectedReview.keywords} />
-                            <InfoPanel title="Pointers">
-                              <div className="grid gap-3 text-sm text-[#b4c6e2]">
-                                <SummaryRow label="Conversation" value={selectedReview.conversation_id} monospace />
-                                <SummaryRow label="Message" value={selectedReview.message_id} monospace />
-                                <SummaryRow label="Execution" value={selectedReview.execution_id ?? "—"} monospace />
+                            <TagList title="Таблицы контекста" items={selectedReview.context_tables} />
+                            <TagList title="Источники метаданных" items={selectedReview.metadata_sources} />
+                            <TagList title="Ключевые слова" items={selectedReview.keywords} />
+                            <InfoPanel title="Связи">
+                              <div className="grid gap-3 text-sm text-primary">
+                                <SummaryRow label="Диалог" value={selectedReview.conversation_id} monospace />
+                                <SummaryRow label="Сообщение" value={selectedReview.message_id} monospace />
+                                <SummaryRow label="Исполнение" value={selectedReview.execution_id ?? "—"} monospace />
                               </div>
                             </InfoPanel>
                           </div>
 
-                          <div className="flex flex-wrap justify-end gap-3 border-t border-[#182438] pt-4">
+                          <div className="flex flex-wrap justify-end gap-3 border-t border-border pt-4">
                             <Button
                               variant="danger"
                               onClick={() => void handleReview(selectedReview.id, "reject")}
                               disabled={reviewPendingId === selectedReview.id}
                             >
                               <XCircle className="h-4 w-4" />
-                              Reject
+                              Отклонить
                             </Button>
                             <Button
                               variant="success"
@@ -1976,7 +2668,7 @@ export function AdminPageClient({
                               disabled={reviewPendingId === selectedReview.id}
                             >
                               <CheckCircle2 className="h-4 w-4" />
-                              Verify
+                              Подтвердить
                             </Button>
                           </div>
                         </div>
@@ -1985,8 +2677,8 @@ export function AdminPageClient({
                   ) : (
                     <EmptyState
                       icon={<CheckCircle2 className="h-5 w-5" />}
-                      title="Queue is empty"
-                      description="No pending insights. Either quality is under control or the pipeline is asleep."
+                      title="Очередь пуста"
+                      description="ООжидающих инсайтов нет. Либо качество под контролем, либо пайплайн бездействует"
                     />
                   )}
                 </SectionShell>
@@ -1996,20 +2688,51 @@ export function AdminPageClient({
         </div>
       </main>
 
+      <AgentSheet
+        open={agentSheetOpen}
+        onOpenChange={(open) => {
+          if (!agentSaving) {
+            setAgentSheetOpen(open);
+            if (!open) {
+              setEditingAgent(null);
+              setAgentError(null);
+            }
+          }
+        }}
+        editingAgent={editingAgent}
+        sessionNonce={agentSessionNonce}
+        databaseConnectors={databaseConnectors}
+        llmConnectors={llmConnectors}
+        documentationConnectors={documentationConnectors}
+        gitlabConnectors={gitlabConnectors}
+        mcpConnectors={mcpConnectors}
+        airflowConnectors={airflowConnectors}
+        kubernetesConnectors={kubernetesConnectors}
+        victoriametricsConnectors={victoriametricsConnectors}
+        workspaceSkills={workspaceSkills}
+        onSubmit={handleAgentSubmit}
+        saving={agentSaving}
+        error={agentError}
+      />
+
       <ConnectorSheet
         open={connectorSheetOpen}
         onOpenChange={(open) => {
-          setConnectorSheetOpen(open);
-          if (!open) {
-            setEditingConnector(null);
-            setConnectorError(null);
+          if (!connectorSaving) {
+            setConnectorSheetOpen(open);
+            if (!open) {
+              setEditingConnector(null);
+              setConnectorError(null);
+            }
           }
         }}
         connectorType={connectorSheetType}
         editingConnector={editingConnector}
+        sessionNonce={connectorSessionNonce}
         onSubmit={handleConnectorSubmit}
         saving={connectorSaving}
         error={connectorError}
+        agents={agents}
       />
 
       <SkillSheet
@@ -2024,26 +2747,10 @@ export function AdminPageClient({
           }
         }}
         editingSkill={editingSkill}
+        sessionNonce={skillSessionNonce}
         onSubmit={handleSkillSubmit}
         saving={skillSaving}
         error={skillError}
-      />
-
-      <ScenarioEditorModal
-        isOpen={scenarioEditorOpen}
-        workspaceName={workspaceId}
-        scope="official"
-        saving={scenarioSaving}
-        scenario={editingScenario}
-        onClose={() => {
-          setScenarioEditorOpen(false);
-          setEditingScenario(null);
-        }}
-        onSubmit={(payload, scenarioId) => {
-          void handleScenarioSubmit(payload, scenarioId);
-          setScenarioEditorOpen(false);
-          setEditingScenario(null);
-        }}
       />
 
       <ConfirmDialog
@@ -2055,9 +2762,25 @@ export function AdminPageClient({
         }}
         title={buildDeleteTitle(deleteIntent)}
         description={buildDeleteDescription(deleteIntent, currentUserId)}
-        confirmLabel={deleteIntent?.kind === "scenario" ? "Archive" : "Delete"}
+        confirmLabel={deleteIntent?.kind === "scenario" ? "В архив" : "Удалить"}
         onConfirm={() => void confirmDeleteIntent()}
         isPending={deletePending}
+      />
+
+      <UserRateLimitDialog
+        key={`${rateLimitUser?.id ?? "closed"}:${rateLimitUser?.api_rate_limit_per_hour ?? "none"}`}
+        user={rateLimitUser}
+        open={rateLimitUser != null}
+        busy={rateLimitSaving}
+        error={rateLimitError}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRateLimitUser(null);
+            setRateLimitError(null);
+          }
+        }}
+        onSave={handleSaveUserRateLimit}
+        onReset={handleResetUserRateLimit}
       />
     </>
   );
@@ -2065,38 +2788,44 @@ export function AdminPageClient({
 
 function buildDeleteTitle(intent: DeleteIntent | null) {
   if (!intent) {
-    return "Delete item";
+    return "Удаление объекта";
   }
 
   if (intent.kind === "connector") {
-    return `Delete ${intent.title}?`;
+    return `Удалить ${intent.title}?`;
   }
   if (intent.kind === "skill") {
-    return `Delete ${intent.title}?`;
+    return `Удалить ${intent.title}?`;
   }
   if (intent.kind === "user") {
-    return `Delete user ${intent.user.login}?`;
+    return `Удалить пользователя ${intent.user.login}?`;
   }
-  return `Archive ${intent.scenario.title}?`;
+  if (intent.kind === "agent") {
+    return `Удалить ${intent.agent.title}?`;
+  }
+  return `Отправить в архив ${intent.scenario.title}?`;
 }
 
 function buildDeleteDescription(intent: DeleteIntent | null, currentUserId: string) {
   if (!intent) {
-    return "This action cannot be undone.";
+    return "Это действие нельзя отменить";
   }
 
   if (intent.kind === "connector") {
-    return "The runtime will immediately lose this connector configuration. If another object depends on it, that breakage is on you.";
+    return "Рантайм сразу лишится этой конфигурации подключения. Если от неё зависит другой объект, вам придётся разобраться с последствиями самостоятельно.";
   }
   if (intent.kind === "skill") {
-    return "The workspace will stop using this skill snapshot for runtime optimization.";
+    return "Рабочее пространство перестанет использовать этот снимок навыка для оптимизации выполнения";
   }
   if (intent.kind === "user") {
     return intent.user.id === currentUserId
-      ? "Current user cannot be deleted."
-      : "The account will lose access immediately.";
+      ? "Текущего пользователя нельзя удалить"
+      : "Учётная запись сразу потеряет доступ";
   }
-  return "The scenario will move to archived state and leave the active governance list.";
+  if (intent.kind === "agent") {
+    return "Агент исчезнет из выбора в чате, но история существующих диалогов сохранит его авторство";
+  }
+  return "Сценарий перейдёт в архив и покинет активный список управления";
 }
 
 function SummaryRow({
@@ -2109,9 +2838,9 @@ function SummaryRow({
   monospace?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-[#182438] bg-[#0b1322] px-3 py-3">
-      <span className="text-sm text-[#8ea3c5]">{label}</span>
-      <span className={`text-sm font-medium text-[#eef4ff] ${monospace ? "font-mono text-[13px]" : ""}`}>
+    <div className="flex items-center justify-between gap-4 rounded-2xl border border-border bg-surface px-3 py-3">
+      <span className="text-sm text-secondary">{label}</span>
+      <span className={`min-w-0 break-words text-right text-sm font-medium text-primary ${monospace ? "font-mono text-[13px]" : ""}`}>
         {value}
       </span>
     </div>
@@ -2120,9 +2849,18 @@ function SummaryRow({
 
 function SummaryStat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-[22px] border border-[#1d2940] bg-[#0b1322] px-4 py-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#6e84a8]">{label}</p>
-      <div className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-[#eef4ff]">{value}</div>
+    <div className="rounded-[22px] border border-border bg-surface px-4 py-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">{label}</p>
+      <div className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-primary">{value}</div>
+    </div>
+  );
+}
+
+function CompactSummaryStat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="inline-flex min-w-[120px] items-center justify-between gap-3 rounded-lg border border-border bg-surface px-3 py-2">
+      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">{label}</span>
+      <span className="text-sm font-semibold text-primary">{value}</span>
     </div>
   );
 }
@@ -2130,8 +2868,8 @@ function SummaryStat({ label, value }: { label: string; value: React.ReactNode }
 function DetailBlock({ title, content }: { title: string; content: string }) {
   return (
     <div className="grid gap-2">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#6e84a8]">{title}</p>
-      <div className="rounded-[22px] border border-[#182438] bg-[#0b1322] px-4 py-4 text-sm leading-7 text-[#d5e2f7]">
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">{title}</p>
+      <div className="rounded-[22px] border border-border bg-surface px-4 py-4 text-sm leading-7 text-primary">
         {content}
       </div>
     </div>
@@ -2141,8 +2879,8 @@ function DetailBlock({ title, content }: { title: string; content: string }) {
 function DetailCodeBlock({ title, content }: { title: string; content: string }) {
   return (
     <div className="grid gap-2">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#6e84a8]">{title}</p>
-      <pre className="overflow-x-auto rounded-[22px] border border-[#182438] bg-[#06101f] px-4 py-4 text-xs leading-6 text-[#cfe1ff]">
+      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">{title}</p>
+      <pre className="overflow-x-auto rounded-[22px] border border-border bg-surface px-4 py-4 text-xs leading-6 text-primary">
         {content}
       </pre>
     </div>
@@ -2159,9 +2897,111 @@ function TagList({ title, items }: { title: string; items: string[] }) {
           ))}
         </div>
       ) : (
-        <p className="text-sm text-[#8ea3c5]">No data</p>
+        <p className="text-sm text-secondary">Нет данных</p>
       )}
     </InfoPanel>
+  );
+}
+
+function LocalUsersTable({
+  users,
+  currentUserId,
+  onConfigureRateLimit,
+  onDelete,
+  onCurrentUserDelete,
+}: {
+  users: LocalUserItem[];
+  currentUserId: string;
+  onConfigureRateLimit: (user: LocalUserItem) => void;
+  onDelete: (user: LocalUserItem) => void;
+  onCurrentUserDelete: () => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-border">
+      <div className="overflow-x-auto">
+        <table className="min-w-[760px] w-full border-collapse text-left text-sm">
+          <thead className="bg-surface text-xs uppercase tracking-[0.14em] text-muted">
+            <tr>
+              <th className="px-4 py-3 font-semibold">Пользователь</th>
+              <th className="px-4 py-3 font-semibold">Роль</th>
+              <th className="px-4 py-3 font-semibold">Статус</th>
+              <th className="px-4 py-3 font-semibold">Лимит API</th>
+              <th className="px-4 py-3 font-semibold">Провайдер</th>
+              <th className="px-4 py-3 font-semibold">Субъект</th>
+              <th className="px-4 py-3 font-semibold">Создан</th>
+              <th className="px-4 py-3 text-right font-semibold">Действия</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border bg-surface">
+            {users.map((user) => {
+              const isCurrentUser = user.id === currentUserId;
+              return (
+                <tr key={user.id} className="transition hover:bg-surface">
+                  <td className="px-4 py-3">
+                    <div className="max-w-[220px]">
+                      <p className="truncate font-medium text-primary">{user.login}</p>
+                      <p className="mt-1 truncate text-xs text-secondary">{user.display_name ?? "-"}</p>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <SectionBadge tone={user.role === "admin" ? "warning" : "primary"}>{user.role}</SectionBadge>
+                  </td>
+                  <td className="px-4 py-3">
+                    <SectionBadge tone={user.is_active ? "success" : "danger"}>
+                      {user.is_active ? "активен" : "отключён"}
+                    </SectionBadge>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-primary">
+                    {user.api_rate_limit_per_hour == null
+                      ? "Без ограничений"
+                      : `${user.api_rate_limit_per_hour} / час`}
+                  </td>
+                  <td className="px-4 py-3 text-primary">{user.auth_provider}</td>
+                  <td className="px-4 py-3">
+                    <code className="block max-w-[220px] truncate rounded-md bg-page px-2 py-1 text-xs text-primary">
+                      {user.auth_subject}
+                    </code>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-primary">
+                    {formatShortDate(user.created_at)}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Настроить лимит API для ${user.login}`}
+                        onClick={() => onConfigureRateLimit(user)}
+                      >
+                        <Clock3 className="h-4 w-4" />
+                        Лимит
+                      </Button>
+                      <button
+                        type="button"
+                        title={isCurrentUser ? "Текущего пользователя нельзя удалить" : "Удалить"}
+                        disabled={isCurrentUser}
+                        onClick={() => {
+                          if (isCurrentUser) {
+                            onCurrentUserDelete();
+                            return;
+                          }
+                          onDelete(user);
+                        }}
+                        className="inline-flex h-9 items-center justify-center rounded-lg border border-danger-border bg-danger-subtle px-3 text-sm font-medium text-danger transition hover:bg-danger-subtle disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Удалить
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -2179,25 +3019,25 @@ function ConnectorTypeSummaryCard({
   onAdd: () => void;
 }) {
   return (
-    <Card className="border-[#1d2940] bg-[linear-gradient(180deg,rgba(10,16,29,0.96),rgba(8,12,22,0.98))]">
+    <Card className="min-w-0 border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
       <CardContent className="grid gap-4 p-5">
         <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-[#22334e] bg-[#0b1322] text-[#8fb9ff]">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border-strong bg-surface text-accent">
               {icon}
             </div>
-            <div>
-              <p className="text-base font-medium text-[#eef4ff]">{title}</p>
-              <p className="text-sm text-[#8ea3c5]">{readyCount}/{count} ready</p>
+            <div className="min-w-0">
+              <p className="break-words text-base font-medium text-primary">{title}</p>
+              <p className="text-sm text-secondary">{readyCount}/{count} готово</p>
             </div>
           </div>
           <SectionBadge tone={count > 0 && readyCount === count ? "success" : count > 0 ? "warning" : "danger"}>
             {count}
           </SectionBadge>
         </div>
-        <Button size="sm" variant="outline" onClick={onAdd}>
+        <Button size="sm" variant="outline" onClick={onAdd} className="w-full min-w-0">
           <Plus className="h-4 w-4" />
-          Add {title}
+          <span className="min-w-0 truncate">Добавить подключение</span>
         </Button>
       </CardContent>
     </Card>
@@ -2211,6 +3051,8 @@ function ConnectorCard({
   onToggleActive,
   onEdit,
   onDelete,
+  onSync,
+  syncPending = false,
 }: {
   connector: AnyConnectorItem;
   type: ConnectorType;
@@ -2218,46 +3060,60 @@ function ConnectorCard({
   onToggleActive: (isActive: boolean) => void;
   onEdit: () => void;
   onDelete: () => void;
+  onSync?: () => void;
+  syncPending?: boolean;
 }) {
   const health = getConnectorHealth(connector, type);
   const healthTone = connector.is_active ? (health === "ready" ? "success" : "warning") : "danger";
 
   return (
-    <Card className="border-[#182438] bg-[linear-gradient(180deg,rgba(10,16,29,0.96),rgba(8,12,22,0.98))]">
+    <Card className="border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
       <CardContent className="grid gap-4 p-5">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-base font-medium text-[#eef4ff]">{connector.name}</p>
-            <p className="mt-1 text-sm text-[#8ea3c5]">{getConnectorSubtitle(connector, type)}</p>
+            <p className="text-base font-medium text-primary">{connector.name}</p>
+            <p className="mt-1 text-sm text-secondary">{getConnectorSubtitle(connector, type)}</p>
           </div>
           <div className="flex flex-col items-end gap-2">
-            <SectionBadge tone={healthTone}>{connector.is_active ? health : "inactive"}</SectionBadge>
+            <SectionBadge tone={healthTone}>{connector.is_active ? health : "неактивно"}</SectionBadge>
             <Switch
-              aria-label={`${connector.name} active`}
+              aria-label={`${connector.name}: активность`}
               checked={connector.is_active}
               disabled={statusPending}
               onChange={(event) => onToggleActive(event.currentTarget.checked)}
-              label={connector.is_active ? "Active" : "Inactive"}
+              label={connector.is_active ? "Активно" : "Неактивно"}
             />
           </div>
         </div>
-        <div className="grid gap-3 text-sm text-[#b4c6e2]">
+        <div className="grid gap-3 text-sm text-primary">
           {getConnectorDetailRows(connector, type).map((row) => (
             <SummaryRow key={row.label} label={row.label} value={row.value} monospace={row.monospace} />
           ))}
         </div>
-        <div className="flex flex-wrap justify-between gap-3 border-t border-[#182438] pt-4">
-          <span className="text-xs uppercase tracking-[0.16em] text-[#6e84a8]">
-            Updated {formatShortDate(connector.updated_at)}
+        <div className="flex flex-wrap justify-between gap-3 border-t border-border pt-4">
+          <span className="text-xs uppercase tracking-[0.16em] text-muted">
+            Обновлено {formatShortDate(connector.updated_at)}
           </span>
           <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={onEdit} className="border border-[#24344f] bg-[#0b1322] text-[#d7e6ff] hover:bg-[#132033]">
+            {onSync ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onSync}
+                disabled={syncPending}
+                className="border border-border-strong bg-surface text-primary hover:bg-elevated"
+              >
+                <Clock3 className="h-4 w-4" />
+                Синхронизировать
+              </Button>
+            ) : null}
+            <Button size="sm" variant="ghost" onClick={onEdit} className="border border-border-strong bg-surface text-primary hover:bg-elevated">
               <Edit className="h-4 w-4" />
-              Edit
+              Редактировать
             </Button>
             <Button size="sm" variant="danger" onClick={onDelete}>
               <Trash2 className="h-4 w-4" />
-              Delete
+              Удалить
             </Button>
           </div>
         </div>
@@ -2276,30 +3132,30 @@ function ScenarioCard({
   onArchive: () => void;
 }) {
   return (
-    <Card className="border-[#182438] bg-[linear-gradient(180deg,rgba(10,16,29,0.96),rgba(8,12,22,0.98))]">
+    <Card className="border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
       <CardContent className="grid gap-4 p-5">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-base font-medium text-[#eef4ff]">{scenario.title}</p>
-            <p className="mt-1 text-sm text-[#8ea3c5]">{scenario.summary}</p>
+            <p className="text-base font-medium text-primary">{scenario.title}</p>
+            <p className="mt-1 text-sm text-secondary">{scenario.summary}</p>
           </div>
           <SectionBadge tone={scenario.status === "published" ? "success" : "warning"}>
             {scenario.status}
           </SectionBadge>
         </div>
-        <div className="grid gap-3 text-sm text-[#b4c6e2]">
-          <SummaryRow label="Slug" value={scenario.slug} monospace />
-          <SummaryRow label="Version" value={`v${scenario.version}`} />
-          <SummaryRow label="Updated" value={formatShortDate(scenario.updated_at)} />
+        <div className="grid gap-3 text-sm text-primary">
+          <SummaryRow label="Идентификатор" value={scenario.slug} monospace />
+          <SummaryRow label="Версия" value={`v${scenario.version}`} />
+          <SummaryRow label="Обновлено" value={formatShortDate(scenario.updated_at)} />
         </div>
-        <div className="flex justify-end gap-2 border-t border-[#182438] pt-4">
-          <Button size="sm" variant="ghost" onClick={onEdit} className="border border-[#24344f] bg-[#0b1322] text-[#d7e6ff] hover:bg-[#132033]">
+        <div className="flex justify-end gap-2 border-t border-border pt-4">
+          <Button size="sm" variant="ghost" onClick={onEdit} className="border border-border-strong bg-surface text-primary hover:bg-elevated">
             <Edit className="h-4 w-4" />
-            Edit
+            Редактировать
           </Button>
           <Button size="sm" variant="danger" onClick={onArchive}>
             <Trash2 className="h-4 w-4" />
-            Archive
+            В архив
           </Button>
         </div>
       </CardContent>
@@ -2317,12 +3173,12 @@ function SkillCard({
   onDelete: () => void;
 }) {
   return (
-    <Card className="border-[#182438] bg-[linear-gradient(180deg,rgba(10,16,29,0.96),rgba(8,12,22,0.98))]">
+    <Card className="border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
       <CardContent className="grid gap-4 p-5">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-base font-medium text-[#eef4ff]">{skill.name}</p>
-            <p className="mt-1 text-sm text-[#8ea3c5]">{skill.summary ?? "No summary fetched yet."}</p>
+            <p className="text-base font-medium text-primary">{skill.name}</p>
+            <p className="mt-1 text-sm text-secondary">{skill.summary ?? "Описание ещё не получено"}</p>
           </div>
           <div className="flex flex-col gap-2">
             <SectionBadge tone={skill.status === "active" ? "success" : "warning"}>{skill.status}</SectionBadge>
@@ -2331,20 +3187,82 @@ function SkillCard({
             </SectionBadge>
           </div>
         </div>
-        <div className="grid gap-3 text-sm text-[#b4c6e2]">
-          <SummaryRow label="Priority" value={skill.priority} />
-          <SummaryRow label="Scope" value={skill.engine_scope} />
-          <SummaryRow label="Source" value={skill.source_url} monospace />
-          <SummaryRow label="Validated" value={formatDateTime(skill.last_validated_at)} />
+        <div className="grid gap-3 text-sm text-primary">
+          <SummaryRow label="Приоритет" value={skill.priority} />
+          <SummaryRow label="Назначение" value={skill.capability_family} />
+          <SummaryRow label="Область" value={skill.engine_scope} />
+          <SummaryRow
+            label="Источник"
+            value={skill.source_kind === "manual_markdown" ? "ручной текст" : skill.source_url}
+            monospace={skill.source_kind !== "manual_markdown"}
+          />
+          {skill.capability_family === "chat_instruction" ? (
+            <SummaryRow
+              label="Ассистент по умолчанию"
+              value={skill.visible_to_default_assistant ? "виден" : "скрыт"}
+            />
+          ) : null}
+          <SummaryRow label="Проверен" value={formatDateTime(skill.last_validated_at)} />
         </div>
-        <div className="flex justify-end gap-2 border-t border-[#182438] pt-4">
-          <Button size="sm" variant="ghost" onClick={onEdit} className="border border-[#24344f] bg-[#0b1322] text-[#d7e6ff] hover:bg-[#132033]">
+        <div className="flex justify-end gap-2 border-t border-border pt-4">
+          <Button size="sm" variant="ghost" onClick={onEdit} className="border border-border-strong bg-surface text-primary hover:bg-elevated">
             <Edit className="h-4 w-4" />
-            Edit
+            Редактировать
           </Button>
           <Button size="sm" variant="danger" onClick={onDelete}>
             <Trash2 className="h-4 w-4" />
-            Delete
+            Удалить
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AgentCard({
+  agent,
+  onEdit,
+  onDelete,
+}: {
+  agent: AgentProfile;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <Card className="border-border-strong bg-surface">
+      <CardContent className="grid gap-4 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-base font-medium text-primary">{agent.title}</p>
+            <p className="mt-1 text-sm text-secondary">{agent.description ?? agent.slug}</p>
+          </div>
+          <SectionBadge tone={agent.is_active ? "success" : "danger"}>
+            {agent.is_active ? "активен" : "неактивен"}
+          </SectionBadge>
+        </div>
+        <div className="grid gap-2 text-sm">
+          <SummaryRow label="Звёзды" value={agent.star_count} />
+          <SummaryRow label="LLM" value={agent.llm_connector_name ?? "по умолчанию"} />
+          <SummaryRow label="Разрешённые БД" value={agent.allowed_database_connector_names.join(", ") || "все"} />
+          <SummaryRow label="Разрешённые GitLab" value={agent.allowed_gitlab_connector_names.join(", ") || "запрещено"} />
+          <SummaryRow label="Разрешённые MCP" value={agent.allowed_mcp_connector_names.join(", ") || "запрещено"} />
+          <SummaryRow label="Разрешённые Airflow" value={agent.allowed_airflow_connector_names.join(", ") || "запрещено"} />
+          <SummaryRow label="Разрешённые K8s" value={agent.allowed_kubernetes_connector_names.join(", ") || "запрещено"} />
+          <SummaryRow
+            label="Разрешённые VM"
+            value={agent.allowed_victoriametrics_connector_names.join(", ") || "запрещено"}
+          />
+          <SummaryRow label="Навыки для чата" value={agent.allowed_workspace_skill_ids.length} />
+          <SummaryRow label="Обновлено" value={formatShortDate(agent.updated_at)} />
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={onEdit}>
+            <Edit className="h-4 w-4" />
+            Редактировать
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onDelete}>
+            <Trash2 className="h-4 w-4" />
+            Удалить
           </Button>
         </div>
       </CardContent>
@@ -2361,20 +3279,32 @@ function getConnectorSubtitle(connector: AnyConnectorItem, type: ConnectorType) 
     const item = connector as LlmConnectorItem;
     return `${item.connection.model} • ${item.connection.base_url}`;
   }
-  if (type === "metadata") {
-    const item = connector as OpenMetadataConnectorItem;
-    return `${item.connection.service_name ?? "No default service"} • ${item.connection.base_url}`;
+  if (type === "documentation") {
+    const item = connector as DocumentationConnectorItem;
+    return `${item.connection.provider} • ${item.connection.base_url}`;
   }
-  if (type === "confluence") {
-    const item = connector as ConfluenceConnectorItem;
-    return `${item.connection.auth_type} auth • ${item.connection.base_url}`;
+  if (type === "gitlab") {
+    const item = connector as GitLabConnectorItem;
+    return `только чтение • ${item.connection.base_url}`;
   }
-  if (type === "jira") {
-    const item = connector as JiraConnectorItem;
-    return `${item.connection.auth_type} auth • ${item.connection.base_url}`;
+  if (type === "mcp") {
+    const item = connector as McpConnectorItem;
+    return `${item.connection.provider} • ${item.connection.url}`;
+  }
+  if (type === "airflow") {
+    const item = connector as AirflowConnectorItem;
+    return `только чтение • ${item.connection.base_url}${item.connection.api_path}`;
+  }
+  if (type === "kubernetes") {
+    const item = connector as KubernetesConnectorItem;
+    return `только чтение • ${item.connection.base_url}`;
+  }
+  if (type === "victoriametrics") {
+    const item = connector as VictoriaMetricsConnectorItem;
+    return `${item.connection.templates.length} шаблонов • ${item.connection.base_url}`;
   }
   const item = connector as MattermostConnectorItem;
-  return `${item.connection.bot_username ?? "username auto"} • ${item.connection.base_url}`;
+  return `${item.connection.bot_username ?? "имя пользователя по умолчанию"} • ${item.connection.base_url}`;
 }
 
 function getConnectorDetailRows(
@@ -2384,112 +3314,197 @@ function getConnectorDetailRows(
   if (type === "database") {
     const item = connector as DatabaseConnectorItem;
     return [
-      { label: "Database", value: item.connection.database ?? item.connection.catalog ?? "—" },
-      { label: "Schema", value: item.connection.schema ?? "—" },
-      { label: "Security", value: item.connection.secure ? "TLS enabled" : "No TLS" },
-      { label: "Password", value: item.has_password ? "stored" : "missing" },
+      { label: "Применять, когда", value: item.connection.usage_description ?? "—" },
+      { label: "База данных", value: item.connection.database ?? item.connection.catalog ?? "—" },
+      { label: "Схема", value: item.connection.schema ?? "—" },
+      { label: "Безопасность", value: item.connection.secure ? "TLS включён" : "Без TLS" },
+      { label: "Пароль", value: item.has_password ? "сохранён" : "не задан" },
     ];
   }
   if (type === "llm") {
     const item = connector as LlmConnectorItem;
     return [
-      { label: "Endpoint", value: item.connection.endpoint_path, monospace: true },
-      { label: "TLS", value: item.connection.verify_tls ? "verified" : "disabled" },
-      { label: "API key", value: item.has_api_key ? "stored" : "missing" },
-      { label: "Max tokens", value: item.connection.max_tokens ?? "—" },
+      { label: "Стандартный агент", value: item.is_default ? "По умолчанию" : "Не по умолчанию" },
+      { label: "Эндпоинт", value: item.connection.endpoint_path, monospace: true },
+      { label: "TLS", value: item.connection.verify_tls ? "проверяется" : "отключено" },
+      { label: "Ключи API", value: item.has_api_key ? `${item.api_key_count || 1} сохранено` : "не задан" },
+      { label: "Температура", value: item.connection.temperature ?? "По умолчанию провайдера" },
+      { label: "Top P", value: item.connection.top_p ?? "По умолчанию провайдера" },
+      { label: "Уровень reasoning", value: item.connection.reasoning_effort ?? "По умолчанию провайдера" },
+      { label: "Максимум токенов ответа", value: item.connection.max_tokens ?? "По умолчанию провайдера" },
+      {
+        label: "Параметр максимума токенов",
+        value: item.connection.max_tokens_parameter ?? "max_tokens",
+        monospace: true,
+      },
+      {
+        label: "Контекстное окно",
+        value:
+          item.connection.extra_settings?.context_window_tokens ??
+          item.connection.extra_settings?.context_window ??
+          "—",
+      },
+      {
+        label: "Протокол финального ответа",
+        value: item.connection.extra_settings?.require_explicit_final_answer
+          ? "Обязательный инструмент"
+          : "По умолчанию провайдера",
+      },
     ];
   }
-  if (type === "metadata") {
-    const item = connector as OpenMetadataConnectorItem;
+  if (type === "documentation") {
+    const item = connector as DocumentationConnectorItem;
     return [
-      { label: "Service", value: item.connection.service_name ?? "—" },
-      { label: "Database", value: item.connection.database_name ?? "—" },
-      { label: "Schema", value: item.connection.schema_name ?? "—" },
-      { label: "Token", value: item.has_api_token ? "stored" : "missing" },
+      { label: "Применять, когда", value: item.connection.usage_description ?? "—" },
+      {
+        label: "Агент по умолчанию",
+        value: item.visible_to_default_assistant ? "виден" : "скрыт",
+      },
+      { label: "Индекс", value: item.connection.index_url ?? "автоопределение", monospace: Boolean(item.connection.index_url) },
+      { label: "Расписание", value: item.connection.sync_enabled ? `${item.connection.sync_interval_minutes} мин` : "отключено" },
+      { label: "Последняя синхронизация", value: item.last_sync_at ? formatDateTime(item.last_sync_at) : "—" },
+      { label: "Статус", value: item.last_sync_status ?? "ни разу" },
+      { label: "Эмбеддинги", value: item.connection.embedding_model, monospace: true },
+      { label: "Qdrant", value: item.connection.qdrant_collection_name, monospace: true },
+      { label: "Ключ эмбеддингов", value: item.has_embedding_api_key ? "сохранён" : "не требуется" },
     ];
   }
-  if (type === "confluence") {
-    const item = connector as ConfluenceConnectorItem;
+  if (type === "gitlab") {
+    const item = connector as GitLabConnectorItem;
     return [
-      { label: "Space", value: item.connection.space_key ?? "—" },
-      { label: "Username", value: item.connection.username ?? "—" },
-      { label: "Page limit", value: item.connection.page_limit },
-      { label: "Token", value: item.has_api_token ? "stored" : "missing" },
+      { label: "Применять, когда", value: item.connection.use_when },
+      { label: "Проекты", value: item.connection.default_project_paths.join(", ") || "—", monospace: true },
+      { label: "Группы", value: item.connection.default_group_paths.join(", ") || "—", monospace: true },
+      { label: "Лимиты", value: `${item.connection.search_limit} поиск / ${item.connection.read_max_tokens} токенов на чтение` },
+      { label: "Токен", value: item.has_api_token ? "сохранён" : "не задан" },
     ];
   }
-  if (type === "jira") {
-    const item = connector as JiraConnectorItem;
+  if (type === "mcp") {
+    const item = connector as McpConnectorItem;
+    const allowedToolNames = item.connection.allowed_tool_names ?? [];
     return [
-      { label: "Projects", value: item.connection.project_keys.join(", ") || "—" },
-      { label: "Username", value: item.connection.username ?? "—" },
-      { label: "Issue limit", value: item.connection.issue_limit },
-      { label: "Token", value: item.has_api_token ? "stored" : "missing" },
+      { label: "Применять, когда", value: item.connection.usage_description ?? "—" },
+      {
+        label: "Внешний MCP",
+        value: item.visible_to_external_mcp ? "опубликован" : "скрыт",
+      },
+      { label: "Группы", value: item.connection.enabled_groups ?? "все" },
+      {
+        label: "Разрешённые методы",
+        value: allowedToolNames.join(", ") || "все (без ограничений)",
+        monospace: allowedToolNames.length > 0,
+      },
+      { label: "Префикс", value: item.connection.tool_name_prefix ?? item.name, monospace: true },
+      { label: "Инструменты", value: item.tool_count },
+      { label: "Секреты", value: item.has_secret_headers ? item.secret_header_names.join(", ") : "не заданы" },
+      { label: "Последняя синхронизация", value: item.last_sync_at ? formatDateTime(item.last_sync_at) : "ни разу" },
+      { label: "Статус синхронизации", value: item.last_sync_status ?? "ожидает" },
+    ];
+  }
+  if (type === "airflow") {
+    const item = connector as AirflowConnectorItem;
+    return [
+      { label: "Применять, когда", value: item.connection.use_when },
+      { label: "Имя пользователя", value: item.connection.username },
+      { label: "Путь API", value: item.connection.api_path, monospace: true },
+      {
+        label: "Лимиты",
+        value: `${item.connection.dag_limit} DAG / ${item.connection.dag_run_limit} запусков / ${item.connection.task_limit} задач`,
+      },
+      { label: "Лимит лога", value: `${item.connection.log_max_chars} символов` },
+      { label: "Пароль", value: item.has_password ? "сохранён" : "не задан" },
+    ];
+  }
+  if (type === "kubernetes") {
+    const item = connector as KubernetesConnectorItem;
+    return [
+      { label: "Применять, когда", value: item.connection.use_when },
+      {
+        label: "Агент по умолчанию",
+        value: item.visible_to_default_assistant ? "виден" : "скрыт",
+      },
+      { label: "Пространства имён", value: item.connection.namespace_allowlist.join(", "), monospace: true },
+      {
+        label: "Лимиты",
+        value: `${item.connection.default_limit} по умолчанию / ${item.connection.max_limit} максимум`,
+      },
+      { label: "Лимит лога", value: `${item.connection.log_max_chars} символов` },
+      { label: "Токен", value: item.has_bearer_token ? "сохранён" : "не задан" },
+    ];
+  }
+  if (type === "victoriametrics") {
+    const item = connector as VictoriaMetricsConnectorItem;
+    return [
+      { label: "Применять, когда", value: item.connection.use_when },
+      {
+        label: "Агент по умолчанию",
+        value: item.visible_to_default_assistant ? "виден" : "скрыт",
+      },
+      { label: "Аутентификация", value: item.connection.auth_type },
+      {
+        label: "Шаблоны",
+        value: item.connection.templates.map((template) => template.template_id).join(", ") || "—",
+        monospace: true,
+      },
+      {
+        label: "Лимиты",
+        value: `${item.connection.max_series} серий / ${item.connection.max_datapoints} точек`,
+      },
+      { label: "Токен", value: item.has_bearer_token ? "сохранён" : "не требуется" },
     ];
   }
   const item = connector as MattermostConnectorItem;
   return [
-    { label: "Bot", value: item.connection.bot_username ?? "auto" },
-    { label: "Listening", value: item.connection.listen_enabled ? "enabled" : "disabled" },
-    { label: "TLS", value: item.connection.verify_tls ? "verified" : "disabled" },
-    { label: "Token", value: item.has_bot_token ? "stored" : "missing" },
+    { label: "Бот", value: item.connection.bot_username ?? "по умолчанию" },
+    { label: "Прослушивание", value: item.connection.listen_enabled ? "включено" : "отключено" },
+    { label: "Ответы с SQL", value: item.connection.send_sql_enabled ? "включено" : "отключено" },
+    {
+      label: "Фоновый режим",
+      value: item.connection.ambient_listen_enabled
+        ? `${item.connection.ambient_channel_ids.length} каналов`
+        : "отключено",
+    },
+    { label: "TLS", value: item.connection.verify_tls ? "проверяется" : "отключено" },
+    { label: "Токен", value: item.has_bot_token ? "сохранён" : "не задан" },
   ];
 }
 
-function buildNextActions(args: {
-  readiness: ReturnType<typeof buildReadinessModel>;
-  pendingInsights: RagInsightReviewItem[];
-  onNavigate: (section: AdminSectionId) => void;
-  onAddDatabase: () => void;
-  onAddLlm: () => void;
-  onReviewQueue: () => void;
-  onAddScenario: () => void;
-}) {
-  const actions: Array<{ title: string; description: string; onClick: () => void }> = [];
-
-  if (args.readiness.blockers.some((item) => item.includes("database connector"))) {
-    actions.push({
-      title: "Add a database connector",
-      description: "Without it, the workspace cannot answer anything useful.",
-      onClick: args.onAddDatabase,
-    });
+function connectorTypeIcon(type: ConnectorType) {
+  if (type === "database") {
+    return <Database className="h-5 w-5" />;
   }
-
-  if (args.readiness.blockers.some((item) => item.includes("LLM connector"))) {
-    actions.push({
-      title: "Add an LLM connector",
-      description: "Chat runtime is dead until a model endpoint exists.",
-      onClick: args.onAddLlm,
-    });
+  if (type === "llm") {
+    return <Server className="h-5 w-5" />;
   }
-
-  if (args.pendingInsights.length > 0) {
-    actions.push({
-      title: "Clear the review queue",
-      description: `${args.pendingInsights.length} insights need a human verdict.`,
-      onClick: args.onReviewQueue,
-    });
+  if (type === "gitlab") {
+    return <GitBranch className="h-5 w-5" />;
   }
-
-  if (args.readiness.publishedScenarioCount === 0) {
-    actions.push({
-      title: "Publish at least one official scenario",
-      description: "Governance with no approved workflow is cosplay.",
-      onClick: args.onAddScenario,
-    });
+  if (type === "mcp") {
+    return <Workflow className="h-5 w-5" />;
   }
-
-  if (actions.length === 0) {
-    actions.push({
-      title: "Review setup details",
-      description: "Everything critical is present. Now keep the edges clean.",
-      onClick: () => args.onNavigate("setup"),
-    });
+  if (type === "airflow") {
+    return <Workflow className="h-5 w-5" />;
   }
-
-  return actions.slice(0, 4);
+  if (type === "kubernetes") {
+    return <Server className="h-5 w-5" />;
+  }
+  if (type === "victoriametrics") {
+    return <Activity className="h-5 w-5" />;
+  }
+  if (type === "mattermost") {
+    return <MessageSquare className="h-5 w-5" />;
+  }
+  return <BookText className="h-5 w-5" />;
 }
 
 function upsertById<T extends { id: string }>(items: T[], nextItem: T) {
   const next = items.filter((item) => item.id !== nextItem.id);
   return [nextItem, ...next];
+}
+
+function upsertLlmConnector(items: LlmConnectorItem[], nextItem: LlmConnectorItem) {
+  const normalized = nextItem.is_default
+    ? items.map((item) => ({ ...item, is_default: false }))
+    : items;
+  return upsertById(normalized, nextItem);
 }

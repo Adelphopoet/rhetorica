@@ -20,6 +20,8 @@ class RepairPromptComponents:
     original_answer: str
     feedback_reason: FeedbackReason
     feedback_comment: str | None
+    what_went_wrong: str | None
+    expected_answer: str | None
     context_tables: list[str]
     generated_sql: str | None
     executed_sql: str | None
@@ -90,10 +92,22 @@ class RepairTurnService:
             original_answer=request.original_answer,
             feedback_reason=request.feedback_reason,
             feedback_comment=request.feedback_comment,
+            what_went_wrong=request.what_went_wrong,
+            expected_answer=request.expected_answer,
             context_tables=request.context_tables,
             generated_sql=request.generated_sql,
             executed_sql=request.executed_sql,
         )
+
+        if components.what_went_wrong and components.expected_answer:
+            return (
+                "Correct the previous analytics answer. "
+                f"Original question: {components.original_question}. "
+                f"Original answer: {components.original_answer}. "
+                f"The reviewer says this was wrong because: {components.what_went_wrong}. "
+                f"The expected answer is: {components.expected_answer}. "
+                "Return a corrected, evidence-based answer."
+            )
 
         template = self._REPAIR_PROMPT_TEMPLATES.get(
             request.feedback_reason,
@@ -131,6 +145,8 @@ class RepairTurnService:
             "original_question": request.original_question,
             "feedback_reason": request.feedback_reason.value,
             "feedback_comment": request.feedback_comment,
+            "what_went_wrong": request.what_went_wrong,
+            "expected_answer": request.expected_answer,
             "context_tables": request.context_tables,
             "has_generated_sql": request.generated_sql is not None,
             "has_executed_sql": request.executed_sql is not None,

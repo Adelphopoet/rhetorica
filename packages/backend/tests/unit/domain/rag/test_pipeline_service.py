@@ -55,7 +55,7 @@ def _seed_conversation(
         generated_sql=generated_sql,
         warnings=warnings or [],
         context_tables=context_tables or ["dm.revenue_daily", "fct_orders", "fct_refunds"],
-        metadata_sources=metadata_sources or ["openmetadata"],
+        metadata_sources=metadata_sources or ["mcp"],
     )
     updated = chat_repo.update_message_feedback(
         conversation_id=conversation.id,
@@ -76,6 +76,7 @@ def _seed_connectors(
         UpsertLlmConnectorRequest(
             name="llm-main",
             workspace_id="default",
+            is_default=True,
             connection=LlmConnectionConfig(
                 base_url="https://llm.example/v1",
                 model="gpt-4.1-mini",
@@ -375,7 +376,7 @@ def test_pipeline_merges_into_similar_document(tmp_path: Path, monkeypatch) -> N
                         "summary": "Existing summary",
                         "keywords": ["old"],
                         "context_tables": ["dm.old"],
-                        "metadata_sources": ["openmetadata"],
+                        "metadata_sources": ["mcp"],
                         "generated_sql": "select 1",
                         "likes_count": 2,
                         "liked_message_ids": [],

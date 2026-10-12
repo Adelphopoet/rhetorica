@@ -4,6 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MotionConfig } from "framer-motion";
 import { ToastProvider } from "@rhetorica/ui";
 import { ReactNode, useState } from "react";
+import { ThemeProvider } from "@/features/theme/ThemeProvider";
+import { StaleAssetNotice } from "./stale-asset-notice";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -22,10 +24,15 @@ export function Providers({ children }: { children: ReactNode }) {
   );
 
   return (
-    <QueryClientProvider client={queryClient}>
-      <MotionConfig reducedMotion="user">
-        <ToastProvider>{children}</ToastProvider>
-      </MotionConfig>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <MotionConfig reducedMotion="user">
+          <ToastProvider>
+            {children}
+            <StaleAssetNotice />
+          </ToastProvider>
+        </MotionConfig>
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }

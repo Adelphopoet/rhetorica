@@ -1,10 +1,14 @@
-from rhetorica_backend.domain.chat.orchestration.state import ToolOrchestrationState
+from rhetorica_backend.contracts.execution import ExecuteSqlResponse
+from rhetorica_backend.domain.chat.orchestration.state import (
+    SqlExecutionAttempt,
+    ToolOrchestrationState,
+)
 from rhetorica_backend.domain.chat.orchestration.tool_error_policy import (
     ToolErrorPolicy,
 )
 
 
-def test_should_stop_after_repeated_preflight_fail() -> None:
+def test_should_continue_after_repeated_preflight_fail() -> None:
     state = ToolOrchestrationState(preflight_fail=2)
 
     should_stop = ToolErrorPolicy.should_stop_after_tool_error(
@@ -12,28 +16,101 @@ def test_should_stop_after_repeated_preflight_fail() -> None:
         state=state,
     )
 
-    assert should_stop is True
+    assert should_stop is False
 
 
-def test_record_duplicate_tool_error_updates_state() -> None:
-    state = ToolOrchestrationState(preflight_uncertain=1)
-
-    ToolErrorPolicy.record_duplicate_tool_error(
-        state=state,
-        tool_result={"ok": False, "error_code": "sql_preflight_uncertain"},
+def test_should_not_stop_recoverable_preflight_after_successful_execution() -> None:
+    state = ToolOrchestrationState(
+        preflight_uncertain=2,
+        execution_attempts=[
+            SqlExecutionAttempt(
+                sql="SELECT count() FROM system.query_log",
+                connector_name="clickhouse",
+                execution=ExecuteSqlResponse(
+                    execution_id="exec-1",
+                    status="succeeded",
+                    engine="clickhouse",
+                ),
+                preflight_status="pass",
+            )
+        ],
     )
 
-    assert state.preflight_uncertain == 2
-    assert "llm_tool_loop_duplicate_preflight_uncertain" in state.warnings
+    should_stop = ToolErrorPolicy.should_stop_after_tool_error(
+        tool_result={"ok": False, "error_code": "sql_preflight_uncertain"},
+        state=state,
+    )
+
+    assert should_stop is False
 
 
-def test_should_stop_after_repeated_unavailable_context_connector() -> None:
+def test_should_continue_after_repeated_preflight_uncertain() -> None:
+    state = ToolOrchestrationState(preflight_uncertain=2)
+
+    should_stop = ToolErrorPolicy.should_stop_after_tool_error(
+        tool_result={"ok": False, "error_code": "sql_preflight_uncertain"},
+        state=state,
+    )
+
+    assert should_stop is False
+
+
+def test_should_not_stop_recoverable_sql_execution_error() -> None:
+    state = ToolOrchestrationState()
+
+    should_stop = ToolErrorPolicy.should_stop_after_tool_error(
+        tool_result={
+            "ok": False,
+            "error_code": "sql_execution_failed",
+            "can_continue": True,
+            "retry_recommended": True,
+        },
+        state=state,
+    )
+
+    assert should_stop is False
+
+
+def test_should_not_stop_recoverable_tool_timeout() -> None:
+    state = ToolOrchestrationState()
+
+    should_stop = ToolErrorPolicy.should_stop_after_tool_error(
+        tool_result={
+            "ok": False,
+            "error_code": "tool_timeout",
+            "error_category": "TRANSIENT",
+            "can_continue": True,
+            "retry_recommended": True,
+        },
+        state=state,
+    )
+
+    assert should_stop is False
+
+
+def test_should_continue_after_repeated_unavailable_context_connector() -> None:
     state = ToolOrchestrationState(unavailable_context_connector_fail=2)
 
     should_stop = ToolErrorPolicy.should_stop_after_tool_error(
         tool_result={
             "ok": False,
             "error_code": "database_connector_unavailable_for_context_table",
+        },
+        state=state,
+    )
+
+    assert should_stop is False
+
+
+def test_should_stop_after_fatal_tool_error() -> None:
+    state = ToolOrchestrationState()
+
+    should_stop = ToolErrorPolicy.should_stop_after_tool_error(
+        tool_result={
+            "ok": False,
+            "error_code": "fatal_tool_error",
+            "error_category": "FATAL",
+            "can_continue": True,
         },
         state=state,
     )

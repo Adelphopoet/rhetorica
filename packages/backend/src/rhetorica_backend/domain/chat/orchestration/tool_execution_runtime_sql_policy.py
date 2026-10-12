@@ -9,9 +9,6 @@ from rhetorica_backend.contracts.chat import ChatAskRequest
 from rhetorica_backend.contracts.connectors import ConnectorItem
 from rhetorica_backend.contracts.execution import sql_dialect_for_engine
 from rhetorica_backend.domain.chat.error_contract import ErrorCategory, build_tool_error
-from rhetorica_backend.domain.chat.metadata.connection_resolver import (
-    clone_metadata_connection_with_scope,
-)
 from rhetorica_backend.domain.chat.orchestration.tool_execution_connector_scope_policy import (
     ToolExecutionConnectorScopePolicy,
 )
@@ -123,11 +120,8 @@ class ToolExecutionRuntimeSqlPolicy:
         requested = self.requested_connector_name(arguments)
         if requested is None:
             return None
-        metadata_service = self.metadata_service_name(connection)
         normalized_requested = requested.strip().lower()
         if normalized_requested == selected_connector.name.strip().lower():
-            return selected_connector.name
-        if metadata_service and normalized_requested == metadata_service.strip().lower():
             return selected_connector.name
         return requested
 
@@ -140,21 +134,10 @@ class ToolExecutionRuntimeSqlPolicy:
         connection: Any,
     ) -> str:
         normalized_sql = sql
-        metadata_database = self.metadata_mapping_value(connection, key="metadata_database")
-        connection_catalog = getattr(connection, "catalog", None)
         prefixes = [
             requested_connector_name,
             selected_connector.name,
-            self.metadata_service_name(connection),
         ]
-        if not (
-            isinstance(metadata_database, str)
-            and metadata_database.strip()
-            and isinstance(connection_catalog, str)
-            and connection_catalog.strip()
-            and metadata_database.strip().lower() == connection_catalog.strip().lower()
-        ):
-            prefixes.append(metadata_database)
         for prefix in prefixes:
             if not isinstance(prefix, str) or not prefix.strip():
                 continue
@@ -234,97 +217,19 @@ class ToolExecutionRuntimeSqlPolicy:
             return sql
         return f"SHOW COLUMNS FROM {target}"
 
-    @staticmethod
-    def metadata_service_name(connection: Any) -> str | None:
-        extra_settings = getattr(connection, "extra_settings", None)
-        if not isinstance(extra_settings, dict):
-            return None
-        metadata_service = extra_settings.get("metadata_service")
-        if isinstance(metadata_service, str) and metadata_service.strip():
-            return metadata_service.strip()
-        return None
-
-    @staticmethod
-    def metadata_mapping_value(connection: Any, key: str) -> str | None:
-        extra_settings = getattr(connection, "extra_settings", None)
-        if not isinstance(extra_settings, dict):
-            return None
-        value = extra_settings.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        return None
-
-    def effective_metadata_connection(
-        self,
-        *,
-        metadata_connection: Any,
-        request: ChatAskRequest,
-        arguments: dict[str, Any],
-        db_connectors: list[ConnectorItem],
-        state: Any | None,
-    ) -> Any:
-        explicit_metadata_connector = self.metadata_tool_argument_connector_name(
-            arguments=arguments,
-            db_connectors=db_connectors,
-        ) or (
-            isinstance(request.metadata_connector_name, str)
-            and request.metadata_connector_name.strip()
-        )
-        preferred_connector = self.preferred_metadata_scope_connector(
-            request=request,
-            arguments=arguments,
-            db_connectors=db_connectors,
-            state=state,
-        )
-        if preferred_connector is not None:
-            return clone_metadata_connection_with_scope(
-                metadata_connection,
-                service_name=self._connector_scope_policy.connector_mapping_value(
-                    preferred_connector,
-                    "metadata_service",
-                ),
-                database_name=self._connector_scope_policy.connector_mapping_value(
-                    preferred_connector,
-                    "metadata_database",
-                ),
-                schema_name=self._connector_scope_policy.connector_mapping_value(
-                    preferred_connector,
-                    "metadata_schema",
-                ),
-            )
-        if explicit_metadata_connector or not self.has_multiple_connector_scopes(db_connectors):
-            return metadata_connection
-        return clone_metadata_connection_with_scope(
-            metadata_connection,
-            service_name=None,
-            database_name=None,
-            schema_name=None,
-        )
-
     def select_runtime_lookup_connector(
         self,
         *,
         request: ChatAskRequest,
         db_connectors: list[ConnectorItem],
-        metadata_connection: Any | None,
-        sql_router: Any,
     ) -> ConnectorItem | None:
         if not db_connectors:
             return None
-        if metadata_connection is not None:
-            selected = sql_router.select_connector(
-                request=request,
-                llm_payload={
-                    "target": {
-                        "service": getattr(metadata_connection, "service_name", None),
-                        "database": getattr(metadata_connection, "database_name", None),
-                        "schema": getattr(metadata_connection, "schema_name", None),
-                    }
-                },
+        if request.database_connector_name:
+            return self._connector_scope_policy.find_connector_by_name(
                 db_connectors=db_connectors,
+                connector_name=request.database_connector_name,
             )
-            if selected is not None:
-                return selected
         return db_connectors[0] if len(db_connectors) == 1 else None
 
     @staticmethod
@@ -352,7 +257,15 @@ class ToolExecutionRuntimeSqlPolicy:
     ) -> str:
         engine = getattr(connection, "engine", None)
         safe_limit = max(1, min(limit, 20))
-        if engine in {"trino", "greenplum", "impala"}:
+        if engine == "impala":
+            schema_name = ToolExecutionRuntimeSqlPolicy.runtime_lookup_schema_name(
+                connection=connection,
+                database_hint=database_hint,
+            )
+            pattern = leaf_name if exact else f"*{leaf_name}*"
+            schema_sql = f" IN {schema_name}" if schema_name else ""
+            return f"SHOW TABLES{schema_sql} LIKE '{pattern}'"
+        if engine in {"trino", "greenplum"}:
             where_clauses = (
                 [f"table_name = '{leaf_name}'"]
                 if exact
@@ -386,7 +299,10 @@ class ToolExecutionRuntimeSqlPolicy:
         schema_name: str,
         table_name: str,
     ) -> str:
-        if getattr(connection, "engine", None) in {"trino", "greenplum", "impala"}:
+        engine = getattr(connection, "engine", None)
+        if engine == "impala":
+            return f"DESCRIBE {schema_name}.{table_name}"
+        if engine in {"trino", "greenplum"}:
             return (
                 "SELECT column_name, data_type "
                 "FROM information_schema.columns "
@@ -399,22 +315,38 @@ class ToolExecutionRuntimeSqlPolicy:
             "ORDER BY position LIMIT 200"
         )
 
+    @classmethod
+    def runtime_lookup_schema_name(
+        cls,
+        *,
+        connection: Any,
+        database_hint: str | None,
+    ) -> str | None:
+        candidates = (
+            database_hint,
+            getattr(connection, "schema_name", None),
+            getattr(connection, "schema", None),
+            getattr(connection, "database", None),
+        )
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            normalized = candidate.strip().lower()
+            if re.fullmatch(r"[a-z0-9_]+", normalized):
+                return normalized
+        return None
+
+    @staticmethod
     def runtime_table_fqn(
-        self,
         *,
         connection: Any,
         schema_name: str,
         table_name: str,
     ) -> str:
-        metadata_service = self.metadata_service_name(connection)
-        metadata_database = self.metadata_mapping_value(
-            connection=connection,
-            key="metadata_database",
-        )
-        if metadata_service and metadata_database:
-            return f"{metadata_service}.{metadata_database}.{schema_name}.{table_name}"
-        if metadata_service:
-            return f"{metadata_service}.{schema_name}.{table_name}"
+        if getattr(connection, "engine", None) == "trino":
+            catalog = getattr(connection, "catalog", None)
+            if isinstance(catalog, str) and catalog.strip():
+                return f"{catalog.strip()}.{schema_name}.{table_name}"
         return f"{schema_name}.{table_name}"
 
     def preferred_metadata_scope_connector(
@@ -426,7 +358,7 @@ class ToolExecutionRuntimeSqlPolicy:
         state: Any | None,
     ) -> ConnectorItem | None:
         preferred_names: list[str] = []
-        tool_connector_name = self.metadata_tool_scope_connector_name(
+        tool_connector_name = self.metadata_scope_connector_name(
             arguments=arguments,
             db_connectors=db_connectors,
         )
@@ -465,29 +397,7 @@ class ToolExecutionRuntimeSqlPolicy:
         self,
         db_connectors: list[ConnectorItem],
     ) -> bool:
-        scopes: set[tuple[str, str, str]] = set()
-        for connector in db_connectors:
-            service = self._connector_scope_policy.connector_mapping_value(
-                connector,
-                "metadata_service",
-            )
-            database = self._connector_scope_policy.connector_mapping_value(
-                connector,
-                "metadata_database",
-            )
-            schema = (
-                self._connector_scope_policy.connector_mapping_value(
-                    connector,
-                    "metadata_schema",
-                )
-                or ""
-            )
-            if service is None or database is None:
-                continue
-            scopes.add((service.lower(), database.lower(), schema.lower()))
-            if len(scopes) > 1:
-                return True
-        return False
+        return len({connector.name.strip().lower() for connector in db_connectors}) > 1
 
     @staticmethod
     def preflight_error_payload(
@@ -535,7 +445,7 @@ class ToolExecutionRuntimeSqlPolicy:
             )
         return False
 
-    def metadata_tool_argument_connector_name(
+    def metadata_argument_connector_name(
         self,
         *,
         arguments: dict[str, Any],
@@ -554,7 +464,7 @@ class ToolExecutionRuntimeSqlPolicy:
             return None
         return connector_name
 
-    def metadata_tool_scope_connector_name(
+    def metadata_scope_connector_name(
         self,
         *,
         arguments: dict[str, Any],
@@ -568,23 +478,3 @@ class ToolExecutionRuntimeSqlPolicy:
             connector_name=connector_name,
         )
         return connector.name if connector is not None else None
-
-    def metadata_tool_connector_name(
-        self,
-        *,
-        request: ChatAskRequest,
-        arguments: dict[str, Any],
-        db_connectors: list[ConnectorItem],
-    ) -> str | None:
-        connector_name = self.metadata_tool_argument_connector_name(
-            arguments=arguments,
-            db_connectors=db_connectors,
-        )
-        if connector_name is not None:
-            return connector_name
-        if (
-            isinstance(request.metadata_connector_name, str)
-            and request.metadata_connector_name.strip()
-        ):
-            return request.metadata_connector_name.strip()
-        return None

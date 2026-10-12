@@ -121,26 +121,27 @@ export function ScenarioEditorModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[#02050c]/72 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay/[0.72] p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl rounded-[28px] border border-[#1d2940] bg-[linear-gradient(180deg,rgba(12,18,31,0.98),rgba(8,12,22,0.99))] p-6 shadow-[0_30px_90px_rgba(0,0,0,0.48)]"
+        className="w-full max-w-2xl rounded-[28px] border border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.99))] p-6 shadow-[0_30px_90px_rgb(var(--color-shadow)/calc(0.48*var(--shadow-opacity-scale)))]"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6e84a8]">
-              {scope === "official" ? "Admin official scenario" : "Personal scenario"}
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+              {scope === "official" ? "Общий сценарий" : "Личный сценарий"}
             </p>
-            <h3 className="mt-1 text-xl font-semibold text-[#eef4ff]">
-              {scenario ? "Edit scenario" : "Create scenario"}
+            {scenario && <a href={`/scenarios/${scenario.id}`} className="mb-3 block rounded-lg border border-cyan-border bg-cyan-subtle/40 px-4 py-3 text-sm text-cyan">Открыть редактор цепочки шагов ↗</a>}
+            <h3 className="mt-1 text-xl font-semibold text-primary">
+              {scenario ? "Редактирование сценария" : "Создание сценария"}
             </h3>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full border border-[#23324e] p-2 text-[#a6b8d6] transition hover:text-white"
+            className="rounded-full border border-border-strong p-2 text-secondary transition hover:text-primary"
           >
             <X className="h-4 w-4" />
           </button>
@@ -148,38 +149,38 @@ export function ScenarioEditorModal({
 
         <div className="mt-5 grid gap-3">
           <Input
-            label="Title"
+            label="Название"
             value={editor.title}
             onChange={(event) => setEditor((current) => ({ ...current, title: event.target.value }))}
-            placeholder={scope === "official" ? "Diagnose GMV delta" : "Weekly retention review"}
+            placeholder={scope === "official" ? "Разберите падение GMV" : "Еженедельный разбор удержания"}
           />
           <Input
-            label="Summary"
+            label="Краткое описание"
             value={editor.summary}
             onChange={(event) => setEditor((current) => ({ ...current, summary: event.target.value }))}
-            placeholder="One-line analyst-facing description"
+            placeholder="Краткое описание для аналитика"
           />
           <Textarea
-            label="Description"
+            label="Описание"
             value={editor.description}
             onChange={(event) => setEditor((current) => ({ ...current, description: event.target.value }))}
-            placeholder="What this workflow is for and how it should behave."
+            placeholder="Для чего нужен сценарий и как он должен работать"
             className="min-h-[96px]"
           />
           <Textarea
-            label="Prompt template"
+            label="Шаблон запроса"
             value={editor.promptTemplate}
             onChange={(event) => setEditor((current) => ({ ...current, promptTemplate: event.target.value }))}
-            placeholder={"Use {{metric_name}} and {{time_window}} placeholders."}
+            placeholder="Используйте подстановки {{metric_name}} и {{time_window}}"
             className="min-h-[168px] font-mono text-[13px]"
           />
           <Input
-            label="Parameters"
+            label="Параметры"
             value={editor.parameterNames}
             onChange={(event) => setEditor((current) => ({ ...current, parameterNames: event.target.value }))}
             placeholder="metric_name, time_window, segment"
           />
-          <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-[#22324d] bg-[#09111f]/75 px-4 py-3 text-sm text-[#c7d8f4]">
+          <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-border-strong bg-surface/75 px-4 py-3 text-sm text-primary">
             <label className="inline-flex items-center gap-2">
               <input
                 type="checkbox"
@@ -188,7 +189,7 @@ export function ScenarioEditorModal({
                   setEditor((current) => ({ ...current, allowRunSql: event.target.checked }))
                 }
               />
-              Allow SQL execution
+              Разрешить выполнение SQL
             </label>
             <label className="inline-flex items-center gap-2">
               <input
@@ -201,7 +202,7 @@ export function ScenarioEditorModal({
                   }))
                 }
               />
-              Published
+              Опубликован
             </label>
           </div>
         </div>
@@ -212,9 +213,9 @@ export function ScenarioEditorModal({
             variant="ghost"
             size="sm"
             onClick={onClose}
-            className="border border-[#24344f] bg-[#0b1322] text-[#d7e6ff] hover:bg-[#132033]"
+            className="border border-border-strong bg-surface text-primary hover:bg-elevated"
           >
-            Cancel
+            Отмена
           </Button>
           <Button
             type="button"
@@ -224,7 +225,7 @@ export function ScenarioEditorModal({
             disabled={saving || !editor.title.trim() || !editor.summary.trim() || !editor.promptTemplate.trim()}
             className="gap-2"
           >
-            {saving ? "Saving..." : scenario ? "Save changes" : "Create scenario"}
+            {saving ? "Сохранение…" : scenario ? "Сохранить изменения" : "Создать сценарий"}
           </Button>
         </div>
       </div>

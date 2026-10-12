@@ -6,6 +6,7 @@ from rhetorica_backend.contracts import (
     MattermostConnectorItem,
     UpsertMattermostConnectorRequest,
 )
+from rhetorica_backend.infra.postgres.agent_repository import AgentProfileRepository
 from rhetorica_backend.infra.postgres.mattermost_connector_repository import (
     MattermostConnectorRepository,
 )
@@ -29,6 +30,13 @@ def _repository() -> MattermostConnectorRepository:
     return MattermostConnectorRepository(db=db_runtime)
 
 
+@lru_cache(maxsize=1)
+def _agent_repository() -> AgentProfileRepository:
+    db_runtime = DatabaseRuntime(settings.database_url)
+    db_runtime.create_schema()
+    return AgentProfileRepository(db=db_runtime)
+
+
 @router.get("", response_model=list[MattermostConnectorItem])
 def list_mattermost_connectors(
     workspace_id: str = Query(default="default", min_length=1),
@@ -41,6 +49,7 @@ def list_mattermost_connectors(
 def upsert_mattermost_connector(
     payload: UpsertMattermostConnectorRequest,
 ) -> MattermostConnectorItem:
+    _validate_agent(payload)
     try:
         return _repository().upsert(payload)
     except IntegrityError as exc:
@@ -54,6 +63,7 @@ def update_mattermost_connector(
     workspace_id: str = Query(default="default", min_length=1),
 ) -> MattermostConnectorItem:
     update_payload = payload.model_copy(update={"workspace_id": workspace_id})
+    _validate_agent(update_payload)
     try:
         updated = _repository().update(
             connector_id=connector_id,
@@ -74,3 +84,15 @@ def delete_mattermost_connector(
 ) -> DeleteConnectorResponse:
     deleted = _repository().delete(connector_id=connector_id, workspace_id=workspace_id)
     return DeleteConnectorResponse(connector_id=connector_id, deleted=deleted)
+
+
+def _validate_agent(payload: UpsertMattermostConnectorRequest) -> None:
+    if payload.agent_id is None:
+        return
+    agent = _agent_repository().get(
+        agent_id=payload.agent_id,
+        workspace_id=payload.workspace_id,
+        active_only=True,
+    )
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent_not_found")

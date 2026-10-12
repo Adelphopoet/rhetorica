@@ -9,8 +9,11 @@ from rhetorica_backend.contracts.chat import (
     OptimizationTrace,
 )
 from rhetorica_backend.contracts.execution import ExecuteSqlResponse, QueryPreview
+from rhetorica_backend.contracts.files import FileArtifactRef
+from rhetorica_backend.contracts.visualization import VisualizationSpec
 from rhetorica_backend.domain.chat.orchestration.response_assembly import (
     AssembledChatTurn,
+    ChatHistoryPersistenceService,
     ChatResponseAssembler,
 )
 from rhetorica_backend.domain.results.analysis_document_builder import (
@@ -67,7 +70,7 @@ def test_response_assembler_persists_runtime_context_inside_capability_trace() -
             evidence=[],
             claim_evidence_links=[],
             uncertainty_flags=[],
-            capability_trace=CapabilityTrace(available_tools=["fetch_metadata_tables"]),
+            capability_trace=CapabilityTrace(available_tools=["catalog__tables"]),
             optimization_trace=OptimizationTrace(),
             execution=None,
             analysis_document=None,
@@ -82,6 +85,154 @@ def test_response_assembler_persists_runtime_context_inside_capability_trace() -
     assert saved_messages[1]["capability_trace"]["runtime_context"] == {
         "metadata_table_columns": {"dm.orders": ["order_id"]}
     }
+
+
+def test_response_assembler_persists_visualization_and_output_file_links() -> None:
+    saved_messages: list[dict[str, object]] = []
+    attached_files: list[dict[str, object]] = []
+
+    def save_message(**kwargs):
+        saved_messages.append(kwargs)
+        role = kwargs["role"]
+        return SimpleNamespace(id=f"{role}-1")
+
+    visualization = VisualizationSpec.model_validate({
+        "version": "v2",
+        "kind": "line",
+        "title": "Net Revenue и GMV",
+        "data_source": {"execution_id": "exec-1", "row_count": 7},
+        "encoding": {"x": "dt", "y": ["net_revenue_mln", "gmv_mln"]},
+        "rationale": {"why_kind": "Динамика по дням"},
+    })
+    published_file = FileArtifactRef(
+        id="artifact-1",
+        filename="net_revenue_gmv.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=6800,
+        kind="sandbox_output",
+        sha256="0" * 64,
+    )
+    persistence = ChatHistoryPersistenceService(
+        conversation_manager=SimpleNamespace(
+            save_message=save_message,
+            attach_files_to_message=lambda **kwargs: attached_files.append(kwargs),
+        )
+    )
+
+    assistant_message_id = persistence.save_turn(
+        conversation_id="conv-1",
+        request=ChatAskRequest(question="Покажи график и файл"),
+        turn=AssembledChatTurn(
+            answer="Готово",
+            generated_sql=None,
+            selected_database_connector=None,
+            metadata_sources=[],
+            context_tables=[],
+            runtime_context={},
+            claims=[],
+            evidence=[],
+            claim_evidence_links=[],
+            uncertainty_flags=[],
+            capability_trace=CapabilityTrace(),
+            optimization_trace=OptimizationTrace(),
+            execution=None,
+            analysis_document=None,
+            visualization=visualization,
+            files=[published_file],
+        ),
+    )
+
+    assert assistant_message_id == "assistant-1"
+    assert saved_messages[1]["visualization_spec"] == visualization.model_dump(mode="json")
+    assert attached_files == [
+        {
+            "artifact_ids": ["artifact-1"],
+            "message_id": "assistant-1",
+            "conversation_id": "conv-1",
+            "relation": "output",
+        }
+    ]
+
+
+def test_response_assembler_persists_agent_trace_when_runtime_context_is_empty() -> None:
+    saved_messages: list[dict[str, object]] = []
+
+    def save_message(**kwargs):
+        saved_messages.append(kwargs)
+        if kwargs["role"] == "assistant":
+            return SimpleNamespace(id="assistant-1")
+        return SimpleNamespace(id="user-1")
+
+    assembler = ChatResponseAssembler(
+        conversation_manager=SimpleNamespace(save_message=save_message),
+        visualization_planner=VisualizationPlanner(),
+        analysis_document_builder=AnalysisDocumentBuilder(VisualizationPlanner()),
+    )
+
+    assistant_message_id = assembler.save_to_history(
+        conversation_id="conv-1",
+        request=ChatAskRequest(
+            question="привет кто ты?",
+            workspace_id="ws-1",
+            agent_id="agent-1",
+            agent_prompt="Answer as Foodtech analyst.",
+            llm_connector_name="example-llm",
+        ),
+        turn=AssembledChatTurn(
+            answer="Привет.",
+            generated_sql=None,
+            selected_database_connector=None,
+            metadata_sources=[],
+            context_tables=[],
+            runtime_context={},
+            claims=[],
+            evidence=[],
+            claim_evidence_links=[],
+            uncertainty_flags=[],
+            capability_trace=CapabilityTrace(),
+            optimization_trace=OptimizationTrace(),
+            execution=None,
+            analysis_document=None,
+            visualization=None,
+            warnings=[],
+        ),
+    )
+
+    assert assistant_message_id == "assistant-1"
+    assert saved_messages[0]["agent_id"] == "agent-1"
+    assert saved_messages[1]["agent_id"] == "agent-1"
+    assert saved_messages[1]["capability_trace"]["runtime_context"] == {
+        "agent": {
+            "id": "agent-1",
+            "has_prompt": True,
+            "llm_connector_name": "example-llm",
+        }
+    }
+
+
+def test_response_assembler_persists_external_source_provenance() -> None:
+    saved_messages: list[dict[str, object]] = []
+
+    def save_message(**kwargs):
+        saved_messages.append(kwargs)
+        return SimpleNamespace(id="user-1")
+
+    persistence = ChatHistoryPersistenceService(
+        conversation_manager=SimpleNamespace(save_message=save_message)
+    )
+
+    persistence.save_user_message(
+        conversation_id="conv-1",
+        request=ChatAskRequest(
+            question="What happened?",
+            workspace_id="ws-1",
+            source_provider="mattermost",
+            source_message_id="post-42",
+        ),
+    )
+
+    assert saved_messages[0]["source_provider"] == "mattermost"
+    assert saved_messages[0]["source_message_id"] == "post-42"
 
 
 def test_select_connector_name_prefers_payload_selected_connector() -> None:

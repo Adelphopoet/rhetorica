@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from hashlib import sha256
 from uuid import uuid4
 
 from rhetorica_backend.contracts.connectors import ConnectorItem, UpsertConnectorRequest
@@ -28,6 +29,7 @@ class ConnectorRepository:
             )
             row = session.execute(stmt).scalar_one_or_none()
             if row is None:
+                is_new = True
                 row = ConnectorConfigOrm(
                     id=str(uuid4()),
                     workspace_id=request.workspace_id,
@@ -40,15 +42,18 @@ class ConnectorRepository:
                     port=request.connection.port,
                     username=request.connection.username,
                     password=request.connection.password,
+                    usage_description=request.connection.usage_description,
                     database=request.connection.database,
                     catalog=request.connection.catalog,
                     schema_name=request.connection.schema_name,
                     secure=request.connection.secure,
                     verify=request.connection.verify,
                     extra_settings=request.connection.extra_settings,
+                    extra_credential_secret_refs={},
                 )
                 session.add(row)
             else:
+                is_new = False
                 row.updated_at = now
                 row.is_active = request.is_active
                 row.engine = request.connection.engine
@@ -56,12 +61,22 @@ class ConnectorRepository:
                 row.port = request.connection.port
                 row.username = request.connection.username
                 row.password = request.connection.password or row.password
+                row.usage_description = request.connection.usage_description
                 row.database = request.connection.database
                 row.catalog = request.connection.catalog
                 row.schema_name = request.connection.schema_name
                 row.secure = request.connection.secure
                 row.verify = request.connection.verify
                 row.extra_settings = request.connection.extra_settings
+
+            requested_extra_credentials = request.connection.extra_credentials
+            if request.connection.engine != "trino":
+                requested_extra_credentials = {}
+            self._sync_extra_credentials(
+                row,
+                requested=requested_extra_credentials,
+                is_new=is_new,
+            )
 
             if request.connection.password is not None:
                 secret_ref = row.password_secret_ref or self._password_secret_ref(
@@ -101,12 +116,21 @@ class ConnectorRepository:
             row.port = request.connection.port
             row.username = request.connection.username
             row.password = request.connection.password or row.password
+            row.usage_description = request.connection.usage_description
             row.database = request.connection.database
             row.catalog = request.connection.catalog
             row.schema_name = request.connection.schema_name
             row.secure = request.connection.secure
             row.verify = request.connection.verify
             row.extra_settings = request.connection.extra_settings
+            requested_extra_credentials = request.connection.extra_credentials
+            if request.connection.engine != "trino":
+                requested_extra_credentials = {}
+            self._sync_extra_credentials(
+                row,
+                requested=requested_extra_credentials,
+                is_new=False,
+            )
             if request.connection.password is not None:
                 secret_ref = row.password_secret_ref or self._password_secret_ref(
                     workspace_id=workspace_id,
@@ -128,14 +152,15 @@ class ConnectorRepository:
             session.refresh(row)
             return self._to_contract(row)
 
-    def list(self, workspace_id: str, limit: int) -> list[ConnectorItem]:
+    def list(self, workspace_id: str, limit: int | None) -> list[ConnectorItem]:
         with self._db.session() as session:
             stmt = (
                 select(ConnectorConfigOrm)
                 .where(ConnectorConfigOrm.workspace_id == workspace_id)
                 .order_by(ConnectorConfigOrm.updated_at.desc())
-                .limit(limit)
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             rows = session.execute(stmt).scalars().all()
 
         return [self._to_contract(row) for row in rows]
@@ -172,12 +197,14 @@ class ConnectorRepository:
             port=row.port,
             username=row.username,
             password=self._resolve_password(row),
+            usage_description=row.usage_description,
             database=row.database,
             catalog=row.catalog,
             schema=row.schema_name,
             secure=row.secure,
             verify=row.verify,
             extra_settings=row.extra_settings,
+            extra_credentials=self._resolve_extra_credentials(row),
         )
 
     def delete(self, connector_id: str, workspace_id: str) -> bool:
@@ -186,6 +213,8 @@ class ConnectorRepository:
             if row is None or row.workspace_id != workspace_id:
                 return False
             self._delete_secret(row.workspace_id, row.password_secret_ref)
+            for secret_ref in (row.extra_credential_secret_refs or {}).values():
+                self._delete_secret(row.workspace_id, secret_ref)
             session.delete(row)
             session.commit()
             return True
@@ -198,12 +227,14 @@ class ConnectorRepository:
             port=row.port,
             username=row.username,
             password=None,
+            usage_description=row.usage_description,
             database=row.database,
             catalog=row.catalog,
             schema=row.schema_name,
             secure=row.secure,
             verify=row.verify,
             extra_settings=row.extra_settings,
+            extra_credentials=dict.fromkeys(sorted((row.extra_credential_secret_refs or {}).keys())),
         )
         return ConnectorItem(
             id=row.id,
@@ -212,6 +243,7 @@ class ConnectorRepository:
             is_active=row.is_active,
             connection=connection,
             has_password=bool(row.password_secret_ref or row.password),
+            has_extra_credentials=bool(row.extra_credential_secret_refs),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -226,6 +258,55 @@ class ConnectorRepository:
                 return password
         return row.password
 
+    def _resolve_extra_credentials(self, row: ConnectorConfigOrm) -> dict[str, str | None]:
+        resolved: dict[str, str | None] = {}
+        for name, secret_ref in sorted((row.extra_credential_secret_refs or {}).items()):
+            value = self._secret_store.get_secret(
+                workspace_id=row.workspace_id,
+                secret_key=secret_ref,
+            )
+            if value is None:
+                raise SecretStoreError(f"connector_extra_credential_missing:{name}")
+            resolved[name] = value
+        return resolved
+
+    def _sync_extra_credentials(
+        self,
+        row: ConnectorConfigOrm,
+        *,
+        requested: dict[str, str | None] | None,
+        is_new: bool,
+    ) -> None:
+        if requested is None:
+            return
+
+        current_refs = dict(row.extra_credential_secret_refs or {})
+        next_refs: dict[str, str] = {}
+        for name, value in requested.items():
+            secret_ref = current_refs.get(name)
+            if value is None:
+                if is_new or secret_ref is None:
+                    raise ValueError(f"extra_credential_value_required:{name}")
+                next_refs[name] = secret_ref
+                continue
+
+            if secret_ref is None:
+                secret_ref = self._extra_credential_secret_ref(
+                    workspace_id=row.workspace_id,
+                    connector_id=row.id,
+                    credential_name=name,
+                )
+            self._secret_store.set_secret(
+                workspace_id=row.workspace_id,
+                secret_key=secret_ref,
+                value=value,
+            )
+            next_refs[name] = secret_ref
+
+        for name in current_refs.keys() - next_refs.keys():
+            self._delete_secret(row.workspace_id, current_refs[name])
+        row.extra_credential_secret_refs = next_refs
+
     def _delete_secret(self, workspace_id: str, secret_ref: str | None) -> None:
         if not secret_ref:
             return
@@ -237,3 +318,12 @@ class ConnectorRepository:
     @staticmethod
     def _password_secret_ref(workspace_id: str, connector_id: str) -> str:
         return f"connector/{workspace_id}/{connector_id}/password"
+
+    @staticmethod
+    def _extra_credential_secret_ref(
+        workspace_id: str,
+        connector_id: str,
+        credential_name: str,
+    ) -> str:
+        digest = sha256(credential_name.encode("utf-8")).hexdigest()[:16]
+        return f"connector/{workspace_id}/{connector_id}/extra_credential/{digest}"

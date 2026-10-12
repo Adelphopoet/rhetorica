@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,14 +17,19 @@ class ChatSettings(BaseSettings):
     )
 
     # LLM tool orchestration
-    max_iterations: int = 100  # Maximum tool orchestration iterations
+    max_iterations: int = 100  # Maximum LLM tool-orchestration turns
     default_message_limit: int = 20  # Default conversation history message limit
-    max_context_tables: int = 20  # Maximum context tables to include
-    max_metadata_connectors: int = 100  # Maximum metadata connectors to fetch
-    max_db_connectors: int = 500  # Maximum database connectors to fetch
+    context_compaction_enabled: bool = True
+    context_compaction_trigger_ratio: float = Field(default=0.8, gt=0, lt=1)
 
     # HTTP timeouts
-    llm_request_timeout: float = 45.0  # Timeout for LLM API requests
+    llm_request_timeout: float = 300.0  # Timeout for LLM API requests
+    tool_execution_timeout: float = 60.0  # Timeout for a single tool call
+
+    # Conversation-scoped raw tool artifacts. Promoted evidence is retained separately.
+    tool_artifact_ttl_hours: int = 168
+    tool_artifact_max_chars: int = 500_000
+    tool_artifact_max_records_per_conversation: int = 100
 
     # TLS settings
     verify_tls: bool = True  # Verify TLS certificates for LLM requests
@@ -49,8 +55,3 @@ def get_max_iterations() -> int:
 def get_message_limit() -> int:
     """Get default conversation message limit."""
     return get_chat_settings().default_message_limit
-
-
-def get_max_context_tables() -> int:
-    """Get maximum context tables."""
-    return get_chat_settings().max_context_tables

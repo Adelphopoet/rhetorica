@@ -9,10 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from rhetorica_api.app.identity import resolve_current_user
 from rhetorica_api.app.main import create_app
-from rhetorica_api.app.routes import (
-    confluence_connectors as confluence_connector_routes,
-)
 from rhetorica_api.app.routes import (
     connectors as connector_routes,
 )
@@ -21,9 +19,6 @@ from rhetorica_api.app.routes import (
 )
 from rhetorica_api.app.routes import (
     llm_connectors as llm_connector_routes,
-)
-from rhetorica_api.app.routes import (
-    openmetadata_connectors as openmetadata_connector_routes,
 )
 from rhetorica_api.app.settings import settings
 
@@ -69,8 +64,6 @@ def _client(tmp_path: Path, fake_celery: _FakeCeleryApp) -> TestClient:
         clear_celery_cache()
     connector_routes._repository.cache_clear()
     llm_connector_routes._repository.cache_clear()
-    confluence_connector_routes._repository.cache_clear()
-    openmetadata_connector_routes._repository.cache_clear()
     execution_routes._celery_app = lambda: fake_celery  # type: ignore[assignment]
     _, runtime = execution_routes._runtime()
     runtime.create_schema()
@@ -95,9 +88,7 @@ class TestExecuteSqlSecurityValidation:
 
         assert response.status_code == 422
 
-    def test_external_contract_does_not_accept_connection_field(
-        self, tmp_path: Path
-    ) -> None:
+    def test_external_contract_does_not_accept_connection_field(self, tmp_path: Path) -> None:
         """POST with 'connection' in body returns 422.
 
         The ExternalSqlExecutionRequest contract does not have a connection field,
@@ -211,9 +202,7 @@ class TestConnectorResolution:
         payload = response.json()
         assert payload["status"] == "blocked"
 
-    def test_execute_sql_without_connector_name_uses_first_available(
-        self, tmp_path: Path
-    ) -> None:
+    def test_execute_sql_without_connector_name_uses_first_available(self, tmp_path: Path) -> None:
         """When no connector_name specified, uses first available connector."""
         client = _client(tmp_path, _FakeCeleryApp())
 
@@ -325,6 +314,7 @@ class TestActorIdBinding:
         """Actor ID flows through submit -> service -> repository."""
         fake_celery = _FakeCeleryApp()
         client = _client(tmp_path, fake_celery)
+        owner_id = resolve_current_user("default").id
 
         # Create a connector
         client.post(
@@ -346,7 +336,7 @@ class TestActorIdBinding:
             "/v1/sql/executions",
             json={
                 "sql": "SELECT 1",
-                "actor_id": "user-abc-123",
+                "actor_id": owner_id,
             },
         )
 
@@ -356,15 +346,15 @@ class TestActorIdBinding:
         # Verify actor_id is persisted
         history = client.get(
             f"/v1/sql/executions/{execution_id}",
-            params={"actor_id": "user-abc-123"},
         )
         assert history.status_code == 200
-        assert history.json()["history"]["actor_id"] == "user-abc-123"
+        assert history.json()["history"]["actor_id"] == owner_id
 
-    def test_execution_detail_requires_actor_id_for_own_record(self, tmp_path: Path) -> None:
-        """Actor can see their own execution record with matching actor_id."""
+    def test_execution_detail_uses_authenticated_owner(self, tmp_path: Path) -> None:
+        """Owner can read their execution without a client-supplied actor id."""
         fake_celery = _FakeCeleryApp()
         client = _client(tmp_path, fake_celery)
+        owner_id = resolve_current_user("default").id
 
         # Create a connector
         client.post(
@@ -386,18 +376,14 @@ class TestActorIdBinding:
             "/v1/sql/executions",
             json={
                 "sql": "SELECT 1",
-                "actor_id": "owner-user",
+                "actor_id": owner_id,
             },
         )
         execution_id = response.json()["execution_id"]
 
-        # Owner can access with matching actor_id
-        detail = client.get(
-            f"/v1/sql/executions/{execution_id}",
-            params={"actor_id": "owner-user"},
-        )
+        detail = client.get(f"/v1/sql/executions/{execution_id}")
         assert detail.status_code == 200
-        assert detail.json()["history"]["actor_id"] == "owner-user"
+        assert detail.json()["history"]["actor_id"] == owner_id
 
     def test_execution_detail_rejected_for_foreign_actor(self, tmp_path: Path) -> None:
         """Actor cannot see another user's execution record."""
@@ -429,16 +415,16 @@ class TestActorIdBinding:
         )
         execution_id = response.json()["execution_id"]
 
-        # Another user cannot access with different actor_id
+        # Supplying the stored actor id cannot spoof authenticated ownership.
         detail = client.get(
             f"/v1/sql/executions/{execution_id}",
-            params={"actor_id": "other-user"},
+            params={"actor_id": "owner-user-2"},
         )
         assert detail.status_code == 403
         assert "Access denied" in detail.json()["detail"]
 
     def test_execution_detail_requires_auth(self, tmp_path: Path) -> None:
-        """Request without actor_id returns 403 when execution has actor_id set."""
+        """Authenticated identity cannot read a foreign protected execution."""
         fake_celery = _FakeCeleryApp()
         client = _client(tmp_path, fake_celery)
 
@@ -467,10 +453,33 @@ class TestActorIdBinding:
         )
         execution_id = response.json()["execution_id"]
 
-        # Request without actor_id should fail (access denied since execution has actor_id)
         detail = client.get(f"/v1/sql/executions/{execution_id}")
         assert detail.status_code == 403
         assert "Access denied" in detail.json()["detail"]
+
+    def test_legacy_execution_without_actor_remains_readable(self, tmp_path: Path) -> None:
+        fake_celery = _FakeCeleryApp()
+        client = _client(tmp_path, fake_celery)
+        client.post(
+            "/v1/admin/connectors",
+            json={
+                "name": "legacy-execution-connector",
+                "workspace_id": "default",
+                "connection": {
+                    "engine": "clickhouse",
+                    "host": "localhost",
+                    "port": 8123,
+                    "username": "default",
+                    "database": "default",
+                },
+            },
+        )
+        response = client.post("/v1/sql/executions", json={"sql": "SELECT 1"})
+
+        detail = client.get(f"/v1/sql/executions/{response.json()['execution_id']}")
+
+        assert detail.status_code == 200
+        assert detail.json()["history"]["actor_id"] is None
 
     def test_list_filtered_by_actor_id(self, tmp_path: Path) -> None:
         """List returns only actor's records when actor_id is specified."""

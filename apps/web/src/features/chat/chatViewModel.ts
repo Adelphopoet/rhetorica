@@ -10,13 +10,12 @@ import type {
 import type {
   AnswerClaim,
   AnswerEvidence,
-  AnalysisCheckpointDigest,
-  AnalysisPlan,
-  AnalysisWorkerResult,
   CapabilityTrace,
   ClaimEvidenceLink,
   ClarificationRequest,
 } from "./streamingTypes";
+import { DISPLAY_TIME_ZONE } from "@/lib/dateTime";
+import type { FileArtifactRef } from "@/features/files/fileApi";
 
 export type ChatFeedbackValue = "useful" | "wrong" | "unsafe" | "incomplete";
 
@@ -27,6 +26,11 @@ export type FeedbackReason =
   | "incomplete"
   | "bad_chart"
   | "other";
+
+export type ChatFeedbackDetails = {
+  whatWentWrong?: string | null;
+  expectedAnswer?: string | null;
+};
 
 export type ChatDeliveryState =
   | "idle"
@@ -72,12 +76,10 @@ export type ChatAskResponse = {
   execution: ExecuteSqlResponse | null;
   analysis_document: AnalysisDocument | null;
   visualization: VisualizationSpec | null;
-  analysis_plan?: AnalysisPlan | null;
-  worker_results?: AnalysisWorkerResult[];
-  checkpoint_digest?: AnalysisCheckpointDigest | null;
   warnings: string[];
   cancelled?: boolean;
   clarification_request?: ClarificationRequest | null;
+  files?: FileArtifactRef[];
 };
 
 export type ChatMessageViewModel = {
@@ -86,17 +88,18 @@ export type ChatMessageViewModel = {
   role: "user" | "assistant";
   text: string;
   payload?: ChatAskResponse;
-  analysisPlan?: AnalysisPlan | null;
-  checkpointDigest?: AnalysisCheckpointDigest | null;
   feedback?: ChatFeedbackValue | null;
   feedbackReason?: FeedbackReason | null;
   feedbackComment?: string | null;
+  feedbackWhatWentWrong?: string | null;
+  feedbackExpectedAnswer?: string | null;
   timestamp: Date;
   thinkingBlocks?: ThinkingBlockEntry[];
   toolCalls?: ToolCallEntry[];
   executionStatuses?: ExecutionStatusEntry[];
   deliveryState: ChatDeliveryState;
   clarificationRequest?: ClarificationRequest | null;
+  files?: FileArtifactRef[];
 };
 
 export type ResultSurfaceViewModel = {
@@ -130,9 +133,6 @@ function dedupePreservingOrder(values: string[]): string[] {
 }
 
 const METADATA_TOOL_NAMES = new Set([
-  "fetch_metadata_tables",
-  "search_metadata_catalog",
-  "get_entity_details",
   "metadata_table_scoring",
 ]);
 
@@ -186,7 +186,13 @@ function mergeToolCallsWithSemanticGrounding(args: {
     .map((toolCall, index) => ({ toolCall, index }))
     .reverse()
     .find(({ toolCall }) => METADATA_TOOL_NAMES.has(toolCall.tool_name))?.index;
-  const summary = `Ranked ${candidates.length} table candidate${candidates.length === 1 ? "" : "s"}`;
+  const candidateWord =
+    candidates.length === 1
+      ? "кандидат"
+      : candidates.length < 5
+        ? "кандидата"
+        : "кандидатов";
+  const summary = `Ранжировано таблиц-кандидатов: ${candidates.length} ${candidateWord}`;
 
   if (typeof lastMetadataToolIndex === "number") {
     const mergedToolCalls = [...toolCalls];
@@ -239,12 +245,10 @@ export function buildChatAskResponse(event: DoneEvent, answer: string): ChatAskR
     execution: event.execution ?? null,
     analysis_document: event.analysis_document ?? null,
     visualization: event.visualization ?? null,
-    analysis_plan: event.analysis_plan ?? event.capability_trace?.runtime_context?.analysis_plan ?? null,
-    worker_results: event.worker_results ?? event.capability_trace?.runtime_context?.worker_results ?? [],
-    checkpoint_digest: event.checkpoint_digest ?? event.capability_trace?.runtime_context?.checkpoint_digest ?? null,
     warnings: dedupePreservingOrder(event.warnings),
     cancelled: event.cancelled ?? false,
     clarification_request: event.clarification_request ?? null,
+    files: event.files ?? [],
   };
 }
 
@@ -278,12 +282,12 @@ export function buildResultSurfaceViewModel(
   const hasAnalysisDocument = Boolean(payload?.analysis_document?.blocks?.length);
   const hasVisualization = Boolean(payload?.visualization && hasRows);
   const hasEvidence = Boolean(payload?.claims.length);
-  const connectorLabel = payload?.selected_database_connector ?? "Connector pending";
+  const connectorLabel = payload?.selected_database_connector ?? "Ожидание подключения";
   const rowCount = execution?.row_count ?? execution?.preview?.rows?.length ?? 0;
-  const durationLabel = execution?.duration_ms ? `${execution.duration_ms} ms` : "n/a";
+  const durationLabel = execution?.duration_ms ? `${execution.duration_ms} ms` : "н/д";
   const sourcesLabel = payload?.metadata_sources.length
     ? payload.metadata_sources.join(", ")
-    : "No semantic sources";
+    : "Нет семантических источников";
 
   let defaultTab: ResultSurfaceViewModel["defaultTab"] = "result";
   if (hasAnalysisDocument) {
@@ -341,7 +345,7 @@ export function formatExecutionTimestamp(timestamp: string): string {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    timeZone: "UTC",
+    timeZone: DISPLAY_TIME_ZONE,
   }).format(date);
 }
 
@@ -353,15 +357,15 @@ export function getExecutionPhaseLabel(statuses: ExecutionStatusEntry[]): string
 
   switch (latest.status) {
     case "queued":
-      return "Queued";
+      return "В очереди";
     case "running":
-      return "Running SQL";
+      return "Выполняется SQL";
     case "streaming_results":
-      return "Streaming results";
+      return "Поток результатов";
     case "done":
-      return "Execution complete";
+      return "Выполнение завершено";
     case "failed":
-      return "Execution failed";
+      return "Выполнение не удалось";
     default:
       return latest.status;
   }
@@ -381,12 +385,18 @@ export function mergeToolCallsWithOptimizationTrace(args: {
   const timestamp = args.timestamp?.toISOString();
   const summary = (() => {
     if (trace.applied) {
-      return `Applied optimizer rewrite${trace.rules_triggered.length ? ` via ${trace.rules_triggered.join(", ")}` : ""}`;
+      return `Применена оптимизация запроса${trace.rules_triggered.length ? `: ${trace.rules_triggered.join(", ")}` : ""}`;
     }
     if (trace.findings.length > 0) {
-      return `Advisory only: ${trace.findings.length} finding${trace.findings.length === 1 ? "" : "s"}`;
+      const findingWord =
+        trace.findings.length === 1
+          ? "замечание"
+          : trace.findings.length < 5
+            ? "замечания"
+            : "замечаний";
+      return `Только рекомендации: ${trace.findings.length} ${findingWord}`;
     }
-    return "Inspected SQL before execution";
+    return "SQL проверен перед выполнением";
   })();
   const optimizerArguments = {
     applied: trace.applied,

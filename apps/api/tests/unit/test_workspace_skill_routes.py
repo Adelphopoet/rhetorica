@@ -5,11 +5,9 @@ from pathlib import Path
 import httpx
 from fastapi.testclient import TestClient
 from rhetorica_api.app.main import create_app
-from rhetorica_api.app.routes import confluence_connectors as confluence_connector_routes
 from rhetorica_api.app.routes import connectors as connector_routes
 from rhetorica_api.app.routes import execution as execution_routes
 from rhetorica_api.app.routes import llm_connectors as llm_connector_routes
-from rhetorica_api.app.routes import openmetadata_connectors as openmetadata_connector_routes
 from rhetorica_api.app.routes import workspace_skills as workspace_skill_routes
 from rhetorica_api.app.settings import settings
 from rhetorica_backend.domain.workspace_skills.service import WorkspaceSkillService
@@ -30,8 +28,6 @@ def _client(tmp_path: Path, http_client: _HttpClientStub, monkeypatch) -> TestCl
     execution_routes._runtime.cache_clear()
     connector_routes._repository.cache_clear()
     llm_connector_routes._repository.cache_clear()
-    confluence_connector_routes._repository.cache_clear()
-    openmetadata_connector_routes._repository.cache_clear()
     workspace_skill_routes._service.cache_clear()
 
     runtime = DatabaseRuntime(settings.database_url)
@@ -48,15 +44,13 @@ def test_workspace_skill_crud(tmp_path: Path, monkeypatch) -> None:
     raw_source = "https://raw.githubusercontent.com/acme/playbooks/main/clickhouse/optimizer.md"
     client = _client(
         tmp_path,
-        _HttpClientStub(
-            {
-                raw_source: httpx.Response(
-                    200,
-                    headers={"content-type": "text/markdown; charset=utf-8"},
-                    content=b"# Join optimizer\nPush filters to scans.\n",
-                ),
-            }
-        ),
+        _HttpClientStub({
+            raw_source: httpx.Response(
+                200,
+                headers={"content-type": "text/markdown; charset=utf-8"},
+                content=b"# Join optimizer\nPush filters to scans.\n",
+            ),
+        }),
         monkeypatch,
     )
 
@@ -121,15 +115,13 @@ def test_workspace_skill_accepts_trino_engine_scope(tmp_path: Path, monkeypatch)
     )
     client = _client(
         tmp_path,
-        _HttpClientStub(
-            {
-                raw_source: httpx.Response(
-                    200,
-                    headers={"content-type": "text/markdown; charset=utf-8"},
-                    content=b"# Trino Best Practices\nReview Trino plans first.\n",
-                ),
-            }
-        ),
+        _HttpClientStub({
+            raw_source: httpx.Response(
+                200,
+                headers={"content-type": "text/markdown; charset=utf-8"},
+                content=b"# Trino Best Practices\nReview Trino plans first.\n",
+            ),
+        }),
         monkeypatch,
     )
 
@@ -153,6 +145,81 @@ def test_workspace_skill_accepts_trino_engine_scope(tmp_path: Path, monkeypatch)
     assert created["source_url"] == raw_source
 
 
+def test_workspace_skill_crud_manual_chat_instruction(tmp_path: Path, monkeypatch) -> None:
+    client = _client(tmp_path, _HttpClientStub({}), monkeypatch)
+
+    create_response = client.post(
+        "/v1/admin/skills",
+        json={
+            "name": "support-tone",
+            "workspace_id": "default",
+            "capability_family": "chat_instruction",
+            "engine_scope": "clickhouse",
+            "priority": 50,
+            "source_kind": "manual_markdown",
+            "content_markdown": "# Support tone\nAnswer briefly.\n",
+            "status": "active",
+            "visible_to_default_assistant": False,
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()
+    assert created["source_kind"] == "manual_markdown"
+    assert created["source_url"] is None
+    assert created["engine_scope"] == "any"
+    assert created["visible_to_default_assistant"] is False
+    assert created["title"] == "Support tone"
+    assert created["content_markdown"] == "# Support tone\nAnswer briefly.\n"
+
+    skill_id = created["id"]
+    update_response = client.put(
+        f"/v1/admin/skills/{skill_id}",
+        params={"workspace_id": "default"},
+        json={
+            "name": "support-tone-v2",
+            "workspace_id": "default",
+            "capability_family": "chat_instruction",
+            "engine_scope": "trino",
+            "priority": 60,
+            "source_kind": "manual_markdown",
+            "content_markdown": "# Support tone\nAsk one concise question.\n",
+            "status": "active",
+            "visible_to_default_assistant": True,
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["name"] == "support-tone-v2"
+    assert updated["engine_scope"] == "any"
+    assert updated["visible_to_default_assistant"] is True
+    assert updated["summary"] == "Ask one concise question."
+
+
+def test_workspace_skill_rejects_source_kind_payload_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _client(tmp_path, _HttpClientStub({}), monkeypatch)
+
+    response = client.post(
+        "/v1/admin/skills",
+        json={
+            "name": "bad-manual",
+            "workspace_id": "default",
+            "capability_family": "chat_instruction",
+            "engine_scope": "any",
+            "priority": 50,
+            "source_kind": "manual_markdown",
+            "source_url": "https://github.com/acme/playbooks/blob/main/skill.md",
+            "status": "active",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_workspace_skill_accepts_greenplum_engine_scope(tmp_path: Path, monkeypatch) -> None:
     raw_source = (
         "https://raw.githubusercontent.com/Adelphopoet/greenplum-best-practices-skill/main/"
@@ -160,15 +227,13 @@ def test_workspace_skill_accepts_greenplum_engine_scope(tmp_path: Path, monkeypa
     )
     client = _client(
         tmp_path,
-        _HttpClientStub(
-            {
-                raw_source: httpx.Response(
-                    200,
-                    headers={"content-type": "text/markdown; charset=utf-8"},
-                    content=b"# Greenplum Best Practices\nReview Greenplum evidence first.\n",
-                ),
-            }
-        ),
+        _HttpClientStub({
+            raw_source: httpx.Response(
+                200,
+                headers={"content-type": "text/markdown; charset=utf-8"},
+                content=b"# Greenplum Best Practices\nReview Greenplum evidence first.\n",
+            ),
+        }),
         monkeypatch,
     )
 
@@ -217,15 +282,13 @@ def test_workspace_skill_rejects_binary_payload(tmp_path: Path, monkeypatch) -> 
     raw_source = "https://raw.githubusercontent.com/acme/playbooks/main/clickhouse/optimizer.md"
     client = _client(
         tmp_path,
-        _HttpClientStub(
-            {
-                raw_source: httpx.Response(
-                    200,
-                    headers={"content-type": "application/octet-stream"},
-                    content=b"# nope\x00",
-                ),
-            }
-        ),
+        _HttpClientStub({
+            raw_source: httpx.Response(
+                200,
+                headers={"content-type": "application/octet-stream"},
+                content=b"# nope\x00",
+            ),
+        }),
         monkeypatch,
     )
 

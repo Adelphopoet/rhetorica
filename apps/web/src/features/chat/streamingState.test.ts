@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { applyStreamEvent, createEmptyIntermediateSteps, createInitialStreamingMessage } from "./streamingState";
-import type { ChunkEvent, RuntimeStateEvent, ToolCallEndEvent, ToolCallStartEvent } from "./streamingTypes";
+import type {
+  ChunkEvent,
+  ThinkingEvent,
+  ToolCallEndEvent,
+  ToolCallStartEvent,
+} from "./streamingTypes";
 
 describe("streamingState", () => {
   it("preserves markdown line breaks across streamed chunks", () => {
@@ -78,45 +83,27 @@ describe("streamingState", () => {
     });
   });
 
-  it("stores live analysis plan runtime updates before done", () => {
+  it("merges native reasoning deltas until the next run item", () => {
     const steps = createEmptyIntermediateSteps();
     let message = createInitialStreamingMessage(() => "assistant-3");
-
-    const runtimeState: RuntimeStateEvent = {
-      type: "runtime_state",
-      timestamp: "2026-04-04T12:52:00Z",
-      analysis_plan: {
-        plan_id: "plan-1",
-        goal: "Explain GMV drop",
-        status: "planned",
-        steps: [
-          {
-            id: "baseline",
-            title: "Build baseline",
-            status: "planned",
-            required_evidence: ["execution_result"],
-            evidence_ids: [],
-          },
-        ],
-        required_evidence: ["execution_result"],
-        open_questions: [],
-        warnings: [],
-      },
-      checkpoint_digest: {
-        run_id: "run-1",
-        plan_id: "plan-1",
-        status: "planned",
-        completed_step_ids: [],
-        evidence_ids: [],
-        warnings: [],
-      },
-      worker_results: [],
+    const first: ThinkingEvent = {
+      type: "thinking",
+      content: "Проверяю",
+      delta: true,
+      timestamp: "2026-08-31T12:13:51Z",
+    };
+    const second: ThinkingEvent = {
+      type: "thinking",
+      content: " метрику",
+      delta: true,
+      timestamp: "2026-08-31T12:13:52Z",
     };
 
-    message = applyStreamEvent(message, runtimeState, steps);
+    message = applyStreamEvent(message, first, steps);
+    message = applyStreamEvent(message, second, steps);
 
-    expect(message.analysisPlan?.steps[0]?.id).toBe("baseline");
-    expect(message.checkpointDigest?.status).toBe("planned");
-    expect(message.isStreaming).toBe(true);
+    expect(message.thinkingBlocks).toHaveLength(1);
+    expect(message.thinkingBlocks[0]?.content).toBe("Проверяю метрику");
   });
+
 });

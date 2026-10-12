@@ -13,7 +13,7 @@ interface ResultTableProps {
 export function ResultTable({
   columns,
   rows,
-  emptyMessage = "Execute a query to see results",
+  emptyMessage = "Выполните запрос, чтобы увидеть результаты",
 }: ResultTableProps) {
   if (!rows || rows.length === 0) {
     return (
@@ -22,8 +22,8 @@ export function ResultTable({
         animate={{ opacity: 1 }}
         className="flex flex-col items-center justify-center py-12 text-center"
       >
-        <TableIcon className="h-12 w-12 text-[#7484a3] mb-4" />
-        <p className="text-sm text-[#a9b8d4]">{emptyMessage}</p>
+        <TableIcon className="h-12 w-12 text-muted mb-4" />
+        <p className="text-sm text-secondary">{emptyMessage}</p>
       </motion.div>
     );
   }
@@ -33,7 +33,7 @@ export function ResultTable({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      className="overflow-auto rounded-lg border border-[#1f2a3f]"
+      className="overflow-auto rounded-lg border border-border"
     >
       <table className="w-full border-collapse min-w-[560px]">
         <thead>
@@ -41,7 +41,7 @@ export function ResultTable({
             {columns.map((column) => (
               <th
                 key={column}
-                className="sticky top-0 bg-[#0f1728] text-[#a9b8d4] font-semibold text-xs uppercase tracking-wider px-3 py-2 text-left border-b border-[#1f2a3f]"
+                className="sticky top-0 bg-elevated text-secondary font-semibold text-xs uppercase tracking-wider px-3 py-2 text-left border-b border-border"
               >
                 <div className="flex items-center gap-2">
                   {column}
@@ -58,15 +58,15 @@ export function ResultTable({
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               transition={{ duration: 0.2, delay: rowIndex * 0.03 }}
-              className="border-b border-[#1f2a3f] hover:bg-[#0f1728]/50 transition-colors"
+              className="border-b border-border hover:bg-elevated/50 transition-colors"
             >
               {row.map((value, colIndex) => (
                 <td
                   key={`cell-${rowIndex}-${colIndex}`}
-                  className="px-3 py-2 text-sm text-[#d6e2f8] font-mono"
+                  className="px-3 py-2 text-sm text-primary font-mono"
                 >
                   {value === null ? (
-                    <span className="text-[#7484a3] italic">NULL</span>
+                    <span className="text-muted italic">NULL</span>
                   ) : typeof value === "boolean" ? (
                     <Badge variant={value ? "success" : "danger"}>
                       {value.toString()}

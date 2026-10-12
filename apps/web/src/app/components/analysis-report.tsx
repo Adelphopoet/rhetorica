@@ -34,7 +34,7 @@ interface AnalysisReportProps {
 
 function ReportSkeleton() {
   return (
-    <div className="rounded-xl border border-[#1b2740] bg-[#09111e]/80 p-4">
+    <div className="rounded-xl border border-border bg-surface/80 p-4">
       <Skeleton className="h-4 w-40" />
       <Skeleton className="mt-4 h-52 w-full" />
     </div>
@@ -68,18 +68,18 @@ export function isDuplicateExecutiveSummaryBlock(
 
 function ReportMetricGrid({ block }: { block: AnalysisMetricGridBlock }) {
   return (
-    <section className="rounded-xl border border-[#1d2c46] bg-[#09111e]/78 p-3.5">
-      {block.title ? <h3 className="text-sm font-semibold text-[#edf3ff]">{block.title}</h3> : null}
-      {block.description ? <p className="mt-1 text-xs leading-6 text-[#8fa5c8]">{block.description}</p> : null}
+    <section className="rounded-xl border border-border bg-surface/[0.78] p-3.5">
+      {block.title ? <h3 className="text-sm font-semibold text-primary">{block.title}</h3> : null}
+      {block.description ? <p className="mt-1 text-xs leading-6 text-secondary">{block.description}</p> : null}
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {block.items.map((item) => (
-          <div key={`${item.label}-${item.value}`} className="min-w-0 rounded-lg border border-[#22324f] bg-[#0d1729]/86 px-3 py-2.5">
-            <p className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-[#7f93b4]">
+          <div key={`${item.label}-${item.value}`} className="min-w-0 rounded-lg border border-border-strong bg-surface/[0.86] px-3 py-2.5">
+            <p className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-secondary">
               {item.label}
             </p>
-            <p className="mt-1 break-words text-base font-semibold text-[#edf3ff]">{item.value}</p>
-            {item.delta ? <p className="mt-1 text-xs text-[#9ec6ff]">{item.delta}</p> : null}
-            {item.context ? <p className="mt-1 text-xs leading-5 text-[#8fa5c8]">{item.context}</p> : null}
+            <p className="mt-1 break-words text-base font-semibold text-primary">{item.value}</p>
+            {item.delta ? <p className="mt-1 text-xs text-accent">{item.delta}</p> : null}
+            {item.context ? <p className="mt-1 text-xs leading-5 text-secondary">{item.context}</p> : null}
           </div>
         ))}
       </div>
@@ -101,14 +101,14 @@ function ReportTextBlock({
       className={cn(
         "rounded-xl border p-3.5",
         tone === "critical"
-          ? "border-[#6a2b36] bg-[#180c12]/82"
+          ? "border-danger-border bg-purple-subtle/[0.82]"
           : tone === "warning"
-            ? "border-[#5c4a22] bg-[#17120b]/82"
-            : "border-[#1d2c46] bg-[#09111e]/78"
+            ? "border-warning-border bg-warning-subtle/[0.82]"
+            : "border-border bg-surface/[0.78]"
       )}
     >
-      <h3 className="text-sm font-semibold text-[#edf3ff]">{title}</h3>
-      <div className="mt-2 text-sm leading-7 text-[#d5e2fb]">
+      <h3 className="text-sm font-semibold text-primary">{title}</h3>
+      <div className="mt-2 text-sm leading-7 text-primary">
         <MarkdownMessage text={body} />
       </div>
     </section>
@@ -136,8 +136,8 @@ function ReportNarrativeNote({
   }
 
   return (
-    <section className="px-0.5 py-1 text-sm leading-7 text-[#c7d6ee]">
-      {title ? <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#7f93b4]">{title}</p> : null}
+    <section className="px-0.5 py-1 text-sm leading-7 text-primary">
+      {title ? <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-secondary">{title}</p> : null}
       <MarkdownMessage text={normalized} />
     </section>
   );
@@ -167,7 +167,7 @@ export function AnalysisReport({
   );
   const evidenceBadges = [
     meta?.connectorLabel,
-    typeof meta?.rowCount === "number" ? `${meta.rowCount} rows` : null,
+    typeof meta?.rowCount === "number" ? `${meta.rowCount} строк` : null,
     meta?.resultStatus,
     meta?.durationLabel,
     meta?.sourcesLabel,
@@ -211,17 +211,17 @@ export function AnalysisReport({
 
     if (block.kind === "section_header") {
       return (
-        <section key={`header-${index}`} className="border-t border-[#22314d]/70 pt-5 first:border-t-0 first:pt-1">
-          <h3 className="break-words text-lg font-semibold tracking-normal text-[#eef4ff]">
+        <section key={`header-${index}`} className="border-t border-border-strong/70 pt-5 first:border-t-0 first:pt-1">
+          <h3 className="break-words text-lg font-semibold tracking-normal text-primary">
             {block.title}
           </h3>
-          {block.description ? <p className="mt-1.5 text-sm leading-6 text-[#a8bbd8]">{block.description}</p> : null}
+          {block.description ? <p className="mt-1.5 text-sm leading-6 text-secondary">{block.description}</p> : null}
         </section>
       );
     }
 
     if (block.kind === "divider") {
-      return <div key={`divider-${index}`} className="h-px bg-[#1b2740]" />;
+      return <div key={`divider-${index}`} className="h-px bg-hover" />;
     }
 
     if (block.kind === "table") {
@@ -229,23 +229,23 @@ export function AnalysisReport({
       const visible = expandedTableBlocks[blockKey] ?? !block.preferred_hidden;
       const preview = block.preview ?? fallbackPreview;
       return (
-        <section key={blockKey} className="rounded-xl border border-[#1d2c46] bg-[#09111e]/78 p-3.5">
+        <section key={blockKey} className="rounded-xl border border-border bg-surface/[0.78] p-3.5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-[#edf3ff]">{block.title ?? "Drilldown rows"}</h3>
-              <p className="mt-1 text-xs leading-6 text-[#8fa5c8]">
-                {block.description ?? "Raw rows stay hidden until opened."}
+              <h3 className="text-sm font-semibold text-primary">{block.title ?? "Строки детализации"}</h3>
+              <p className="mt-1 text-xs leading-6 text-secondary">
+                {block.description ?? "Исходные строки скрыты, пока не открыты"}
               </p>
             </div>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="h-8 gap-1.5 rounded-full border border-[#23324e] bg-[#0d1729]/85 px-3"
+              className="h-8 gap-1.5 rounded-full border border-border-strong bg-surface/85 px-3"
               onClick={() => toggleTableBlock(blockKey)}
             >
               {visible ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-              {visible ? "Hide rows" : block.action_label ?? "Show rows"}
+              {visible ? "Скрыть строки" : block.action_label ?? "Показать строки"}
             </Button>
           </div>
           {visible ? (
@@ -254,7 +254,7 @@ export function AnalysisReport({
                 <LazyResultTable
                   columns={preview?.columns ?? block.columns ?? []}
                   rows={preview?.rows ?? []}
-                  emptyMessage="Rows are not available for this answer."
+                  emptyMessage="Строки результата для этого ответа недоступны"
                 />
               </Suspense>
             </div>
@@ -268,16 +268,16 @@ export function AnalysisReport({
 
   return (
     <div
-      aria-label="Analysis report"
+      aria-label="Отчёт об анализе"
       className={cn(
         "analysis-report mt-3 space-y-3",
         variant === "surface" ? "mt-0" : ""
       )}
     >
       {executiveSummary ? (
-        <section className="rounded-xl border border-[#1f3552] bg-[linear-gradient(180deg,rgba(11,21,36,0.92),rgba(8,14,25,0.9))] p-3.5">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#89b7ff]">Executive summary</p>
-          <div className="mt-2 text-sm leading-7 text-[#e6efff]">
+        <section className="rounded-xl border border-border-strong bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.92),rgb(var(--color-surface)/0.9))] p-3.5">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-accent">Краткое резюме</p>
+          <div className="mt-2 text-sm leading-7 text-primary">
             <MarkdownMessage text={executiveSummary} />
           </div>
         </section>
@@ -290,16 +290,16 @@ export function AnalysisReport({
           <LazyVisualizationChart spec={fallbackVisualization} preview={fallbackPreview} />
         </Suspense>
       ) : (
-        <div className="flex items-center gap-2 rounded-xl border border-dashed border-[#26334d] bg-[#0c1525]/70 px-3 py-3 text-sm text-[#8fa5c8]">
-          <AlertTriangle className="h-4 w-4 text-[#f1b45f]" />
-          Report blocks are not available for this answer.
+        <div className="flex items-center gap-2 rounded-xl border border-dashed border-border-strong bg-surface/70 px-3 py-3 text-sm text-secondary">
+          <AlertTriangle className="h-4 w-4 text-warning" />
+          Блоки отчёта для этого ответа недоступны.
         </div>
       )}
 
       {evidenceBadges.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
           {evidenceBadges.map((label) => (
-            <Badge key={label} variant="default" className="px-2.5 py-1 text-[11px] text-[#9db1d3]">
+            <Badge key={label} variant="default" className="px-2.5 py-1 text-[11px] text-secondary">
               {label}
             </Badge>
           ))}

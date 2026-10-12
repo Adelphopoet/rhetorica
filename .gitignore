@@ -27,16 +27,25 @@ coverage/
 htmlcov/
 
 # Tooling
+.idea/
 .cache/
 agents/.tmp/
-.claude/
-.opencode/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/openspec-*/
+!.claude/skills/openspec-*/SKILL.md
+.opencode/*
+!.opencode/skills/
+.opencode/skills/*
+!.opencode/skills/openspec-*/
+!.opencode/skills/openspec-*/SKILL.md
 opencode.json
 ops/opencode/
+celerybeat-schedule
 
 # slop
 .qwen
-.opencode
 
 # Local encrypted secrets
 .rhetorica_control_plane.db
@@ -44,5 +53,16 @@ ops/opencode/
 .rhetorica/secrets.enc.json.key
 .rhetorica/secrets.enc.json.lock
 .rhetorica/certs/
+.rhetorica/backups/
 sa_key.json
 kubeconfig*
+
+# rhetorica-kit собирается prebuild web (tools/agent-kit/build.sh)
+apps/web/public/install/
+
+# Generated self-hosted Monaco assets
+apps/web/public/vendor/monaco/
+
+# Personal Compose overrides and one-off migration helpers
+compose.scenarios.local.yaml
+.rhetorica/local-tools/

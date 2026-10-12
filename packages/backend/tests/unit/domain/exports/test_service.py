@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from io import BytesIO
 
+from PIL import Image
 from rhetorica_backend.contracts.execution import (
     ExecuteSqlResponse,
     ExecutionDetailResponse,
@@ -11,6 +13,19 @@ from rhetorica_backend.contracts.execution import (
 )
 from rhetorica_backend.domain.exports import AnalysisExportService
 from rhetorica_backend.infra.postgres.chat_repository import ChatMessageItem
+
+_TEST_PNG_BUFFER = BytesIO()
+Image.new("RGB", (16, 9), "#ffffff").save(_TEST_PNG_BUFFER, format="PNG")
+_TEST_PNG = _TEST_PNG_BUFFER.getvalue()
+
+
+class _StaticChartRenderer:
+    def render(self, request: object) -> bytes:
+        return _TEST_PNG
+
+
+def _service() -> AnalysisExportService:
+    return AnalysisExportService(chart_renderer=_StaticChartRenderer())
 
 
 def _assistant_message() -> ChatMessageItem:
@@ -22,7 +37,7 @@ def _assistant_message() -> ChatMessageItem:
         created_at=datetime(2026, 4, 4, 10, 0, tzinfo=UTC),
         generated_sql="select week, gmv from metrics.weekly_gmv",
         execution_id="exec-1",
-        metadata_sources=["dbt", "openmetadata"],
+        metadata_sources=["dbt", "mcp"],
         context_tables=["metrics.weekly_gmv"],
         claims=[
             {
@@ -109,7 +124,7 @@ def _execution_detail() -> ExecutionDetailResponse:
 
 
 def test_export_service_builds_bundle_from_snapshot() -> None:
-    service = AnalysisExportService()
+    service = _service()
 
     bundle = service.build_bundle(
         workspace_id="default",
@@ -126,7 +141,7 @@ def test_export_service_builds_bundle_from_snapshot() -> None:
 
 
 def test_export_service_renders_html_notebook_and_pdf() -> None:
-    service = AnalysisExportService()
+    service = _service()
     bundle = service.build_bundle(
         workspace_id="default",
         conversation_id="conv-1",
@@ -148,14 +163,16 @@ def test_export_service_renders_html_notebook_and_pdf() -> None:
 
 
 def test_export_service_renders_static_snapshots_for_rich_chart_kinds() -> None:
-    service = AnalysisExportService()
+    service = _service()
 
     for kind in ("histogram", "waterfall"):
         assistant = _assistant_message()
         assert assistant.visualization_spec is not None
         assistant.visualization_spec["version"] = "v2"
         assistant.visualization_spec["kind"] = kind
-        assistant.visualization_spec["family"] = "distribution" if kind == "histogram" else "composition"
+        assistant.visualization_spec["family"] = (
+            "distribution" if kind == "histogram" else "composition"
+        )
 
         bundle = service.build_bundle(
             workspace_id="default",
@@ -171,7 +188,7 @@ def test_export_service_renders_static_snapshots_for_rich_chart_kinds() -> None:
 
 
 def test_export_service_repairs_stale_visualization_and_renders_markdown_table() -> None:
-    service = AnalysisExportService()
+    service = _service()
     assistant = ChatMessageItem(
         message_id="msg-2",
         conversation_id="conv-1",

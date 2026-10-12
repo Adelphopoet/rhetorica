@@ -1,0 +1,16 @@
+{
+  "name": "rhetorica-kit",
+  "version": "0.1.1",
+  "description": "Данные через Rhetorica MCP плюс скилл аналитика, который копит базу знаний и пишет отчёты.",
+  "author": { "name": "Rhetorica contributors" },
+  "keywords": ["rhetorica", "clickhouse", "openmetadata", "analytics"],
+  "userConfig": {
+    "token": {
+      "type": "string",
+      "title": "Rhetorica API token",
+      "description": "Personal access token (rh_pat_…) из Rhetorica → Settings → API & MCP tokens, scopes mcp:read и mcp:execute.",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

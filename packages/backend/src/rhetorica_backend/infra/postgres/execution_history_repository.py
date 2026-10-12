@@ -9,10 +9,15 @@ from rhetorica_backend.contracts.execution import (
     ExecutionStatus,
     QueryPreview,
 )
+from rhetorica_backend.domain.execution.snapshots import SqlResultSnapshot
+from rhetorica_backend.infra.postgres.chat_models import (
+    ChatConversationOrm,
+    ChatMessageOrm,
+)
 from rhetorica_backend.infra.postgres.models import QueryExecutionHistoryOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from rhetorica_backend.sql_guard.models import SqlGuardViolation
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 
 
 class ExecutionHistoryRepository:
@@ -197,6 +202,8 @@ class ExecutionHistoryRepository:
         duration_ms: int | None,
         error_message: str | None,
         preview_payload: dict[str, object] | None = None,
+        snapshot: SqlResultSnapshot | None = None,
+        warnings: list[str] | None = None,
     ) -> None:
         with self._db.session() as session:
             row = session.get(QueryExecutionHistoryOrm, execution_id)
@@ -212,6 +219,18 @@ class ExecutionHistoryRepository:
             row.error_message = error_message
             if preview_payload is not None:
                 row.preview_payload = preview_payload
+            if warnings is not None:
+                row.warnings = warnings
+            if snapshot is not None:
+                row.snapshot_storage_key = snapshot.storage_key
+                row.snapshot_columns = list(snapshot.columns)
+                row.snapshot_row_count = snapshot.row_count
+                row.snapshot_size_bytes = snapshot.size_bytes
+                row.snapshot_sha256 = snapshot.sha256
+                row.snapshot_owner_user_id = snapshot.owner_user_id
+                row.snapshot_conversation_id = snapshot.conversation_id
+                row.snapshot_possibly_truncated = snapshot.possibly_truncated
+                row.snapshot_created_at = snapshot.created_at
             session.commit()
 
     def list_recent(
@@ -221,9 +240,8 @@ class ExecutionHistoryRepository:
         actor_id: str | None = None,
     ) -> list[ExecutionHistoryItem]:
         with self._db.session() as session:
-            stmt = (
-                select(QueryExecutionHistoryOrm)
-                .where(QueryExecutionHistoryOrm.workspace_id == workspace_id)
+            stmt = select(QueryExecutionHistoryOrm).where(
+                QueryExecutionHistoryOrm.workspace_id == workspace_id
             )
             if actor_id is not None:
                 stmt = stmt.where(QueryExecutionHistoryOrm.actor_id == actor_id)
@@ -238,6 +256,104 @@ class ExecutionHistoryRepository:
         if row is None:
             return None
         return self._to_contract(row)
+
+    def get_snapshot(self, execution_id: str) -> SqlResultSnapshot | None:
+        with self._db.session() as session:
+            row = session.get(QueryExecutionHistoryOrm, execution_id)
+        return self._snapshot_from_row(row) if row is not None else None
+
+    def list_snapshots_for_cleanup(
+        self,
+        *,
+        orphan_before: datetime,
+        limit: int = 100,
+    ) -> list[SqlResultSnapshot]:
+        """Return explicitly deleted or stale-unlinked snapshots for idempotent cleanup."""
+        from rhetorica_backend.infra.postgres.scenario_workflow_models import ScenarioExecutionOrm
+
+        conversation_exists = exists(
+            select(ChatConversationOrm.id).where(
+                ChatConversationOrm.id == QueryExecutionHistoryOrm.snapshot_conversation_id
+            )
+        )
+        message_exists = exists(
+            select(ChatMessageOrm.id).where(
+                ChatMessageOrm.execution_id == QueryExecutionHistoryOrm.execution_id
+            )
+        )
+        with self._db.session() as session:
+            rows = (
+                session.execute(
+                    select(QueryExecutionHistoryOrm)
+                    .where(
+                        QueryExecutionHistoryOrm.snapshot_storage_key.is_not(None),
+                        ~QueryExecutionHistoryOrm.execution_id.in_(
+                            select(ScenarioExecutionOrm.execution_id)
+                        ),
+                        or_(
+                            QueryExecutionHistoryOrm.snapshot_delete_pending.is_(True),
+                            ~conversation_exists,
+                            (QueryExecutionHistoryOrm.snapshot_created_at < orphan_before)
+                            & ~message_exists,
+                        ),
+                    )
+                    .order_by(QueryExecutionHistoryOrm.snapshot_created_at.asc())
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+        snapshots: list[SqlResultSnapshot] = []
+        for row in rows:
+            snapshot = self._snapshot_from_row(row)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return snapshots
+
+    def finish_snapshot_cleanup(self, execution_id: str) -> None:
+        with self._db.session() as session:
+            row = session.get(QueryExecutionHistoryOrm, execution_id)
+            if row is None:
+                return
+            row.snapshot_storage_key = None
+            row.snapshot_columns = None
+            row.snapshot_row_count = None
+            row.snapshot_size_bytes = None
+            row.snapshot_sha256 = None
+            row.snapshot_owner_user_id = None
+            row.snapshot_conversation_id = None
+            row.snapshot_possibly_truncated = None
+            row.snapshot_created_at = None
+            row.snapshot_delete_pending = False
+            row.updated_at = datetime.now(tz=UTC)
+            session.commit()
+
+    @staticmethod
+    def _snapshot_from_row(row: QueryExecutionHistoryOrm) -> SqlResultSnapshot | None:
+        if (
+            row.snapshot_storage_key is None
+            or row.snapshot_columns is None
+            or row.snapshot_row_count is None
+            or row.snapshot_size_bytes is None
+            or row.snapshot_sha256 is None
+            or row.snapshot_owner_user_id is None
+            or row.snapshot_conversation_id is None
+            or row.snapshot_created_at is None
+        ):
+            return None
+        return SqlResultSnapshot(
+            execution_id=row.execution_id,
+            workspace_id=row.workspace_id,
+            owner_user_id=row.snapshot_owner_user_id,
+            conversation_id=row.snapshot_conversation_id,
+            storage_key=row.snapshot_storage_key,
+            columns=tuple(row.snapshot_columns),
+            row_count=row.snapshot_row_count,
+            size_bytes=row.snapshot_size_bytes,
+            sha256=row.snapshot_sha256,
+            possibly_truncated=bool(row.snapshot_possibly_truncated),
+            created_at=row.snapshot_created_at,
+        )
 
     @staticmethod
     def _to_contract(row: QueryExecutionHistoryOrm) -> ExecutionHistoryItem:

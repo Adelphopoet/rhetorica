@@ -4,9 +4,6 @@ import type {
   ExecuteSqlResponse,
 } from "@/features/chat/chatViewModel";
 import type {
-  AnalysisCheckpointDigest,
-  AnalysisPlan,
-  AnalysisWorkerResult,
   ExecutionStatusEntry,
   ThinkingBlockEntry,
   ToolCallEntry,
@@ -18,6 +15,7 @@ export type ConversationMessage = {
   conversation_id: string;
   role: "user" | "assistant";
   content: string;
+  agent_id?: string | null;
   created_at: string;
   generated_sql: string | null;
   capability_trace?: ChatAskResponse["capability_trace"];
@@ -32,18 +30,21 @@ export type ConversationMessage = {
   selected_connector: string | null;
   analysis_document: ChatAskResponse["analysis_document"];
   visualization: ChatAskResponse["visualization"];
-  analysis_plan: ChatAskResponse["analysis_plan"];
-  worker_results: ChatAskResponse["worker_results"];
-  checkpoint_digest: ChatAskResponse["checkpoint_digest"];
   warnings: string[];
   feedback: ChatMessageViewModel["feedback"];
   feedback_updated_at: string | null;
+  feedback_reason?: ChatMessageViewModel["feedbackReason"];
+  feedback_comment?: ChatMessageViewModel["feedbackComment"];
+  feedback_what_went_wrong?: ChatMessageViewModel["feedbackWhatWentWrong"];
+  feedback_expected_answer?: ChatMessageViewModel["feedbackExpectedAnswer"];
+  files: ChatAskResponse["files"];
 };
 
 export type ConversationSummary = {
   id: string;
   workspace_id: string;
   title: string | null;
+  agent_id?: string | null;
   created_at: string;
   updated_at: string;
   message_count: number;
@@ -53,6 +54,7 @@ export type ConversationDetail = {
   id: string;
   workspace_id: string;
   title: string | null;
+  agent_id?: string | null;
   created_at: string;
   updated_at: string;
   messages: ConversationMessage[];
@@ -79,16 +81,6 @@ export type HydratedConversationThread = {
   messages: ChatMessageViewModel[];
   /** Assistant messages with execution_ids - for lazy loading their execution details */
   assistantExecutionIds: Array<{ messageId: string; executionId: string }>;
-};
-
-export type AnalysisRunState = {
-  conversation_id: string;
-  status: AnalysisCheckpointDigest["status"] | string;
-  checkpoint_digest: AnalysisCheckpointDigest | null;
-  analysis_plan: AnalysisPlan | null;
-  worker_results: AnalysisWorkerResult[];
-  resumable: boolean;
-  cancellable: boolean;
 };
 
 type CachedIntermediateSteps = {
@@ -176,7 +168,7 @@ export function conversationListQueryKey(workspaceId: string) {
 export function deriveConversationTitle(question: string): string {
   const compact = question.replace(/\s+/g, " ").trim();
   if (!compact) {
-    return "Untitled analysis";
+    return "Анализ без названия";
   }
 
   return compact.length > 80 ? `${compact.slice(0, 77)}...` : compact;
@@ -192,7 +184,7 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
       detail = await response.text();
     }
 
-    throw new Error(detail || `Request failed with status ${response.status}`);
+    throw new Error(detail || `Запрос завершился с ошибкой ${response.status}`);
   }
 
   return (await response.json()) as T;
@@ -216,7 +208,8 @@ export async function listConversations(
 
 export async function createConversation(
   workspaceId: string,
-  title: string
+  title: string,
+  agentId?: string | null
 ): Promise<ConversationSummary> {
   const response = await fetch("/api/chat/conversations", {
     method: "POST",
@@ -224,6 +217,7 @@ export async function createConversation(
     body: JSON.stringify({
       workspace_id: workspaceId,
       title,
+      agent_id: agentId ?? null,
     }),
   });
 
@@ -246,81 +240,6 @@ export async function removeConversation(conversationId: string): Promise<void> 
   });
 
   await parseJsonResponse<{ status: string }>(response);
-}
-
-export async function getAnalysisRunState(conversationId: string): Promise<AnalysisRunState | null> {
-  const response = await fetch(`/api/chat/conversations/${conversationId}/analysis-run`, {
-    cache: "no-store",
-  });
-
-  if (response.status === 404) {
-    return null;
-  }
-
-  return parseJsonResponse<AnalysisRunState>(response);
-}
-
-export async function resumeAnalysisRun(conversationId: string): Promise<AnalysisRunState> {
-  const response = await fetch(`/api/chat/conversations/${conversationId}/analysis-run/resume`, {
-    method: "POST",
-    cache: "no-store",
-  });
-  const action = await parseJsonResponse<{
-    conversation_id: string;
-    status: AnalysisRunState["status"];
-    checkpoint_digest: AnalysisCheckpointDigest | null;
-  }>(response);
-  return {
-    conversation_id: action.conversation_id,
-    status: action.status,
-    checkpoint_digest: action.checkpoint_digest,
-    analysis_plan: null,
-    worker_results: [],
-    resumable: false,
-    cancellable: action.status === "running",
-  };
-}
-
-export async function approveAnalysisRun(conversationId: string): Promise<AnalysisRunState> {
-  const response = await fetch(`/api/chat/conversations/${conversationId}/analysis-run/approve`, {
-    method: "POST",
-    cache: "no-store",
-  });
-  const action = await parseJsonResponse<{
-    conversation_id: string;
-    status: AnalysisRunState["status"];
-    checkpoint_digest: AnalysisCheckpointDigest | null;
-  }>(response);
-  return {
-    conversation_id: action.conversation_id,
-    status: action.status,
-    checkpoint_digest: action.checkpoint_digest,
-    analysis_plan: null,
-    worker_results: [],
-    resumable: action.status === "running",
-    cancellable: action.status === "running",
-  };
-}
-
-export async function cancelAnalysisRun(conversationId: string): Promise<AnalysisRunState> {
-  const response = await fetch(`/api/chat/conversations/${conversationId}/analysis-run/cancel`, {
-    method: "POST",
-    cache: "no-store",
-  });
-  const action = await parseJsonResponse<{
-    conversation_id: string;
-    status: AnalysisRunState["status"];
-    checkpoint_digest: AnalysisCheckpointDigest | null;
-  }>(response);
-  return {
-    conversation_id: action.conversation_id,
-    status: action.status,
-    checkpoint_digest: action.checkpoint_digest,
-    analysis_plan: null,
-    worker_results: [],
-    resumable: false,
-    cancellable: false,
-  };
 }
 
 /**
@@ -395,11 +314,9 @@ function buildStoredAssistantPayload(
     execution,
     analysis_document: message.analysis_document,
     visualization: message.visualization,
-    analysis_plan: message.analysis_plan ?? message.capability_trace?.runtime_context?.analysis_plan ?? null,
-    worker_results: message.worker_results ?? message.capability_trace?.runtime_context?.worker_results ?? [],
-    checkpoint_digest: message.checkpoint_digest ?? message.capability_trace?.runtime_context?.checkpoint_digest ?? null,
     warnings: message.warnings,
     cancelled: false,
+    files: message.files ?? [],
   };
 }
 
@@ -449,6 +366,10 @@ function mapConversationToMessages(
       text,
       payload,
       feedback: message.feedback,
+      feedbackReason: message.feedback_reason,
+      feedbackComment: message.feedback_comment,
+      feedbackWhatWentWrong: message.feedback_what_went_wrong,
+      feedbackExpectedAnswer: message.feedback_expected_answer,
       timestamp: new Date(message.created_at),
       thinkingBlocks:
         cachedIntermediateSteps?.thinkingBlocks.length
@@ -459,6 +380,7 @@ function mapConversationToMessages(
       toolCalls: cachedIntermediateSteps?.toolCalls,
       executionStatuses: cachedIntermediateSteps?.executionStatuses,
       deliveryState: "complete",
+      files: message.files ?? [],
     };
   });
 }
@@ -533,9 +455,16 @@ export async function loadConversationThread(
 
   // Only load the latest execution on initial load to avoid N requests
   const latestExecutionCarrier = assistantMessages.at(-1);
-  const latestExecutionDetail = latestExecutionCarrier
-    ? await getExecutionDetail(latestExecutionCarrier.execution_id)
-    : null;
+  let latestExecutionDetail: ExecutionDetail | null = null;
+  if (latestExecutionCarrier) {
+    try {
+      latestExecutionDetail = await getExecutionDetail(
+        latestExecutionCarrier.execution_id
+      );
+    } catch (error) {
+      console.warn("Conversation execution enrichment failed", error);
+    }
+  }
   const executionByMessageId = new Map<string, ExecuteSqlResponse | null>();
 
   if (latestExecutionCarrier) {

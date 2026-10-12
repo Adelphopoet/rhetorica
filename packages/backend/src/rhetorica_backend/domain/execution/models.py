@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -22,10 +23,23 @@ class EngineRunResult:
     row_count: int
 
 
+class ResultBlockConsumer(Protocol):
+    def start(self, columns: Iterable[str]) -> None: ...
+
+    def write_rows(self, rows: Iterable[Iterable[object]]) -> None: ...
+
+
 class ActiveExecution(Protocol):
     query_id: str | None
 
     def fetch(self) -> EngineRunResult: ...
+
+    def fetch_streaming(
+        self,
+        *,
+        consumer: ResultBlockConsumer | None,
+        preview_row_limit: int,
+    ) -> EngineRunResult: ...
 
     def cancel(self) -> None: ...
 

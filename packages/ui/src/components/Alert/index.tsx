@@ -8,11 +8,11 @@ const alertVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-[#090e1a] border-[#2e3d59] text-[#edf3ff]",
-        success: "bg-[#38c67d]/10 border-[#38c67d]/30 text-[#38c67d]",
-        warning: "bg-[#f2b14b]/10 border-[#f2b14b]/30 text-[#f2b14b]",
-        danger: "bg-[#ff6d7c]/10 border-[#ff6d7c]/30 text-[#ff6d7c]",
-        info: "bg-[#5da8ff]/10 border-[#5da8ff]/30 text-[#5da8ff]",
+        default: "bg-surface border-border-strong text-primary",
+        success: "bg-success/10 border-success/30 text-success",
+        warning: "bg-warning/10 border-warning/30 text-warning",
+        danger: "bg-danger/10 border-danger/30 text-danger",
+        info: "bg-accent/10 border-accent/30 text-accent",
       },
     },
     defaultVariants: {

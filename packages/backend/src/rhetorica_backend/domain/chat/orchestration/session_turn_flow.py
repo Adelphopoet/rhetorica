@@ -47,25 +47,17 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
         turn_builder: TurnBuilder,
         response_assembler: ChatResponseAssembler,
         create_llm_client: Callable[[Any], Any],
-        is_capabilities_question: Callable[[str], bool],
-        build_capabilities_answer: Callable[..., str],
         requires_metadata_lookup: Callable[[ChatAskRequest], bool],
         postprocess_llm_payload: Callable[..., dict[str, Any]] | None = None,
         history_persistence_policy: HistoryPersistencePolicy | None = None,
-        checkpoint_persistence_service: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._turn_builder = turn_builder
         self._response_assembler = response_assembler
         self._create_llm_client = create_llm_client
-        self._is_capabilities_question = is_capabilities_question
-        self._build_capabilities_answer = build_capabilities_answer
         self._requires_metadata_lookup = requires_metadata_lookup
         self._postprocess_llm_payload = postprocess_llm_payload
-        self._history_persistence_policy = (
-            history_persistence_policy or HistoryPersistencePolicy()
-        )
-        self._checkpoint_persistence_service = checkpoint_persistence_service
+        self._history_persistence_policy = history_persistence_policy or HistoryPersistencePolicy()
 
     def run(
         self,
@@ -84,19 +76,9 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
         )
         warnings = list(session.warnings)
 
-        if self._is_capabilities_question(request.question):
-            return self.complete_payload(
-                session=session,
-                llm_payload=self._capability_question_payload(
-                    session=session,
-                    warnings=warnings,
-                ),
-                warnings=warnings,
-                completion_kind="capability_question",
-            )
-
         if session.llm_connection is None:
             self._extend_unique(warnings, ["llm_connector_missing"])
+            persisted_user_message_id = self._persist_user_message(session=session)
             return self.complete_payload(
                 session=session,
                 llm_payload=self._llm_connector_missing_payload(
@@ -105,32 +87,30 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
                 ),
                 warnings=warnings,
                 completion_kind="llm_connector_missing",
+                persisted_user_message_id=persisted_user_message_id,
             )
 
         prepared_turn = self._turn_builder.prepare_turn(
-            request=request,
+            request=self._resolved_runtime_request(session),
             db_connectors=session.db_connectors,
-            conversation_history=session.conversation_history,
             conversation_state=session.conversation_state,
+            conversation_id=session.conversation_id,
             initial_warnings=warnings,
             requires_metadata_lookup=self._requires_metadata_lookup(request),
             workspace_snapshot=session.workspace_snapshot,
             state_factory=state_factory,
         )
-        self._attach_checkpoint_persistence(
-            state=prepared_turn.state,
-            conversation_id=session.conversation_id,
-        )
+        persisted_user_message_id = self._persist_user_message(session=session)
         runtime_input = PreparedRuntimeTurnInput(
             session=session,
-            request=session.request,
+            request=self._resolved_runtime_request(session),
             db_connectors=session.db_connectors,
             messages=prepared_turn.messages,
             tools=prepared_turn.tools,
             state=prepared_turn.state,
             tool_executor=prepared_turn.tool_executor,
-            protocol_repair_enabled=prepared_turn.protocol_repair_enabled,
             llm_client=self._create_llm_client(session.llm_connection),
+            agent_session=session.agent_session,
         )
         runtime_result = execute_runtime(runtime_input)
         completed = self.complete_payload(
@@ -140,6 +120,7 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
             completion_kind="runtime_completed",
             transport_artifact=runtime_result.transport_artifact,
             llm_usages=prepared_turn.state.llm_usages,
+            persisted_user_message_id=persisted_user_message_id,
         )
         if "cancelled" in completed.turn.warnings:
             return completed.model_copy(update={"completion_kind": "cancelled"})
@@ -162,19 +143,9 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
         )
         warnings = list(session.warnings)
 
-        if self._is_capabilities_question(request.question):
-            return self.complete_payload(
-                session=session,
-                llm_payload=self._capability_question_payload(
-                    session=session,
-                    warnings=warnings,
-                ),
-                warnings=warnings,
-                completion_kind="capability_question",
-            )
-
         if session.llm_connection is None:
             self._extend_unique(warnings, ["llm_connector_missing"])
+            persisted_user_message_id = self._persist_user_message(session=session)
             return self.complete_payload(
                 session=session,
                 llm_payload=self._llm_connector_missing_payload(
@@ -183,32 +154,30 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
                 ),
                 warnings=warnings,
                 completion_kind="llm_connector_missing",
+                persisted_user_message_id=persisted_user_message_id,
             )
 
         prepared_turn = self._turn_builder.prepare_turn(
-            request=request,
+            request=self._resolved_runtime_request(session),
             db_connectors=session.db_connectors,
-            conversation_history=session.conversation_history,
             conversation_state=session.conversation_state,
+            conversation_id=session.conversation_id,
             initial_warnings=warnings,
             requires_metadata_lookup=self._requires_metadata_lookup(request),
             workspace_snapshot=session.workspace_snapshot,
             state_factory=state_factory,
         )
-        self._attach_checkpoint_persistence(
-            state=prepared_turn.state,
-            conversation_id=session.conversation_id,
-        )
+        persisted_user_message_id = self._persist_user_message(session=session)
         runtime_input = PreparedRuntimeTurnInput(
             session=session,
-            request=session.request,
+            request=self._resolved_runtime_request(session),
             db_connectors=session.db_connectors,
             messages=prepared_turn.messages,
             tools=prepared_turn.tools,
             state=prepared_turn.state,
             tool_executor=prepared_turn.tool_executor,
-            protocol_repair_enabled=prepared_turn.protocol_repair_enabled,
             llm_client=self._create_llm_client(session.llm_connection),
+            agent_session=session.agent_session,
         )
         runtime_result = execute_runtime(runtime_input)
         if inspect.isawaitable(runtime_result):
@@ -220,10 +189,20 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
             completion_kind="runtime_completed",
             transport_artifact=runtime_result.transport_artifact,
             llm_usages=prepared_turn.state.llm_usages,
+            persisted_user_message_id=persisted_user_message_id,
         )
         if "cancelled" in completed.turn.warnings:
             return completed.model_copy(update={"completion_kind": "cancelled"})
         return completed
+
+    @staticmethod
+    def _resolved_runtime_request(session: OrchestrationSession) -> ChatAskRequest:
+        connector_name = session.resolved_llm_connector_name or session.request.llm_connector_name
+        if connector_name == session.request.llm_connector_name:
+            return session.request
+        return session.request.model_copy(
+            update={"llm_connector_name": connector_name},
+        )
 
     def complete_payload(
         self,
@@ -234,6 +213,7 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
         completion_kind: RuntimeCompletionKind,
         transport_artifact: RuntimeTransportArtifact | None = None,
         llm_usages: list[Any] | None = None,
+        persisted_user_message_id: str | None = None,
     ) -> CompletedSessionFlow:
         resolved_transport_artifact = transport_artifact or NoRuntimeTransportArtifact()
         merged_warnings = list(warnings)
@@ -274,39 +254,23 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
                 conversation_id=session.conversation_id,
                 warnings=turn.warnings,
             ),
+            persisted_user_message_id=persisted_user_message_id,
         )
 
-    def _capability_question_payload(
-        self,
-        *,
-        session: OrchestrationSession,
-        warnings: list[str],
-    ) -> dict[str, Any]:
-        workspace_snapshot = session.workspace_snapshot
-        capability_surface = session.capability_surface
-        return {
-            "answer": self._build_capabilities_answer(
-                has_db_connectors=workspace_snapshot.has_db_connectors,
-                metadata_configured=workspace_snapshot.metadata_configured,
-                rag_configured=workspace_snapshot.rag_configured,
-                confluence_configured=workspace_snapshot.confluence_configured,
-                jira_configured=workspace_snapshot.jira_configured,
-            ),
-            "sql": None,
-            "target": None,
-            "capability_trace": capability_trace_from_runtime(
-                available_tools=capability_surface.available_tools,
-                used_tools=[],
-                used_providers=[],
-                metadata_sources=[],
-                warnings=warnings,
-                has_execution=False,
-                degraded_capabilities=capability_surface.degraded_capabilities,
-                policy_decisions=capability_surface.policy_decisions,
-            ).model_dump(mode="json"),
-            "prompt_version": PromptBuilder.get_prompt_version(),
-            "warnings": list(warnings),
-        }
+    def _persist_user_message(self, *, session: OrchestrationSession) -> str | None:
+        if session.conversation_id is None:
+            return None
+        save_user_to_history = getattr(
+            self._response_assembler,
+            "save_user_to_history",
+            None,
+        )
+        if not callable(save_user_to_history):
+            return None
+        return save_user_to_history(
+            conversation_id=session.conversation_id,
+            request=session.request,
+        )
 
     def _llm_connector_missing_payload(
         self,
@@ -349,27 +313,6 @@ class OrchestrationSessionTurnFlowService(Generic[TState, TTransportArtifact]):
             db_connectors=db_connectors,
             warnings=warnings,
         )
-
-    def _attach_checkpoint_persistence(
-        self,
-        *,
-        state: TState,
-        conversation_id: str | None,
-    ) -> None:
-        service = self._checkpoint_persistence_service
-        if service is None or conversation_id is None:
-            return
-
-        def persist(current_state: TState) -> None:
-            service.persist_runtime_state(
-                conversation_id=conversation_id,
-                state=current_state,
-            )
-
-        state.conversation_id = conversation_id
-        state.checkpoint_persist = persist
-        if getattr(state, "checkpoint", None) is not None:
-            persist(state)
 
     @staticmethod
     def _payload_warnings(llm_payload: dict[str, Any]) -> list[str]:

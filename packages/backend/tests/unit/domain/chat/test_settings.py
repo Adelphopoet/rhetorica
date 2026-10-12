@@ -6,7 +6,6 @@ from unittest import mock
 from rhetorica_backend.domain.chat.settings import (
     ChatSettings,
     get_chat_settings,
-    get_max_context_tables,
     get_max_iterations,
     get_message_limit,
 )
@@ -20,10 +19,7 @@ class TestChatSettings:
         settings = ChatSettings()
         assert settings.max_iterations == 100
         assert settings.default_message_limit == 20
-        assert settings.max_context_tables == 20
-        assert settings.max_metadata_connectors == 100
-        assert settings.max_db_connectors == 500
-        assert settings.llm_request_timeout == 45.0
+        assert settings.llm_request_timeout == 300.0
         assert settings.verify_tls is True
 
     def test_max_iterations_from_env(self) -> None:
@@ -47,17 +43,11 @@ class TestChatSettings:
         settings = ChatSettings(
             max_iterations=30,
             default_message_limit=50,
-            max_context_tables=10,
-            max_metadata_connectors=200,
-            max_db_connectors=1000,
             llm_request_timeout=60.0,
             verify_tls=False,
         )
         assert settings.max_iterations == 30
         assert settings.default_message_limit == 50
-        assert settings.max_context_tables == 10
-        assert settings.max_metadata_connectors == 200
-        assert settings.max_db_connectors == 1000
         assert settings.llm_request_timeout == 60.0
         assert settings.verify_tls is False
 
@@ -74,12 +64,6 @@ class TestChatSettingsHelpers:
     def test_get_message_limit(self) -> None:
         """Test get_message_limit returns correct value."""
         result = get_message_limit()
-        assert isinstance(result, int)
-        assert result == 20
-
-    def test_get_max_context_tables(self) -> None:
-        """Test get_max_context_tables returns correct value."""
-        result = get_max_context_tables()
         assert isinstance(result, int)
         assert result == 20
 

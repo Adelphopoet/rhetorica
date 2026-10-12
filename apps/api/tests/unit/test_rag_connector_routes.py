@@ -4,11 +4,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from rhetorica_api.app.main import create_app
-from rhetorica_api.app.routes import confluence_connectors as confluence_connector_routes
 from rhetorica_api.app.routes import connectors as connector_routes
 from rhetorica_api.app.routes import execution as execution_routes
 from rhetorica_api.app.routes import llm_connectors as llm_connector_routes
-from rhetorica_api.app.routes import openmetadata_connectors as openmetadata_connector_routes
 from rhetorica_api.app.routes import rag_connectors as rag_connector_routes
 from rhetorica_api.app.routes import rag_insights_review as rag_insights_review_routes
 from rhetorica_api.app.settings import settings
@@ -19,8 +17,6 @@ def _client(tmp_path: Path) -> TestClient:
     execution_routes._runtime.cache_clear()
     connector_routes._repository.cache_clear()
     llm_connector_routes._repository.cache_clear()
-    confluence_connector_routes._repository.cache_clear()
-    openmetadata_connector_routes._repository.cache_clear()
     rag_connector_routes._repository.cache_clear()
     rag_insights_review_routes._service.cache_clear()
     _, runtime = execution_routes._runtime()

@@ -1,0 +1,33 @@
+{{- if and .Values.infra.enabled .Values.infra.postgres.externalAccess.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-postgres
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-access
+  {{- with .Values.infra.postgres.externalAccess.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # PostgreSQL remains reachable while another infra container restarts.
+  publishNotReadyAddresses: true
+  type: {{ .Values.infra.postgres.externalAccess.type }}
+  externalTrafficPolicy: {{ .Values.infra.postgres.externalAccess.externalTrafficPolicy }}
+  {{- with .Values.infra.postgres.externalAccess.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.infra.postgres.externalAccess.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/component: infra
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: postgres
+      protocol: TCP
+      port: {{ .Values.infra.postgres.externalAccess.port }}
+      targetPort: postgres
+{{- end }}

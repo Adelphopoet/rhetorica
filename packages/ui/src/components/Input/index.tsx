@@ -10,18 +10,18 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
   ({ className, label, error, icon, type, id, ...props }, ref) => {
     const generatedId = React.useId();
-    const inputId = id ?? generatedId;
+    const inputId = id ?? (label ? generatedId : undefined);
 
     return (
       <div className="w-full">
         {label ? (
-          <label htmlFor={inputId} className="block text-sm font-medium text-[#a9b8d4] mb-1.5">
+          <label htmlFor={inputId} className="block text-sm font-medium text-secondary mb-1.5">
             {label}
           </label>
         ) : null}
         <div className="relative">
           {icon ? (
-            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[#7484a3]">
+            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-muted">
               {icon}
             </div>
           ) : null}
@@ -29,9 +29,9 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
             id={inputId}
             type={type}
             className={cn(
-              "flex h-10 w-full rounded-lg border border-[#2e3d59] bg-[#090e1a] px-3 py-2 text-sm text-[#edf3ff] placeholder:text-[#7484a3] focus:outline-none focus:ring-2 focus:ring-[#5da8ff] focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50 transition-all",
+              "flex h-10 w-full rounded-lg border border-control-border bg-surface px-3 py-2 text-sm text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50 transition-all",
               icon ? "pl-10" : "",
-              error ? "border-[#ff6d7c] focus:ring-[#ff6d7c]" : "",
+              error ? "border-danger focus:ring-danger" : "",
               className
             )}
             ref={ref}
@@ -39,7 +39,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
           />
         </div>
         {error ? (
-          <p className="mt-1.5 text-xs text-[#ff6d7c]">{error}</p>
+          <p className="mt-1.5 text-xs text-danger">{error}</p>
         ) : null}
       </div>
     );

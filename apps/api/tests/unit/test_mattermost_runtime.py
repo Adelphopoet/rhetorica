@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from rhetorica_api.app.mattermost_runtime import (
     MattermostEventProcessor,
+    _connector_fingerprint,
     _parse_websocket_post,
     _websocket_connect_kwargs,
 )
@@ -107,17 +108,30 @@ def test_mattermost_websocket_uses_unverified_context_when_tls_verify_disabled()
     assert isinstance(connect_kwargs["ssl"], ssl.SSLContext)
 
 
-def _connector(*, verify_tls: bool) -> MattermostConnectorItem:
+def test_mattermost_fingerprint_changes_when_sql_delivery_setting_changes() -> None:
+    disabled = _connector(verify_tls=True, send_sql_enabled=False)
+    enabled = _connector(verify_tls=True, send_sql_enabled=True)
+
+    assert _connector_fingerprint(disabled) != _connector_fingerprint(enabled)
+
+
+def _connector(
+    *,
+    verify_tls: bool,
+    send_sql_enabled: bool = False,
+) -> MattermostConnectorItem:
     now = datetime.now(tz=UTC)
     return MattermostConnectorItem(
         id="connector-1",
         name="tag",
         workspace_id="default",
+        agent_id=None,
         connection=MattermostConnectionConfig(
-            base_url="https://chat.example.com",
+            base_url="https://mattermost.example.com",
             bot_token="secret-token",
             bot_username="rhetorica",
             verify_tls=verify_tls,
+            send_sql_enabled=send_sql_enabled,
         ),
         has_bot_token=True,
         created_at=now,

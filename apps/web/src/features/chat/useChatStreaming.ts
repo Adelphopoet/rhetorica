@@ -54,8 +54,10 @@ interface UseChatStreamingReturn {
   startStreaming: (
     question: string,
     conversationId?: string,
+    agentId?: string,
     clarificationId?: string,
-    clarificationValue?: string
+    clarificationValue?: string,
+    attachmentIds?: string[]
   ) => Promise<void>;
   cancelStreaming: () => void;
   clearStreaming: () => void;
@@ -73,6 +75,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
   const [isStreaming, setIsStreaming] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
   const currentMessageRef = useRef<StreamingMessage | null>(null);
   const intermediateStepsRef = useRef<IntermediateSteps>(createEmptyIntermediateSteps());
   const requestIdRef = useRef(0);
@@ -115,8 +118,10 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
     async (
       question: string,
       conversationId?: string,
+      agentId?: string,
       clarificationId?: string,
-      clarificationValue?: string
+      clarificationValue?: string,
+      attachmentIds: string[] = []
     ) => {
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
@@ -127,6 +132,8 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
+      const runId = globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}-${requestId}`;
+      activeRunIdRef.current = runId;
 
       const initialMessage = createInitialStreamingMessage(generateMessageId);
       currentMessageRef.current = initialMessage;
@@ -144,6 +151,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
 
         setIsStreaming(false);
         abortControllerRef.current = null;
+        activeRunIdRef.current = null;
 
         if (event.type === "done" && onComplete && updatedMessage) {
           onComplete(updatedMessage, event, {
@@ -166,11 +174,16 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
       try {
         const response = await fetch("/api/chat/ask/stream", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-Rhetorica-Run-Id": runId,
+          },
           body: JSON.stringify({
             question,
             workspace_id: workspaceId,
             conversation_id: conversationId,
+            agent_id: agentId,
+            attachment_ids: attachmentIds,
             run_sql: true,
             ...(clarificationId && {
               selected_clarification_id: clarificationId,
@@ -187,7 +200,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
 
         const reader = response.body?.getReader();
         if (!reader) {
-          throw new Error("ReadableStream not supported");
+          throw new Error("Потоковая передача не поддерживается");
         }
 
         const decoder = new TextDecoder();
@@ -243,7 +256,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
             type: "error",
             timestamp: new Date().toISOString(),
             code: "stream_ended_without_terminal_event",
-            message: "Stream closed before final response was delivered.",
+            message: "Соединение закрыто до получения ответа",
           };
           const updatedMessage = updateWithEvent(requestId, errorEvent);
           completeRequest(errorEvent, updatedMessage);
@@ -273,6 +286,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
       } finally {
         if (isCurrentRequest(requestId)) {
           abortControllerRef.current = null;
+          activeRunIdRef.current = null;
         }
       }
     },
@@ -285,8 +299,19 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
     }
 
     requestIdRef.current += 1;
-    abortControllerRef.current.abort();
+    const controller = abortControllerRef.current;
+    const runId = activeRunIdRef.current;
     abortControllerRef.current = null;
+    activeRunIdRef.current = null;
+
+    if (runId) {
+      void fetch(
+        `/api/chat/runs/${encodeURIComponent(runId)}/cancel?workspace_id=${encodeURIComponent(workspaceId)}`,
+        { method: "POST", keepalive: true }
+      ).finally(() => controller.abort());
+    } else {
+      controller.abort();
+    }
 
     const current = currentMessageRef.current;
     if (current) {
@@ -296,7 +321,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
     }
 
     setIsStreaming(false);
-  }, []);
+  }, [workspaceId]);
 
   const clearStreaming = useCallback(() => {
     requestIdRef.current += 1;
@@ -304,6 +329,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
+      activeRunIdRef.current = null;
     }
 
     setStreamingMessage(null);

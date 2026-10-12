@@ -1,0 +1,7 @@
+{
+  "name": "rhetorica-dev",
+  "owner": { "name": "Rhetorica" },
+  "plugins": [
+    { "name": "rhetorica-kit", "source": "./plugin", "description": "Локальная сборка rhetorica-kit из рабочей копии" }
+  ]
+}

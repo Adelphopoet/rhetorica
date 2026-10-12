@@ -26,7 +26,7 @@ const Avatar = React.forwardRef<HTMLDivElement, AvatarProps>(
       <div
         ref={ref}
         className={cn(
-          "relative flex shrink-0 overflow-hidden rounded-full bg-[#1f2a3f] items-center justify-center",
+          "relative flex shrink-0 overflow-hidden rounded-full bg-hover items-center justify-center",
           sizeClasses[size],
           className
         )}
@@ -41,7 +41,7 @@ const Avatar = React.forwardRef<HTMLDivElement, AvatarProps>(
         ) : children ? (
           children
         ) : (
-          <span className="flex h-full w-full items-center justify-center font-medium text-[#a9b8d4]">
+          <span className="flex h-full w-full items-center justify-center font-medium text-secondary">
             {fallback}
           </span>
         )}

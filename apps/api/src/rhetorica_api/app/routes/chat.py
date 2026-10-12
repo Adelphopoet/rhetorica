@@ -3,16 +3,16 @@ from functools import lru_cache
 from celery import Celery  # type: ignore[import-untyped]
 from fastapi import APIRouter, HTTPException
 from rhetorica_backend.contracts import (
-    AnalysisRunActionResponse,
-    AnalysisRunStateResponse,
     ConversationDetailItem,
     ConversationItem,
+    ConversationTokenUsageItem,
     CreateConversationRequest,
     MessageFeedbackRequest,
     MessageFeedbackResponse,
     RepairTurnRequest,
     RepairTurnResponse,
 )
+from rhetorica_backend.contracts.chat import FeedbackReason
 from rhetorica_backend.domain.chat.feedback import (
     FeedbackContext,
     FeedbackPipelineService,
@@ -20,21 +20,32 @@ from rhetorica_backend.domain.chat.feedback import (
     FeedbackRoutingAction,
     RepairTurnService,
 )
-from rhetorica_backend.domain.chat.orchestration.analysis_artifacts import (
-    AnalysisCheckpoint,
-    AnalysisCheckpointLifecycle,
-    AnalysisPlan,
-    AnalysisPlanLifecycle,
-)
+from rhetorica_backend.domain.files.service import ArtifactService
 from rhetorica_backend.domain.rag import RagPipelineTaskRequest
 from rhetorica_backend.infra.logging import get_logger
+from rhetorica_backend.infra.postgres.agent_repository import AgentProfileRepository
 from rhetorica_backend.infra.postgres.chat_repository import ChatRepository
+from rhetorica_backend.infra.postgres.human_review_feedback_service import (
+    HumanReviewFeedbackService,
+)
 
 from rhetorica_api.app.identity import get_db_runtime, resolve_current_user
 from rhetorica_api.app.settings import settings
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
 logger = get_logger(__name__)
+
+
+def _token_usage_item(conversation) -> ConversationTokenUsageItem:
+    usage = conversation.token_usage
+    return ConversationTokenUsageItem(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+        cache_write_input_tokens=usage.cache_write_input_tokens,
+        cache_usage_reported_calls=usage.cache_usage_reported_calls,
+        total_tokens=usage.total_tokens,
+    )
 
 
 def _get_feedback_pipeline_service() -> FeedbackPipelineService:
@@ -47,31 +58,6 @@ def _runtime_context_from_message(msg) -> dict:
     trace = msg.capability_trace if isinstance(msg.capability_trace, dict) else {}
     runtime_context = trace.get("runtime_context")
     return runtime_context if isinstance(runtime_context, dict) else {}
-
-
-def _analysis_plan_from_message(msg) -> dict | None:
-    value = _runtime_context_from_message(msg).get("analysis_plan")
-    return value if isinstance(value, dict) else None
-
-
-def _worker_results_from_message(msg) -> list[dict]:
-    value = _runtime_context_from_message(msg).get("worker_results")
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _checkpoint_from_state(state: dict) -> dict | None:
-    value = state.get("analysis_checkpoint")
-    return value if isinstance(value, dict) else None
-
-
-def _analysis_plan_from_state(state: dict) -> dict | None:
-    value = state.get("analysis_plan")
-    return value if isinstance(value, dict) else None
-
-
-def _worker_results_from_state(state: dict) -> list[dict]:
-    value = state.get("analysis_worker_results")
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 @lru_cache(maxsize=1)
@@ -97,19 +83,32 @@ def _dispatch_rag_feedback_pipeline(task_request: RagPipelineTaskRequest) -> Non
 def create_conversation(payload: CreateConversationRequest) -> ConversationItem:
     """Create a new chat conversation."""
     current_user = resolve_current_user(payload.workspace_id)
-    chat_repo = ChatRepository(db=get_db_runtime())
+    db_runtime = get_db_runtime()
+    if payload.agent_id is not None:
+        agent = AgentProfileRepository(db=db_runtime).get(
+            agent_id=payload.agent_id,
+            workspace_id=payload.workspace_id,
+            current_user_id=current_user.id,
+            active_only=True,
+        )
+        if agent is None:
+            raise HTTPException(status_code=404, detail="agent_not_found")
+    chat_repo = ChatRepository(db=db_runtime)
     conversation = chat_repo.create_conversation(
         workspace_id=payload.workspace_id,
         title=payload.title,
         owner_user_id=current_user.id,
+        agent_id=payload.agent_id,
     )
     return ConversationItem(
         id=conversation.id,
         workspace_id=conversation.workspace_id,
         title=conversation.title,
+        agent_id=conversation.agent_id,
         created_at=conversation.created_at.isoformat(),
         updated_at=conversation.updated_at.isoformat(),
         message_count=0,
+        token_usage=_token_usage_item(conversation),
     )
 
 
@@ -134,14 +133,17 @@ def get_conversation(conversation_id: str) -> ConversationDetailItem:
         id=conversation.id,
         workspace_id=conversation.workspace_id,
         title=conversation.title,
+        agent_id=conversation.agent_id,
         created_at=conversation.created_at.isoformat(),
         updated_at=conversation.updated_at.isoformat(),
+        token_usage=_token_usage_item(conversation),
         messages=[
             {
                 "id": msg.id,
                 "conversation_id": msg.conversation_id,
                 "role": msg.role,
                 "content": msg.content,
+                "agent_id": msg.agent_id,
                 "created_at": msg.created_at.isoformat(),
                 "generated_sql": msg.generated_sql,
                 "execution_id": msg.execution_id,
@@ -156,11 +158,6 @@ def get_conversation(conversation_id: str) -> ConversationDetailItem:
                 "selected_connector": msg.selected_connector,
                 "analysis_document": msg.analysis_document,
                 "visualization": msg.visualization_spec,
-                "analysis_plan": _analysis_plan_from_message(msg),
-                "worker_results": _worker_results_from_message(msg),
-                "checkpoint_digest": _runtime_context_from_message(msg).get(
-                    "checkpoint_digest"
-                ),
                 "warnings": msg.warnings,
                 "feedback": msg.feedback,
                 "feedback_updated_at": msg.feedback_updated_at.isoformat()
@@ -168,6 +165,9 @@ def get_conversation(conversation_id: str) -> ConversationDetailItem:
                 else None,
                 "feedback_reason": msg.feedback_reason,
                 "feedback_comment": msg.feedback_comment,
+                "feedback_what_went_wrong": msg.feedback_what_went_wrong,
+                "feedback_expected_answer": msg.feedback_expected_answer,
+                "files": [ArtifactService.to_ref(file).model_dump() for file in msg.files],
             }
             for msg in conversation.messages
         ],
@@ -189,9 +189,11 @@ def list_conversations(workspace_id: str = "default", limit: int = 50) -> list[C
             id=conv.id,
             workspace_id=conv.workspace_id,
             title=conv.title,
+            agent_id=conv.agent_id,
             created_at=conv.created_at.isoformat(),
             updated_at=conv.updated_at.isoformat(),
             message_count=getattr(conv, "message_count", len(conv.messages)),
+            token_usage=_token_usage_item(conv),
         )
         for conv in conversations
     ]
@@ -199,7 +201,7 @@ def list_conversations(workspace_id: str = "default", limit: int = 50) -> list[C
 
 @router.delete("/conversation/{conversation_id}")
 def delete_conversation(conversation_id: str) -> dict:
-    """Delete a conversation and all its messages."""
+    """Hide a conversation while retaining its persisted data."""
     chat_repo = ChatRepository(db=get_db_runtime())
     summary = chat_repo.get_conversation(conversation_id=conversation_id)
     if summary is None:
@@ -213,191 +215,6 @@ def delete_conversation(conversation_id: str) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"status": "deleted", "conversation_id": conversation_id}
-
-
-@router.get(
-    "/conversation/{conversation_id}/analysis-run",
-    response_model=AnalysisRunStateResponse,
-)
-def get_analysis_run_state(conversation_id: str) -> AnalysisRunStateResponse:
-    """Return compact durable state for an active analysis run."""
-    chat_repo = ChatRepository(db=get_db_runtime())
-    summary = chat_repo.get_conversation(conversation_id=conversation_id)
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    current_user = resolve_current_user(summary.workspace_id)
-    conversation = chat_repo.get_conversation_with_messages(
-        conversation_id=conversation_id,
-        message_limit=50,
-        owner_user_id=current_user.id,
-    )
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    checkpoint = _checkpoint_from_state(conversation.conversation_state)
-    last_assistant = next(
-        (message for message in reversed(conversation.messages) if message.role == "assistant"),
-        None,
-    )
-    plan = _analysis_plan_from_state(conversation.conversation_state) or (
-        _analysis_plan_from_message(last_assistant) if last_assistant else None
-    )
-    worker_results = _worker_results_from_state(conversation.conversation_state) or (
-        _worker_results_from_message(last_assistant) if last_assistant else []
-    )
-    status = str((checkpoint or {}).get("status") or "planned")
-    return AnalysisRunStateResponse(
-        conversation_id=conversation_id,
-        status=status,
-        checkpoint_digest=checkpoint,
-        analysis_plan=plan,
-        worker_results=worker_results,
-        resumable=status in {"planned", "running", "blocked", "awaiting_user", "failed"},
-        cancellable=status in {"planned", "running", "blocked", "awaiting_user"},
-    )
-
-
-@router.post(
-    "/conversation/{conversation_id}/analysis-run/resume",
-    response_model=AnalysisRunActionResponse,
-)
-def resume_analysis_run(conversation_id: str) -> AnalysisRunActionResponse:
-    """Mark a persisted blocked/failed run as resumable without replaying transcripts."""
-    chat_repo = ChatRepository(db=get_db_runtime())
-    summary = chat_repo.get_conversation(conversation_id=conversation_id)
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    current_user = resolve_current_user(summary.workspace_id)
-    state = chat_repo.get_conversation_state(
-        conversation_id=conversation_id,
-        owner_user_id=current_user.id,
-    )
-    checkpoint_payload = _checkpoint_from_state(state)
-    if checkpoint_payload is None:
-        raise HTTPException(status_code=404, detail="Analysis run not found")
-    checkpoint = AnalysisCheckpoint.model_validate(checkpoint_payload)
-    if checkpoint.status == "cancelled":
-        raise HTTPException(status_code=409, detail="Cancelled analysis run cannot resume")
-    if checkpoint.status == "completed":
-        raise HTTPException(status_code=409, detail="Completed analysis run cannot resume")
-    active_step_id = checkpoint.blocked_step_id or checkpoint.active_step_id
-    resumed = checkpoint.model_copy(
-        update={
-            "status": "running",
-            "active_step_id": active_step_id,
-            "blocked_step_id": None,
-            "blocker": None,
-        }
-    )
-    state["analysis_checkpoint"] = resumed.digest_payload()
-    raw_plan = _analysis_plan_from_state(state)
-    if raw_plan is not None and active_step_id:
-        plan = AnalysisPlan.model_validate(raw_plan)
-        state["analysis_plan"] = AnalysisPlanLifecycle().update_step(
-            plan=plan,
-            step_id=active_step_id,
-            status="planned",
-            blocker=None,
-        ).model_dump(mode="json")
-    chat_repo.update_conversation_state(
-        conversation_id=conversation_id,
-        conversation_state=state,
-        owner_user_id=current_user.id,
-    )
-    return AnalysisRunActionResponse(
-        conversation_id=conversation_id,
-        status=resumed.status,
-        checkpoint_digest=resumed.digest_payload(),
-    )
-
-
-@router.post(
-    "/conversation/{conversation_id}/analysis-run/cancel",
-    response_model=AnalysisRunActionResponse,
-)
-def cancel_analysis_run(conversation_id: str) -> AnalysisRunActionResponse:
-    """Cancel a persisted analysis run checkpoint."""
-    chat_repo = ChatRepository(db=get_db_runtime())
-    summary = chat_repo.get_conversation(conversation_id=conversation_id)
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    current_user = resolve_current_user(summary.workspace_id)
-    state = chat_repo.get_conversation_state(
-        conversation_id=conversation_id,
-        owner_user_id=current_user.id,
-    )
-    checkpoint_payload = _checkpoint_from_state(state)
-    if checkpoint_payload is None:
-        raise HTTPException(status_code=404, detail="Analysis run not found")
-    checkpoint = AnalysisCheckpoint.model_validate(checkpoint_payload)
-    cancelled = AnalysisCheckpointLifecycle().cancel(checkpoint=checkpoint)
-    state["analysis_checkpoint"] = cancelled.digest_payload()
-    step_id = checkpoint.active_step_id or checkpoint.blocked_step_id
-    raw_plan = _analysis_plan_from_state(state)
-    if raw_plan is not None and step_id:
-        plan = AnalysisPlan.model_validate(raw_plan)
-        state["analysis_plan"] = AnalysisPlanLifecycle().update_step(
-            plan=plan,
-            step_id=step_id,
-            status="cancelled",
-            blocker="cancelled_by_user",
-        ).model_dump(mode="json")
-    chat_repo.update_conversation_state(
-        conversation_id=conversation_id,
-        conversation_state=state,
-        owner_user_id=current_user.id,
-    )
-    return AnalysisRunActionResponse(
-        conversation_id=conversation_id,
-        status=cancelled.status,
-        checkpoint_digest=cancelled.digest_payload(),
-    )
-
-
-@router.post(
-    "/conversation/{conversation_id}/analysis-run/approve",
-    response_model=AnalysisRunActionResponse,
-)
-def approve_analysis_run(conversation_id: str) -> AnalysisRunActionResponse:
-    """Approve a pending SQL execution gate for an analysis run."""
-    chat_repo = ChatRepository(db=get_db_runtime())
-    summary = chat_repo.get_conversation(conversation_id=conversation_id)
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    current_user = resolve_current_user(summary.workspace_id)
-    state = chat_repo.get_conversation_state(
-        conversation_id=conversation_id,
-        owner_user_id=current_user.id,
-    )
-    checkpoint_payload = _checkpoint_from_state(state)
-    if checkpoint_payload is None:
-        raise HTTPException(status_code=404, detail="Analysis run not found")
-    checkpoint = AnalysisCheckpoint.model_validate(checkpoint_payload)
-    if checkpoint.status != "awaiting_user":
-        raise HTTPException(status_code=409, detail="Analysis run is not awaiting approval")
-    if not isinstance(checkpoint.budget_state.get("pending_approval"), dict):
-        raise HTTPException(status_code=409, detail="No pending approval found")
-    approved = AnalysisCheckpointLifecycle().approve(checkpoint=checkpoint)
-    state["analysis_checkpoint"] = approved.digest_payload()
-    raw_plan = _analysis_plan_from_state(state)
-    active_step_id = approved.active_step_id
-    if raw_plan is not None and active_step_id:
-        plan = AnalysisPlan.model_validate(raw_plan)
-        state["analysis_plan"] = AnalysisPlanLifecycle().update_step(
-            plan=plan,
-            step_id=active_step_id,
-            status="planned",
-            blocker=None,
-        ).model_dump(mode="json")
-    chat_repo.update_conversation_state(
-        conversation_id=conversation_id,
-        conversation_state=state,
-        owner_user_id=current_user.id,
-    )
-    return AnalysisRunActionResponse(
-        conversation_id=conversation_id,
-        status=approved.status,
-        checkpoint_digest=approved.digest_payload(),
-    )
 
 
 @router.post("/message/{message_id}/feedback", response_model=MessageFeedbackResponse)
@@ -457,17 +274,26 @@ def set_message_feedback(
         },
     )
 
-    # Update message feedback in database with reason and comment
-    updated = chat_repo.update_message_feedback(
+    # The message and its external projection must either commit together or
+    # neither must be visible to the caller. Celery is submitted afterwards.
+    saved = HumanReviewFeedbackService(db=get_db_runtime()).save(
+        assistant_message_id=message_id,
         conversation_id=payload.conversation_id,
-        message_id=message_id,
-        feedback=payload.feedback.value,
         owner_user_id=current_user.id,
-        feedback_reason=payload.reason.value if payload.reason else None,
-        feedback_comment=payload.comment,
+        reaction=payload.feedback,
+        reason=payload.reason,
+        comment=payload.comment,
+        what_went_wrong=payload.what_went_wrong,
+        expected_answer=payload.expected_answer,
     )
-    if updated is None or updated.feedback_updated_at is None:
+    if saved is None or saved.message.feedback_updated_at is None:
         raise HTTPException(status_code=404, detail="Message not found")
+
+    if saved.queued_for_langfuse:
+        try:
+            _task_queue().send_task("human_review.deliver_langfuse")
+        except Exception:
+            logger.exception("human_review.langfuse_delivery_enqueue_failed", extra={"message_id": message_id})
 
     # Dispatch to appropriate handlers based on routing decision
     if FeedbackRoutingAction.RECORD_TO_RAG in routing_decision.actions:
@@ -482,7 +308,6 @@ def set_message_feedback(
     if FeedbackRoutingAction.RECORD_NEGATIVE_METADATA_SIGNAL in routing_decision.actions:
         # Apply metadata signal if we have the service available
         try:
-
             # TODO: Apply metadata signal for negative feedback
             # db_runtime = get_db_runtime()
             # usage_store = PostgresMetadataUsageStore(db=db_runtime)
@@ -499,19 +324,19 @@ def set_message_feedback(
             )
 
     return MessageFeedbackResponse(
-        message_id=updated.id,
-        conversation_id=updated.conversation_id,
+        message_id=saved.message.id,
+        conversation_id=saved.message.conversation_id,
         feedback=payload.feedback,
-        feedback_updated_at=updated.feedback_updated_at.isoformat(),
+        feedback_updated_at=saved.message.feedback_updated_at.isoformat(),
         reason=payload.reason,
         comment=payload.comment,
+        what_went_wrong=payload.what_went_wrong,
+        expected_answer=payload.expected_answer,
     )
 
 
 @router.post("/message/{message_id}/repair-turn", response_model=RepairTurnResponse)
-def create_repair_turn(
-    message_id: str, payload: RepairTurnRequest
-) -> RepairTurnResponse:
+def create_repair_turn(message_id: str, payload: RepairTurnRequest) -> RepairTurnResponse:
     """Generate a repair question based on negative feedback to fix the answer.
 
     This endpoint constructs a modified question that incorporates the negative
@@ -542,6 +367,23 @@ def create_repair_turn(
         raise HTTPException(
             status_code=400, detail="Repair turn is allowed only for assistant messages"
         )
+
+    # Feedback is owned by the persisted assistant message, never by a stale
+    # browser payload. This also lets the compact thumbs-down UI use the new
+    # expanded fields without restoring the old reason/comment controls.
+    saved_reason = (
+        FeedbackReason(message.feedback_reason)
+        if message.feedback_reason in {item.value for item in FeedbackReason}
+        else FeedbackReason.OTHER
+    )
+    payload = payload.model_copy(
+        update={
+            "feedback_reason": saved_reason,
+            "feedback_comment": message.feedback_comment,
+            "what_went_wrong": message.feedback_what_went_wrong,
+            "expected_answer": message.feedback_expected_answer,
+        }
+    )
 
     # Build repair question
     repair_service = RepairTurnService(logger=logger)

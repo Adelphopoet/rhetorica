@@ -23,6 +23,9 @@ export { Tooltip } from "./components/Tooltip";
 
 export { Skeleton } from "./components/Skeleton";
 
+export { Spinner } from "./components/Spinner";
+export type { SpinnerProps } from "./components/Spinner";
+
 export { Alert, alertVariants } from "./components/Alert";
 export type { AlertProps } from "./components/Alert";
 

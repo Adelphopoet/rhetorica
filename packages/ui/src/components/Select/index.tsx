@@ -12,12 +12,12 @@ export interface SelectProps
 const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
   ({ className, label, error, options, id, ...props }, ref) => {
     const generatedId = React.useId();
-    const selectId = id ?? generatedId;
+    const selectId = id ?? (label ? generatedId : undefined);
 
     return (
       <div className="w-full">
         {label ? (
-          <label htmlFor={selectId} className="block text-sm font-medium text-[#a9b8d4] mb-1.5">
+          <label htmlFor={selectId} className="block text-sm font-medium text-secondary mb-1.5">
             {label}
           </label>
         ) : null}
@@ -25,8 +25,8 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
           <select
             id={selectId}
             className={cn(
-              "flex h-10 w-full appearance-none rounded-lg border border-[#2e3d59] bg-[#090e1a] px-3 py-2 pr-10 text-sm text-[#edf3ff] focus:outline-none focus:ring-2 focus:ring-[#5da8ff] focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50 transition-all",
-              error ? "border-[#ff6d7c] focus:ring-[#ff6d7c]" : "",
+              "flex h-10 w-full appearance-none rounded-lg border border-control-border bg-surface px-3 py-2 pr-10 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent disabled:cursor-not-allowed disabled:opacity-50 transition-all",
+              error ? "border-danger focus:ring-danger" : "",
               className
             )}
             ref={ref}
@@ -42,10 +42,10 @@ const Select = React.forwardRef<HTMLSelectElement, SelectProps>(
               </option>
             ))}
           </select>
-          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[#7484a3] pointer-events-none" />
+          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted pointer-events-none" />
         </div>
         {error ? (
-          <p className="mt-1.5 text-xs text-[#ff6d7c]">{error}</p>
+          <p className="mt-1.5 text-xs text-danger">{error}</p>
         ) : null}
       </div>
     );

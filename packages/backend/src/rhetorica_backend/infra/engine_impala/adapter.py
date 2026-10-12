@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from math import ceil
+from threading import Event, RLock, Thread
 from typing import Any, ClassVar
 
 from impala.dbapi import connect as impala_connect  # type: ignore[import-untyped]
@@ -11,25 +13,50 @@ from rhetorica_backend.domain.execution.models import (
     EngineAdapter,
     EngineRunRequest,
     EngineRunResult,
+    ResultBlockConsumer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ImpalaActiveExecution(ActiveExecution):
-    def __init__(self, connection: Any, cursor: Any):
+    def __init__(self, connection: Any, cursor: Any, row_limit: int):
         self._connection = connection
         self._cursor = cursor
         self.query_id: str | None = getattr(cursor, "query_id", None)
+        self._row_limit = row_limit
 
     def fetch(self) -> EngineRunResult:
-        rows = self._cursor.fetchall()
+        return self.fetch_streaming(
+            consumer=None,
+            preview_row_limit=self._row_limit,
+        )
+
+    def fetch_streaming(
+        self,
+        *,
+        consumer: ResultBlockConsumer | None,
+        preview_row_limit: int,
+    ) -> EngineRunResult:
         description = self._cursor.description or []
         columns = [column[0] for column in description]
+        if consumer is not None:
+            consumer.start(columns)
+        preview: list[list[object]] = []
+        row_count = 0
+        while block := self._cursor.fetchmany(10_000):
+            rows = [list(row) for row in block]
+            row_count += len(rows)
+            if len(preview) < preview_row_limit:
+                preview.extend(rows[: preview_row_limit - len(preview)])
+            if consumer is not None:
+                consumer.write_rows(rows)
         self.query_id = getattr(self._cursor, "query_id", self.query_id)
         return EngineRunResult(
             query_id=self.query_id,
             columns=columns,
-            rows=[list(row) for row in rows],
-            row_count=len(rows),
+            rows=preview,
+            row_count=row_count,
         )
 
     def cancel(self) -> None:
@@ -157,6 +184,127 @@ class ImpalaConnectionOptionsFactory:
         return parsed or None
 
 
+class _ImpalaStartupOperation:
+    """Run blocking Impala startup behind a process-level deadline."""
+
+    def __init__(
+        self,
+        *,
+        connect_kwargs: dict[str, Any],
+        sql: str,
+        server_timeout_seconds: int,
+        row_limit: int,
+    ) -> None:
+        self._connect_kwargs = connect_kwargs
+        self._sql = sql
+        self._server_timeout_seconds = server_timeout_seconds
+        self._row_limit = row_limit
+        self._done = Event()
+        self._timed_out = Event()
+        self._lock = RLock()
+        self._connection: Any | None = None
+        self._cursor: Any | None = None
+        self._cleanup_started = False
+        self._result: ImpalaActiveExecution | None = None
+        self._error: Exception | None = None
+
+    def run(self, *, timeout_seconds: float, timeout_ms: int) -> ImpalaActiveExecution:
+        Thread(
+            target=self._execute,
+            name="impala-startup",
+            daemon=True,
+        ).start()
+        if not self._done.wait(timeout_seconds):
+            self._timed_out.set()
+            self._cleanup_async(require_cursor=True)
+            raise TimeoutError(f"Impala startup timed out after {timeout_ms} ms.")
+
+        with self._lock:
+            error = self._error
+            result = self._result
+        if error is not None:
+            raise error
+        if result is None:
+            raise RuntimeError("Impala startup finished without an active execution.")
+        return result
+
+    def _execute(self) -> None:
+        try:
+            connection = impala_connect(**self._connect_kwargs)
+            with self._lock:
+                self._connection = connection
+            self._raise_if_timed_out()
+
+            cursor = connection.cursor()
+            with self._lock:
+                self._cursor = cursor
+            self._raise_if_timed_out()
+
+            cursor.execute(f"SET QUERY_TIMEOUT_S={self._server_timeout_seconds}")
+            cursor.execute(f"SET EXEC_TIME_LIMIT_S={self._server_timeout_seconds}")
+            cursor.execute(self._sql)
+            self._raise_if_timed_out()
+
+            with self._lock:
+                self._result = ImpalaActiveExecution(
+                    connection=connection,
+                    cursor=cursor,
+                    row_limit=self._row_limit,
+                )
+        except Exception as exc:
+            with self._lock:
+                self._error = exc
+        finally:
+            self._done.set()
+            if self._error is not None or self._timed_out.is_set():
+                self._cleanup_async()
+
+    def _raise_if_timed_out(self) -> None:
+        if self._timed_out.is_set():
+            raise TimeoutError("Impala startup deadline expired.")
+
+    def _cleanup_async(self, *, require_cursor: bool = False) -> None:
+        with self._lock:
+            if self._cleanup_started:
+                return
+            cursor = self._cursor
+            connection = self._connection
+            if cursor is None and (require_cursor or connection is None):
+                return
+            self._cleanup_started = True
+            self._cursor = None
+            self._connection = None
+
+        Thread(
+            target=self._cleanup,
+            args=(cursor, connection),
+            name="impala-startup-cleanup",
+            daemon=True,
+        ).start()
+
+    @staticmethod
+    def _cleanup(cursor: Any | None, connection: Any | None) -> None:
+        if cursor is not None:
+            for operation_name in ("cancel_operation", "cancel"):
+                operation = getattr(cursor, operation_name, None)
+                if not callable(operation):
+                    continue
+                try:
+                    operation()
+                except Exception:
+                    logger.debug("Impala startup cancel failed", exc_info=True)
+                break
+            try:
+                cursor.close()
+            except Exception:
+                logger.debug("Impala startup cursor close failed", exc_info=True)
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                logger.debug("Impala startup connection close failed", exc_info=True)
+
+
 class ImpalaAdapter(EngineAdapter):
     """Execution adapter for Impala via impyla DBAPI."""
 
@@ -168,23 +316,42 @@ class ImpalaAdapter(EngineAdapter):
     ) -> ActiveExecution:
         options = self._options_factory.build(connection.extra_settings)
         default_db = connection.database or connection.schema_name
-        conn = impala_connect(
-            host=connection.host,
-            port=connection.port,
-            database=default_db,
-            auth_mechanism=options.auth_mechanism,
-            user=connection.username,
-            password=connection.password,
-            use_ssl=connection.secure,
-            use_http_transport=options.use_http_transport,
-            retries=options.retries,
-            ca_cert=options.ca_cert if connection.verify else None,
-            http_path=options.http_path,
-            timeout=options.timeout,
-        )
-        cursor = conn.cursor()
         timeout_seconds = max(1, ceil(request.timeout_ms / 1000))
-        cursor.execute(f"SET QUERY_TIMEOUT_S={timeout_seconds}")
-        cursor.execute(f"SET EXEC_TIME_LIMIT_S={timeout_seconds}")
-        cursor.execute(request.sql)
-        return ImpalaActiveExecution(connection=conn, cursor=cursor)
+        deadline_seconds = max(0.001, request.timeout_ms / 1000)
+        client_timeout_seconds = self._client_timeout_seconds(
+            configured_timeout=options.timeout,
+            deadline_seconds=deadline_seconds,
+        )
+        operation = _ImpalaStartupOperation(
+            connect_kwargs={
+                "host": connection.host,
+                "port": connection.port,
+                "database": default_db,
+                "auth_mechanism": options.auth_mechanism,
+                "user": connection.username,
+                "password": connection.password,
+                "use_ssl": connection.secure,
+                "use_http_transport": options.use_http_transport,
+                "retries": options.retries,
+                "ca_cert": options.ca_cert if connection.verify else None,
+                "http_path": options.http_path,
+                "timeout": client_timeout_seconds,
+            },
+            sql=request.sql,
+            server_timeout_seconds=timeout_seconds,
+            row_limit=request.row_limit,
+        )
+        return operation.run(
+            timeout_seconds=deadline_seconds,
+            timeout_ms=request.timeout_ms,
+        )
+
+    @staticmethod
+    def _client_timeout_seconds(
+        *,
+        configured_timeout: int | None,
+        deadline_seconds: float,
+    ) -> float:
+        if configured_timeout is None or configured_timeout <= 0:
+            return deadline_seconds
+        return min(float(configured_timeout), deadline_seconds)

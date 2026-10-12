@@ -6,11 +6,8 @@ from collections.abc import Callable
 from typing import Any
 
 from rhetorica_backend.domain.chat.orchestration import shared_kernel
-from rhetorica_backend.domain.chat.orchestration.final_response_contract import (
-    build_final_response_payload,
-)
-from rhetorica_backend.domain.chat.orchestration.llm_finalization_policy import (
-    LlmFinalizationPolicy,
+from rhetorica_backend.domain.chat.orchestration.final_payload_policy import (
+    FinalPayloadPolicy,
 )
 
 
@@ -43,6 +40,11 @@ class FinalPayloadBuilderService:
             answer = "Model did not return a valid answer."
         answer = shared_kernel.strip_thinking_tags(answer).strip() or answer
         answer = self._normalize_answer(answer=answer, state=state)
+        evidence = self._supported_evidence(parsed_payload.get("evidence"), state)
+        claim_evidence_links = self._links_for_evidence(
+            links=parsed_payload.get("claim_evidence_links"),
+            evidence=evidence,
+        )
 
         execution_attempt = shared_kernel.resolve_execution_attempt_from_payload(
             llm_payload=parsed_payload,
@@ -51,6 +53,11 @@ class FinalPayloadBuilderService:
         execution = shared_kernel.resolve_execution_from_payload(
             llm_payload=parsed_payload,
             state=state,
+        )
+        analysis_document = (
+            parsed_payload.get("analysis_document")
+            if isinstance(parsed_payload.get("analysis_document"), dict)
+            else shared_kernel.analysis_document_from_visualization_candidates(state=state)
         )
         payload = {
             "answer": answer,
@@ -70,34 +77,16 @@ class FinalPayloadBuilderService:
             "metadata_sources": sorted(state.metadata_sources),
             "context_tables": state.context_tables[:20],
             "runtime_context": shared_kernel.runtime_context_payload_from_state(state),
-            "analysis_plan": (
-                state.analysis_plan.model_dump(mode="json")
-                if getattr(state, "analysis_plan", None) is not None
-                else None
-            ),
-            "worker_results": [
-                result.model_dump(mode="json")
-                for result in getattr(state, "worker_results", [])[-5:]
-            ],
-            "checkpoint_digest": (
-                state.checkpoint.digest_payload()
-                if getattr(state, "checkpoint", None) is not None
-                else None
-            ),
             "claims": parsed_payload.get("claims", []),
-            "evidence": parsed_payload.get("evidence", []),
-            "claim_evidence_links": parsed_payload.get("claim_evidence_links", []),
+            "evidence": evidence,
+            "claim_evidence_links": claim_evidence_links,
             "uncertainty_flags": parsed_payload.get("uncertainty_flags", []),
             "execution": execution.model_dump(mode="json") if execution else None,
             "successful_executions": [
                 attempt.execution.model_dump(mode="json")
                 for attempt in shared_kernel.successful_execution_attempts(state)
             ],
-            "analysis_document": (
-                parsed_payload.get("analysis_document")
-                if isinstance(parsed_payload.get("analysis_document"), dict)
-                else None
-            ),
+            "analysis_document": analysis_document,
             "visualization": (
                 parsed_payload.get("visualization")
                 if isinstance(parsed_payload.get("visualization"), dict)
@@ -114,76 +103,50 @@ class FinalPayloadBuilderService:
             ).model_dump(mode="json"),
             "prompt_version": state.prompt_version,
             "warnings": state.warnings,
+            "files": [item.model_dump(mode="json") for item in state.published_files],
         }
         return shared_kernel.augment_payload_with_explainability(
             payload=payload,
             state=state,
         )
 
-    def finalize_direct_plain_text(
-        self,
-        *,
-        raw_final_text: str,
-        state: Any,
-        uncertainty_flags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        state.add_warning("deterministic_finalizer_used")
-        answer = shared_kernel.strip_thinking_tags(raw_final_text).strip() or raw_final_text
-        return self.build_final_payload_from_parsed(
-            parsed_payload=build_final_response_payload(
-                answer_markdown=answer,
-                sql=state.generated_sql,
-                uncertainty_flags=list(uncertainty_flags or []),
-            ),
-            fallback_answer=answer,
-            state=state,
-        )
+    @staticmethod
+    def _supported_evidence(value: Any, state: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        supported: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            if FinalPayloadPolicy.has_supported_evidence({"evidence": [item]}, state):
+                supported.append(item)
+        return supported
 
     @staticmethod
-    def fallback_final_payload() -> dict[str, Any]:
-        return {
-            "answer": (
-                "I could not produce a schema-valid answer. "
-                "Please retry the question with a narrower scope."
-            ),
-            "answer_markdown": (
-                "I could not produce a schema-valid answer. "
-                "Please retry the question with a narrower scope."
-            ),
-            "sql": None,
-            "target": None,
-            "claims": [],
-            "evidence": [],
-            "claim_evidence_links": [],
-            "uncertainty_flags": ["schema_validation_failed"],
-            "visualization": None,
-        }
-
-
-class RecoveryFinalizationService:
-    """Decorates LLM finalization policy with runtime-loop diagnostics."""
-
-    def __init__(
-        self,
+    def _links_for_evidence(
         *,
-        finalization_policy: LlmFinalizationPolicy,
-        emit_diagnostic_event: Callable[..., None],
-    ) -> None:
-        self._finalization_policy = finalization_policy
-        self._emit_diagnostic_event = emit_diagnostic_event
-
-    def attempt_execution_recovery_finalization(self, **kwargs: Any) -> dict[str, Any] | None:
-        return self._finalization_policy.attempt_execution_recovery_finalization(**kwargs)
-
-    def attempt_duplicate_loop_recovery_finalization(
-        self,
-        **kwargs: Any,
-    ) -> dict[str, Any] | None:
-        state = kwargs.get("state")
-        if state is not None:
-            self._emit_diagnostic_event(
-                "llm.duplicate_tool_loop.recovery_requested",
-                successful_execution_count=len(shared_kernel.successful_execution_attempts(state)),
-                warnings=list(state.warnings),
-            )
-        return self._finalization_policy.attempt_duplicate_loop_recovery_finalization(**kwargs)
+        links: Any,
+        evidence: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(links, list) or not evidence:
+            return []
+        supported_ids = {
+            item["evidence_id"]
+            for item in evidence
+            if isinstance(item.get("evidence_id"), str)
+        }
+        filtered: list[dict[str, Any]] = []
+        for link in links:
+            if not isinstance(link, dict) or not isinstance(link.get("claim_id"), str):
+                continue
+            evidence_ids = link.get("evidence_ids")
+            if not isinstance(evidence_ids, list):
+                continue
+            kept_ids = [
+                evidence_id
+                for evidence_id in evidence_ids
+                if isinstance(evidence_id, str) and evidence_id in supported_ids
+            ]
+            if kept_ids:
+                filtered.append({"claim_id": link["claim_id"], "evidence_ids": kept_ids})
+        return filtered

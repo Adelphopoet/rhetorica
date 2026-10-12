@@ -16,6 +16,7 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 ENV NEXT_TELEMETRY_DISABLED=1
+RUN apk add --no-cache zip
 COPY . .
 RUN pnpm --filter @rhetorica/web build
 

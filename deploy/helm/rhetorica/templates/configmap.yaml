@@ -1,3 +1,31 @@
+{{- $fullname := include "rhetorica.fullname" . -}}
+{{- $infraService := printf "%s-infra" $fullname -}}
+{{- $databaseUrl := .Values.config.databaseUrl -}}
+{{- $redisUrl := .Values.config.redisUrl -}}
+{{- $qdrantUrl := .Values.config.qdrantUrl -}}
+{{- $s3Endpoint := .Values.config.s3Endpoint -}}
+{{- $s3Bucket := .Values.config.s3Bucket -}}
+{{- $sandboxUrl := .Values.config.sandboxUrl -}}
+{{- if .Values.infra.enabled -}}
+{{- if not $databaseUrl -}}
+{{- $databaseUrl = printf "postgresql+psycopg://%s:%s@%s:%v/%s" .Values.infra.postgres.username .Values.infra.postgres.password $infraService (.Values.infra.postgres.servicePort | int) .Values.infra.postgres.database -}}
+{{- end -}}
+{{- if not $redisUrl -}}
+{{- $redisUrl = printf "redis://%s:%v/0" $infraService (.Values.infra.redis.servicePort | int) -}}
+{{- end -}}
+{{- if not $qdrantUrl -}}
+{{- $qdrantUrl = printf "http://%s:%v" $infraService (.Values.infra.qdrant.servicePort | int) -}}
+{{- end -}}
+{{- if not $s3Endpoint -}}
+{{- $s3Endpoint = printf "http://%s:%v" $infraService (.Values.infra.minio.servicePort | int) -}}
+{{- end -}}
+{{- if not $s3Bucket -}}
+{{- $s3Bucket = .Values.infra.minio.bucket -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.sandbox.enabled (not $sandboxUrl) -}}
+{{- $sandboxUrl = printf "http://%s-sandbox:%v" $fullname (.Values.sandbox.service.port | int) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,13 +33,113 @@ metadata:
   labels:
     {{- include "rhetorica.labels" . | nindent 4 }}
 data:
+  SCENARIO_WORKFLOWS_ENABLED: {{ .Values.scenarioWorkflows.enabled | quote }}
+  TEMPORAL_ADDRESS: {{ include "rhetorica.temporalAddress" . | quote }}
+  TEMPORAL_NAMESPACE: {{ .Values.scenarioWorkflows.temporal.namespace | quote }}
+  TEMPORAL_TASK_QUEUE: {{ .Values.scenarioWorkflows.temporal.taskQueue | quote }}
   API_APP_ENV: {{ .Values.config.appEnv | quote }}
   WORKER_APP_ENV: {{ .Values.config.appEnv | quote }}
   LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   LOG_JSON: {{ .Values.config.logJson | quote }}
   LOG_LLM_CONTENT: {{ .Values.config.logLlmContent | quote }}
-  DATABASE_URL: {{ .Values.config.databaseUrl | quote }}
-  REDIS_URL: {{ .Values.config.redisUrl | quote }}
-  S3_ENDPOINT: {{ .Values.config.s3Endpoint | quote }}
-  S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
+  OTEL_ENABLED: {{ .Values.config.otelEnabled | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otelExporterOtlpEndpoint | quote }}
+  OTEL_EXPORTER_OTLP_INSECURE: {{ .Values.config.otelExporterOtlpInsecure | quote }}
+  OTEL_EXPORTER_OTLP_TIMEOUT: {{ .Values.config.otelExporterOtlpTimeout | quote }}
+  OTEL_BSP_EXPORT_TIMEOUT: {{ .Values.config.otelBatchSpanExportTimeout | quote }}
+  OTEL_TRACES_SAMPLER: {{ .Values.config.otelTracesSampler | quote }}
+  OTEL_TRACES_SAMPLER_ARG: {{ .Values.config.otelTracesSamplerArg | quote }}
+  OTEL_METRIC_EXPORT_INTERVAL: {{ .Values.config.otelMetricExportInterval | quote }}
+  OTEL_METRIC_EXPORT_TIMEOUT: {{ .Values.config.otelMetricExportTimeout | quote }}
+  LANGFUSE_ENABLED: {{ .Values.config.langfuseEnabled | quote }}
+  LANGFUSE_CAPTURE_CONTENT: {{ .Values.config.langfuseCaptureContent | quote }}
+  LANGFUSE_ANNOTATION_QUEUE_ID: {{ .Values.config.langfuseAnnotationQueueId | quote }}
+  LANGFUSE_FEEDBACK_SCORE_NAME: {{ .Values.config.langfuseFeedbackScoreName | quote }}
+  LANGFUSE_REVIEW_PRIORITY_SCORE_NAME: {{ .Values.config.langfuseReviewPriorityScoreName | quote }}
+  {{- if not .Values.database.existingSecret }}
+  DATABASE_URL: {{ $databaseUrl | quote }}
+  {{- end }}
+  REDIS_URL: {{ $redisUrl | quote }}
+  RATE_LIMIT_REDIS_KEY_PREFIX: {{ .Values.config.rateLimitRedisKeyPrefix | quote }}
+  CELERY_BROKER_URL: {{ default $redisUrl .Values.config.celeryBrokerUrl | quote }}
+  CELERY_RESULT_BACKEND: {{ default $redisUrl .Values.config.celeryResultBackend | quote }}
+  WORKER_CELERY_BROKER_URL: {{ default $redisUrl .Values.config.celeryBrokerUrl | quote }}
+  WORKER_CELERY_RESULT_BACKEND: {{ default $redisUrl .Values.config.celeryResultBackend | quote }}
+  QDRANT_URL: {{ $qdrantUrl | quote }}
+  RAG_QDRANT_URL: {{ $qdrantUrl | quote }}
+  RAG_COLLECTION_NAME: {{ .Values.config.ragCollectionName | quote }}
+  RAG_VECTOR_SIZE: {{ .Values.config.ragVectorSize | quote }}
+  RAG_DISTANCE: {{ .Values.config.ragDistance | quote }}
+  RAG_PREFER_GRPC: {{ .Values.config.ragPreferGrpc | quote }}
+  RAG_EMBEDDING_MODEL: {{ .Values.config.ragEmbeddingModel | quote }}
+  RAG_CONFIDENCE_THRESHOLD: {{ .Values.config.ragConfidenceThreshold | quote }}
+  RAG_MERGE_SIMILARITY_THRESHOLD: {{ .Values.config.ragMergeSimilarityThreshold | quote }}
+  DOCUMENTATION_BASE_URL: {{ .Values.config.documentationBaseUrl | quote }}
+  DOCUMENTATION_CONNECTOR_NAME: {{ .Values.config.documentationConnectorName | quote }}
+  DOCUMENTATION_WORKSPACE_ID: {{ .Values.config.documentationWorkspaceId | quote }}
+  DOCUMENTATION_INDEX_URL: {{ .Values.config.documentationIndexUrl | quote }}
+  DOCUMENTATION_CONTENT_FORMAT: {{ .Values.config.documentationContentFormat | quote }}
+  DOCUMENTATION_AUTH_TYPE: {{ .Values.config.documentationAuthType | quote }}
+  DOCUMENTATION_VERIFY_TLS: {{ .Values.config.documentationVerifyTls | quote }}
+  DOCUMENTATION_INCLUDE_PATHS: {{ .Values.config.documentationIncludePaths | quote }}
+  DOCUMENTATION_EXCLUDE_PATHS: {{ .Values.config.documentationExcludePaths | quote }}
+  DOCUMENTATION_SYNC_ENABLED: {{ .Values.config.documentationSyncEnabled | quote }}
+  DOCUMENTATION_SYNC_INTERVAL_MINUTES: {{ .Values.config.documentationSyncIntervalMinutes | quote }}
+  DOCUMENTATION_QDRANT_URL: {{ $qdrantUrl | quote }}
+  DOCUMENTATION_QDRANT_COLLECTION: {{ .Values.config.documentationQdrantCollection | quote }}
+  DOCUMENTATION_QDRANT_PREFER_GRPC: {{ .Values.config.documentationQdrantPreferGrpc | quote }}
+  DOCUMENTATION_VECTOR_SIZE: {{ .Values.config.documentationVectorSize | quote }}
+  DOCUMENTATION_EMBEDDING_BASE_URL: {{ .Values.config.documentationEmbeddingBaseUrl | quote }}
+  DOCUMENTATION_EMBEDDING_MODEL: {{ .Values.config.documentationEmbeddingModel | quote }}
+  DOCUMENTATION_EMBEDDING_ENDPOINT_PATH: {{ .Values.config.documentationEmbeddingEndpointPath | quote }}
+  DOCUMENTATION_EMBEDDING_TIMEOUT_SECONDS: {{ .Values.config.documentationEmbeddingTimeoutSeconds | quote }}
+  S3_ENDPOINT: {{ $s3Endpoint | quote }}
+  S3_BUCKET: {{ $s3Bucket | quote }}
+  S3_REGION: {{ .Values.config.s3Region | quote }}
+  S3_SECURE: {{ .Values.config.s3Secure | quote }}
+  SANDBOX_URL: {{ $sandboxUrl | quote }}
+  FILE_MAX_INPUT_BYTES: {{ .Values.config.fileMaxInputBytes | quote }}
+  FILE_MAX_FILES_PER_TURN: {{ .Values.config.fileMaxFilesPerTurn | quote }}
+  FILE_MAX_TURN_BYTES: {{ .Values.config.fileMaxTurnBytes | quote }}
+  FILE_MAX_OUTPUT_BYTES: {{ .Values.config.fileMaxOutputBytes | quote }}
+  FILE_MAX_SESSION_OUTPUT_BYTES: {{ .Values.config.fileMaxSessionOutputBytes | quote }}
+  FILE_SQL_EXPORT_MAX_ROWS: {{ .Values.config.fileSqlExportMaxRows | quote }}
+  FILE_SQL_EXPORT_MAX_BYTES: {{ .Values.config.fileSqlExportMaxBytes | quote }}
+  SQL_RESULT_SNAPSHOT_MAX_BYTES: {{ .Values.config.sqlResultSnapshotMaxBytes | quote }}
+  SQL_RESULT_SNAPSHOT_MAX_CELL_BYTES: {{ .Values.config.sqlResultSnapshotMaxCellBytes | quote }}
+  SQL_RESULT_SNAPSHOT_MAX_ROW_BYTES: {{ .Values.config.sqlResultSnapshotMaxRowBytes | quote }}
+  SQL_RESULT_PREVIEW_ROWS: {{ .Values.config.sqlResultPreviewRows | quote }}
+  FILE_USER_QUOTA_BYTES: {{ .Values.config.fileUserQuotaBytes | quote }}
+  FILE_WORKSPACE_QUOTA_BYTES: {{ .Values.config.fileWorkspaceQuotaBytes | quote }}
+  FILE_STAGED_TTL_HOURS: {{ .Values.config.fileStagedTtlHours | quote }}
   LLM_BASE_URL: {{ .Values.config.llmBaseUrl | quote }}
+  AUTH_ENABLED: {{ .Values.config.authEnabled | quote }}
+  AUTH_DEFAULT_WORKSPACE_ID: {{ .Values.config.authDefaultWorkspaceId | quote }}
+  AUTH_COOKIE_SECURE: {{ .Values.config.authCookieSecure | quote }}
+  AUTH_COOKIE_SAMESITE: {{ .Values.config.authCookieSameSite | quote }}
+  AUTH_LOCAL_ADMIN_DISPLAY_NAME: {{ .Values.config.authLocalAdminDisplayName | quote }}
+  AUTH_BOOTSTRAP_ENABLED: {{ .Values.config.authBootstrapEnabled | quote }}
+  AUTH_KEYCLOAK_ENABLED: {{ .Values.config.authKeycloakEnabled | quote }}
+  AUTH_KEYCLOAK_ISSUER_URL: {{ .Values.config.authKeycloakIssuerUrl | quote }}
+  AUTH_KEYCLOAK_CLIENT_ID: {{ .Values.config.authKeycloakClientId | quote }}
+  AUTH_KEYCLOAK_ADMIN_GROUPS: {{ .Values.config.authKeycloakAdminGroups | quote }}
+  AUTH_KEYCLOAK_ANALYST_GROUPS: {{ .Values.config.authKeycloakAnalystGroups | quote }}
+  AUTH_KEYCLOAK_REQUIRE_MAPPED_GROUP: {{ .Values.config.authKeycloakRequireMappedGroup | quote }}
+  AUTH_OAUTH_CIMD_ENABLED: {{ .Values.config.authOauthCimdEnabled | quote }}
+  AUTH_OAUTH_TRANSACTION_TTL_MINUTES: {{ .Values.config.authOauthTransactionTtlMinutes | quote }}
+  AUTH_OAUTH_CODE_TTL_MINUTES: {{ .Values.config.authOauthCodeTtlMinutes | quote }}
+  AUTH_OAUTH_ACCESS_TTL_MINUTES: {{ .Values.config.authOauthAccessTtlMinutes | quote }}
+  AUTH_OAUTH_REFRESH_TTL_DAYS: {{ .Values.config.authOauthRefreshTtlDays | quote }}
+  AUTH_OAUTH_DCR_REGISTRATIONS_PER_SOURCE: {{ .Values.config.authOauthDcrRegistrationsPerSource | quote }}
+  AUTH_OAUTH_DCR_MAX_CLIENTS: {{ .Values.config.authOauthDcrMaxClients | quote }}
+  AUTH_OAUTH_RECORD_RETENTION_HOURS: {{ .Values.config.authOauthRecordRetentionHours | quote }}
+  AUTH_OAUTH_DCR_INACTIVE_CLIENT_RETENTION_DAYS: {{ .Values.config.authOauthDcrInactiveClientRetentionDays | quote }}
+  MCP_ALLOWED_HOSTS: {{ .Values.config.mcpAllowedHosts | quote }}
+  MCP_ALLOWED_ORIGINS: {{ .Values.config.mcpAllowedOrigins | quote }}
+  RHETORICA_API_URL: {{ default (printf "http://%s-api:%v" (include "rhetorica.fullname" .) .Values.api.service.port) .Values.config.webApiUrl | quote }}
+  RHETORICA_PUBLIC_URL: {{ .Values.config.webPublicUrl | quote }}
+  RHETORICA_PUBLIC_API_URL: {{ default .Values.config.webPublicUrl .Values.config.publicApiUrl | quote }}
+  RHETORICA_KEYCLOAK_ISSUER_URL: {{ .Values.config.authKeycloakIssuerUrl | quote }}
+  RHETORICA_KEYCLOAK_CLIENT_ID: {{ .Values.config.authKeycloakClientId | quote }}
+  RHETORICA_KEYCLOAK_REDIRECT_URI: {{ .Values.config.webKeycloakRedirectUri | quote }}
+  RHETORICA_KEYCLOAK_POST_LOGOUT_REDIRECT_URI: {{ .Values.config.webKeycloakPostLogoutRedirectUri | quote }}

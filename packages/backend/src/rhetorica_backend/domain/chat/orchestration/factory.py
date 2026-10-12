@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from rhetorica_backend.domain.chat.conversation.conversation_manager import (
     ConversationManager,
-)
-from rhetorica_backend.domain.chat.metadata import (
-    MetadataFetcher,
-    resolve_metadata_runtime_services,
 )
 from rhetorica_backend.domain.chat.orchestration.chat_orchestrator import (
     ChatOrchestrator,
@@ -19,27 +16,42 @@ from rhetorica_backend.domain.chat.orchestration.chat_orchestrator import (
 from rhetorica_backend.domain.chat.orchestration.streaming_orchestrator import (
     StreamingChatOrchestrator,
 )
+from rhetorica_backend.domain.chat.orchestration.tool_file_capability_service import (
+    ToolFileCapabilityService,
+)
 from rhetorica_backend.domain.chat.sql.sql_router import SqlRouter
+from rhetorica_backend.domain.documentation import DocumentationRetrievalService
 from rhetorica_backend.domain.execution.service import ExecutionService
 from rhetorica_backend.domain.rag.retrieval_service import RagInsightRetriever
-from rhetorica_backend.infra.postgres.chat_repository import ChatRepository
-from rhetorica_backend.infra.postgres.confluence_connector_repository import (
-    ConfluenceConnectorRepository,
+from rhetorica_backend.infra.postgres.agent_session import PostgresAgentSessionStore
+from rhetorica_backend.infra.postgres.airflow_connector_repository import (
+    AirflowConnectorRepository,
 )
+from rhetorica_backend.infra.postgres.chat_repository import ChatRepository
 from rhetorica_backend.infra.postgres.connector_repository import ConnectorRepository
-from rhetorica_backend.infra.postgres.jira_connector_repository import (
-    JiraConnectorRepository,
+from rhetorica_backend.infra.postgres.documentation_connector_repository import (
+    DocumentationConnectorRepository,
+)
+from rhetorica_backend.infra.postgres.file_artifact_repository import FileArtifactRepository
+from rhetorica_backend.infra.postgres.gitlab_connector_repository import (
+    GitLabConnectorRepository,
+)
+from rhetorica_backend.infra.postgres.kubernetes_connector_repository import (
+    KubernetesConnectorRepository,
 )
 from rhetorica_backend.infra.postgres.llm_connector_repository import (
     LlmConnectorRepository,
 )
-from rhetorica_backend.infra.postgres.metadata_usage_store import (
-    PostgresMetadataUsageStore,
+from rhetorica_backend.infra.postgres.llm_credential_binding_repository import (
+    LlmCredentialBindingRepository,
 )
-from rhetorica_backend.infra.postgres.openmetadata_connector_repository import (
-    OpenMetadataConnectorRepository,
+from rhetorica_backend.infra.postgres.mcp_connector_repository import (
+    McpConnectorRepository,
 )
 from rhetorica_backend.infra.postgres.rag_connector_repository import RagConnectorRepository
+from rhetorica_backend.infra.postgres.victoriametrics_connector_repository import (
+    VictoriaMetricsConnectorRepository,
+)
 from rhetorica_backend.infra.postgres.workspace_skill_repository import (
     WorkspaceSkillRepository,
 )
@@ -58,27 +70,34 @@ class ChatServiceFactory:
         execution_service: ExecutionService,
         db_connector_repository: ConnectorRepository,
         llm_connector_repository: LlmConnectorRepository,
-        openmetadata_connector_repository: OpenMetadataConnectorRepository,
         rag_connector_repository: RagConnectorRepository,
-        confluence_connector_repository: ConfluenceConnectorRepository | None = None,
-        jira_connector_repository: JiraConnectorRepository | None = None,
+        documentation_connector_repository: DocumentationConnectorRepository | None = None,
+        gitlab_connector_repository: GitLabConnectorRepository | None = None,
+        airflow_connector_repository: AirflowConnectorRepository | None = None,
+        kubernetes_connector_repository: KubernetesConnectorRepository | None = None,
+        victoriametrics_connector_repository: VictoriaMetricsConnectorRepository | None = None,
+        mcp_connector_repository: McpConnectorRepository | None = None,
         workspace_skill_repository: WorkspaceSkillRepository | None = None,
         chat_repository: ChatRepository | None = None,
         db: Any | None = None,
         capability_registry: LlmCapabilityRegistry | None = None,
+        file_capability_service_factory: Callable[[str], ToolFileCapabilityService] | None = None,
     ):
         self._execution_service = execution_service
         self._db_connector_repository = db_connector_repository
         self._llm_connector_repository = llm_connector_repository
-        self._openmetadata_connector_repository = openmetadata_connector_repository
         self._rag_connector_repository = rag_connector_repository
-        self._confluence_connector_repository = confluence_connector_repository
-        self._jira_connector_repository = jira_connector_repository
+        self._documentation_connector_repository = documentation_connector_repository
+        self._gitlab_connector_repository = gitlab_connector_repository
+        self._airflow_connector_repository = airflow_connector_repository
+        self._kubernetes_connector_repository = kubernetes_connector_repository
+        self._victoriametrics_connector_repository = victoriametrics_connector_repository
+        self._mcp_connector_repository = mcp_connector_repository
         self._workspace_skill_repository = workspace_skill_repository
         self._chat_repository = chat_repository
         self._db = db
-        self._metadata_usage_store = PostgresMetadataUsageStore(db) if db is not None else None
         self._capability_registry = capability_registry
+        self._file_capability_service_factory = file_capability_service_factory
         self._logger = logging.getLogger(__name__)
 
     def create_orchestrator(self, current_user_id: str | None = None) -> ChatOrchestrator:
@@ -88,47 +107,57 @@ class ChatServiceFactory:
         Returns:
             Configured ChatOrchestrator instance.
         """
-        metadata_services = resolve_metadata_runtime_services(
-            metadata_usage_store=self._metadata_usage_store
-        )
-        metadata_fetcher = MetadataFetcher(
-            payload_mapper=metadata_services.payload_mapper,
-            catalog_gateway=metadata_services.catalog_gateway,
-            table_loader=metadata_services.table_loader,
-            ranking_service=metadata_services.ranking_service,
-            semantic_grounding_service=metadata_services.semantic_grounding_service,
-            catalog_search_service=metadata_services.catalog_search_service,
-        )
-
         # Create SQL router
         sql_router = SqlRouter(
             execution_service=self._execution_service,
             db_connector_repository=self._db_connector_repository,
+            actor_id=current_user_id,
         )
 
+        agent_session_store = (
+            PostgresAgentSessionStore(self._db, current_user_id) if self._db is not None else None
+        )
         # Create conversation manager
         conversation_manager = ConversationManager(
             chat_repository=self._chat_repository,
             current_user_id=current_user_id,
+            artifact_repository=(
+                FileArtifactRepository(self._db) if self._db is not None else None
+            ),
+            agent_session_store=agent_session_store,
         )
 
         # Create orchestrator
         orchestrator = ChatOrchestrator(
             llm_connector_repository=self._llm_connector_repository,
-            openmetadata_connector_repository=self._openmetadata_connector_repository,
-            metadata_fetcher=metadata_fetcher,
             sql_router=sql_router,
             conversation_manager=conversation_manager,
             db_connector_repository=self._db_connector_repository,
             rag_retriever=RagInsightRetriever(self._rag_connector_repository),
-            confluence_connector_repository=self._confluence_connector_repository,
-            jira_connector_repository=self._jira_connector_repository,
+            documentation_connector_repository=self._documentation_connector_repository,
+            documentation_retrieval_service=(
+                DocumentationRetrievalService(self._documentation_connector_repository)
+                if self._documentation_connector_repository is not None
+                else None
+            ),
+            gitlab_connector_repository=self._gitlab_connector_repository,
+            airflow_connector_repository=self._airflow_connector_repository,
+            kubernetes_connector_repository=self._kubernetes_connector_repository,
+            victoriametrics_connector_repository=self._victoriametrics_connector_repository,
+            mcp_connector_repository=self._mcp_connector_repository,
             workspace_skill_repository=self._workspace_skill_repository,
-            metadata_table_loader=metadata_services.table_loader,
-            metadata_catalog_search_service=metadata_services.catalog_search_service,
-            metadata_ranking_service=metadata_services.ranking_service,
-            metadata_semantic_grounding_service=metadata_services.semantic_grounding_service,
             capability_registry=self._capability_registry,
+            file_capability_service=(
+                self._file_capability_service_factory(current_user_id)
+                if self._file_capability_service_factory is not None and current_user_id is not None
+                else None
+            ),
+            agent_session_factory=(
+                agent_session_store.for_conversation if agent_session_store is not None else None
+            ),
+            llm_credential_binding_repository=(
+                LlmCredentialBindingRepository(self._db) if self._db is not None else None
+            ),
         )
 
         return orchestrator
@@ -143,47 +172,57 @@ class ChatServiceFactory:
         Returns:
             Configured StreamingChatOrchestrator instance.
         """
-        metadata_services = resolve_metadata_runtime_services(
-            metadata_usage_store=self._metadata_usage_store
-        )
-        metadata_fetcher = MetadataFetcher(
-            payload_mapper=metadata_services.payload_mapper,
-            catalog_gateway=metadata_services.catalog_gateway,
-            table_loader=metadata_services.table_loader,
-            ranking_service=metadata_services.ranking_service,
-            semantic_grounding_service=metadata_services.semantic_grounding_service,
-            catalog_search_service=metadata_services.catalog_search_service,
-        )
-
         # Create SQL router
         sql_router = SqlRouter(
             execution_service=self._execution_service,
             db_connector_repository=self._db_connector_repository,
+            actor_id=current_user_id,
         )
 
+        agent_session_store = (
+            PostgresAgentSessionStore(self._db, current_user_id) if self._db is not None else None
+        )
         # Create conversation manager
         conversation_manager = ConversationManager(
             chat_repository=self._chat_repository,
             current_user_id=current_user_id,
+            artifact_repository=(
+                FileArtifactRepository(self._db) if self._db is not None else None
+            ),
+            agent_session_store=agent_session_store,
         )
 
         # Create streaming orchestrator
         orchestrator = StreamingChatOrchestrator(
             llm_connector_repository=self._llm_connector_repository,
-            openmetadata_connector_repository=self._openmetadata_connector_repository,
-            metadata_fetcher=metadata_fetcher,
             sql_router=sql_router,
             conversation_manager=conversation_manager,
             db_connector_repository=self._db_connector_repository,
             rag_retriever=RagInsightRetriever(self._rag_connector_repository),
-            confluence_connector_repository=self._confluence_connector_repository,
-            jira_connector_repository=self._jira_connector_repository,
+            documentation_connector_repository=self._documentation_connector_repository,
+            documentation_retrieval_service=(
+                DocumentationRetrievalService(self._documentation_connector_repository)
+                if self._documentation_connector_repository is not None
+                else None
+            ),
+            gitlab_connector_repository=self._gitlab_connector_repository,
+            airflow_connector_repository=self._airflow_connector_repository,
+            kubernetes_connector_repository=self._kubernetes_connector_repository,
+            victoriametrics_connector_repository=self._victoriametrics_connector_repository,
+            mcp_connector_repository=self._mcp_connector_repository,
             workspace_skill_repository=self._workspace_skill_repository,
-            metadata_table_loader=metadata_services.table_loader,
-            metadata_catalog_search_service=metadata_services.catalog_search_service,
-            metadata_ranking_service=metadata_services.ranking_service,
-            metadata_semantic_grounding_service=metadata_services.semantic_grounding_service,
             capability_registry=self._capability_registry,
+            file_capability_service=(
+                self._file_capability_service_factory(current_user_id)
+                if self._file_capability_service_factory is not None and current_user_id is not None
+                else None
+            ),
+            agent_session_factory=(
+                agent_session_store.for_conversation if agent_session_store is not None else None
+            ),
+            llm_credential_binding_repository=(
+                LlmCredentialBindingRepository(self._db) if self._db is not None else None
+            ),
         )
 
         return orchestrator
@@ -213,10 +252,13 @@ def create_chat_service_factory(
     # Create repositories
     db_connector_repository = ConnectorRepository(db=db_runtime)
     llm_connector_repository = LlmConnectorRepository(db=db_runtime)
-    openmetadata_connector_repository = OpenMetadataConnectorRepository(db=db_runtime)
     rag_connector_repository = RagConnectorRepository(db=db_runtime)
-    confluence_connector_repository = ConfluenceConnectorRepository(db=db_runtime)
-    jira_connector_repository = JiraConnectorRepository(db=db_runtime)
+    documentation_connector_repository = DocumentationConnectorRepository(db=db_runtime)
+    gitlab_connector_repository = GitLabConnectorRepository(db=db_runtime)
+    airflow_connector_repository = AirflowConnectorRepository(db=db_runtime)
+    kubernetes_connector_repository = KubernetesConnectorRepository(db=db_runtime)
+    victoriametrics_connector_repository = VictoriaMetricsConnectorRepository(db=db_runtime)
+    mcp_connector_repository = McpConnectorRepository(db=db_runtime)
     workspace_skill_repository = WorkspaceSkillRepository(db=db_runtime)
     chat_repository = ChatRepository(db=db_runtime)
 
@@ -224,10 +266,13 @@ def create_chat_service_factory(
         execution_service=execution_service,
         db_connector_repository=db_connector_repository,
         llm_connector_repository=llm_connector_repository,
-        openmetadata_connector_repository=openmetadata_connector_repository,
         rag_connector_repository=rag_connector_repository,
-        confluence_connector_repository=confluence_connector_repository,
-        jira_connector_repository=jira_connector_repository,
+        documentation_connector_repository=documentation_connector_repository,
+        gitlab_connector_repository=gitlab_connector_repository,
+        airflow_connector_repository=airflow_connector_repository,
+        kubernetes_connector_repository=kubernetes_connector_repository,
+        victoriametrics_connector_repository=victoriametrics_connector_repository,
+        mcp_connector_repository=mcp_connector_repository,
         workspace_skill_repository=workspace_skill_repository,
         chat_repository=chat_repository,
         db=db_runtime,

@@ -21,6 +21,7 @@ from rhetorica_backend.infra.celery_runtime import build_celery_app
 from rhetorica_backend.infra.postgres.connector_repository import ConnectorRepository
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 
+from rhetorica_api.app.identity import resolve_current_user
 from rhetorica_api.app.settings import settings
 
 router = APIRouter(prefix="/v1/sql", tags=["execution"])
@@ -176,15 +177,18 @@ def submit_sql_execution(payload: ExternalSqlExecutionRequest) -> ExecuteSqlResp
 @router.get("/executions/{execution_id}", response_model=ExecutionDetailResponse)
 def get_execution(
     execution_id: str,
-    actor_id: str | None = Query(default=None),
 ) -> ExecutionDetailResponse:
     service, _ = _services()
     detail = service.get_detail(execution_id=execution_id, result=_result_payload(execution_id))
     if detail is None:
         raise HTTPException(status_code=404, detail="Execution id is unknown.")
-    # ACL check: if execution has actor_id, require matching actor_id
-    # Legacy executions (actor_id=None) are accessible without auth
-    if detail.history.actor_id is not None and detail.history.actor_id != actor_id:
+    # Legacy executions without an actor remain readable. Protected executions
+    # trust only the authenticated identity, never a caller-supplied actor id.
+    if (
+        detail.history.actor_id is not None
+        and detail.history.actor_id
+        != resolve_current_user(detail.history.workspace_id).id
+    ):
         raise HTTPException(status_code=403, detail="Access denied.")
     return detail
 

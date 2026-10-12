@@ -27,7 +27,7 @@ function EvidenceCountBadge({
   count: number;
   typeLabels: string[];
 }) {
-  const label = typeLabels.length > 0 ? typeLabels.join(", ") : "refs";
+  const label = typeLabels.length > 0 ? typeLabels.join(", ") : "ссылок";
   return (
     <Badge variant="default" className="text-xs">
       {count} {label}
@@ -60,20 +60,20 @@ function ClaimBadgeItem({
       onClick={onClick}
       className={cn(
         "flex flex-col gap-1.5 rounded-xl border p-3 text-left transition-all duration-200",
-        "hover:border-[#2e3d59] hover:bg-[#0c1525]/50",
-        "focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5da8ff]/50",
-        isSelected && "border-[#5da8ff]/60 bg-[#0c1525]/70",
+        "hover:border-border-strong hover:bg-surface/50",
+        "focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
+        isSelected && "border-accent/60 bg-surface/70",
         isUnverified
-          ? "border-amber-500/30 bg-amber-500/5"
-          : "border-[#22314d] bg-[#09111e]/60"
+          ? "border-warning/30 bg-warning/5"
+          : "border-border-strong bg-surface/60"
       )}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           {isVerified ? (
-            <CheckCircle className="h-3.5 w-3.5 text-[#38c67d]" />
+            <CheckCircle className="h-3.5 w-3.5 text-success" />
           ) : (
-            <AlertTriangle className="h-3.5 w-3.5 text-[#f2b14b]" />
+            <AlertTriangle className="h-3.5 w-3.5 text-warning" />
           )}
           <Badge
             variant={isVerified ? "success" : "warning"}
@@ -84,14 +84,14 @@ function ClaimBadgeItem({
         </div>
         <div className="flex items-center gap-2">
           <EvidenceCountBadge count={evidenceCount} typeLabels={evidenceTypeSummary} />
-          <Eye className="h-4 w-4 text-[#7484a3] hover:text-[#5da8ff] transition-colors" />
+          <Eye className="h-4 w-4 text-muted hover:text-accent transition-colors" />
         </div>
       </div>
 
       <p
         className={cn(
           "text-sm leading-snug",
-          isUnverified ? "text-[#f2b14b]/90" : "text-[#d5e2fb]"
+          isUnverified ? "text-warning/90" : "text-primary"
         )}
       >
         {truncateText(claim.text, 150)}
@@ -124,13 +124,19 @@ function getEvidenceTypeSummary(
     labels.push(`${typeCounts.execution_result} SQL`);
   }
   if (typeCounts.metadata_entity) {
-    labels.push(`${typeCounts.metadata_entity} model`);
+    labels.push(`${typeCounts.metadata_entity} моделей`);
+  }
+  if (typeCounts.gitlab_file) {
+    labels.push(`${typeCounts.gitlab_file} файлов GitLab`);
+  }
+  if (typeCounts.airflow_runtime) {
+    labels.push(`${typeCounts.airflow_runtime} Airflow`);
   }
   if (typeCounts.rag_insight) {
-    labels.push(`${typeCounts.rag_insight} snippet`);
+    labels.push(`${typeCounts.rag_insight} фрагментов`);
   }
-  if (typeCounts.confluence_page) {
-    labels.push(`${typeCounts.confluence_page} doc`);
+  if (typeCounts.internal_documentation) {
+    labels.push(`${typeCounts.internal_documentation} документов`);
   }
 
   return { count: evidence.length, labels };
@@ -182,10 +188,10 @@ export function ClaimEvidenceSection({
 
   return (
     <>
-      <div className="my-3 rounded-2xl border border-[#1b2740] bg-[#09111e]/70 p-3">
+      <div className="my-3 rounded-2xl border border-border bg-surface/70 p-3">
         <div className="mb-2 flex items-center gap-2">
-          <span className="text-xs font-medium uppercase tracking-wide text-[#7484a3]">
-            Claims
+          <span className="text-xs font-medium uppercase tracking-wide text-muted">
+            Утверждения
           </span>
           <Badge variant="default" className="text-[10px]">
             {claims.length}

@@ -22,18 +22,18 @@ import { calculateNextDesktopPanelWidth, ResultSurface } from "./result-surface"
 import { buildResultSurfaceViewModel } from "@/features/chat/chatViewModel";
 
 const payload: ChatAskResponse = {
-  answer: "Weekly GMV is trending up.",
+  answer: "Weekly GMV is trending up",
   conversation_id: "conv-1",
   generated_sql: "select week, gmv from metrics.weekly_gmv",
   optimization_trace: null,
   selected_database_connector: "clickhouse-main",
   assistant_message_id: "msg-1",
-  metadata_sources: ["dbt", "openmetadata"],
+  metadata_sources: ["dbt", "mcp"],
   context_tables: ["metrics.weekly_gmv"],
   claims: [
     {
       claim_id: "claim-1",
-      text: "GMV increased week over week.",
+      text: "GMV increased week over week",
       status: "verified",
     },
   ],
@@ -87,7 +87,7 @@ const optimizedPayload: ChatAskResponse = {
       {
         rule_id: "query-join-filter-before",
         title: "Filter can be pushed below INNER JOIN",
-        summary: "Single-table predicates can move closer to scans.",
+        summary: "Single-table predicates can move closer to scans",
         severity: "info",
         applies_to: ["orders"],
         citations: [],
@@ -98,7 +98,7 @@ const optimizedPayload: ChatAskResponse = {
         action_id: "pushdown_predicates",
         kind: "rewrite",
         title: "Push down single-table predicates before INNER JOIN",
-        summary: "Safe single-table predicates were moved closer to source scans.",
+        summary: "Safe single-table predicates were moved closer to source scans",
         sql: "select week, gmv from metrics.weekly_gmv where week >= '2026-W13'",
         applied: true,
         citations: [],
@@ -122,7 +122,7 @@ const reportPayload: ChatAskResponse = {
   analysis_document: {
     document_version: "v1",
     title: "Financial report",
-    executive_summary: "GMV grew week over week.",
+    executive_summary: "GMV grew week over week",
     warnings: [],
     provenance: {
       source_type: "chat_answer",
@@ -133,7 +133,7 @@ const reportPayload: ChatAskResponse = {
       {
         kind: "finding",
         title: "Key takeaway",
-        body: "GMV grew week over week.",
+        body: "GMV grew week over week",
         emphasis: "important",
       },
     ],
@@ -166,7 +166,7 @@ describe("ResultSurface", () => {
       </ToastProvider>
     );
 
-    expect(screen.queryByText(/analyst inspection rail/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/панель проверки аналитика/i)).not.toBeInTheDocument();
   });
 
   it("renders result, SQL, and evidence tabs", async () => {
@@ -177,23 +177,23 @@ describe("ResultSurface", () => {
     fireEvent.click(screen.getByRole("button", { name: /sql/i }));
     expect(await screen.findByText(/sql editor:/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /evidence/i }));
+    fireEvent.click(screen.getByRole("button", { name: /доказательств/i }));
     expect(screen.getByText(/gmv increased week over week/i)).toBeInTheDocument();
   });
 
   it("hides report exports for plain answers", () => {
     renderSurface();
 
-    expect(screen.queryByRole("button", { name: /export/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /экспорт/i })).not.toBeInTheDocument();
   });
 
   it("keeps report export formats behind one menu button", async () => {
     renderSurface(reportPayload);
 
-    expect(screen.getByRole("button", { name: /export/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /экспорт/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /html/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /export/i }));
+    fireEvent.click(screen.getByRole("button", { name: /экспорт/i }));
 
     expect(await screen.findByRole("menuitem", { name: /html/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /pdf/i })).toBeInTheDocument();
@@ -209,7 +209,7 @@ describe("ResultSurface", () => {
         kind: "line",
         goal: "trend",
         title: "Orders by day",
-        summary: "Orders change by date.",
+        summary: "Orders change by date",
         description: null,
         planner_mode: "rule_fallback",
         confidence_score: 0.8,
@@ -256,7 +256,7 @@ describe("ResultSurface", () => {
       },
     });
 
-    expect(await screen.findByRole("button", { name: /export/i })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /экспорт/i })).toBeInTheDocument();
   });
 
   it("renders report blocks from block-local previews", async () => {
@@ -266,7 +266,7 @@ describe("ResultSurface", () => {
       analysis_document: {
         document_version: "v1",
         title: "Financial report",
-        executive_summary: "Two slices were prepared.",
+        executive_summary: "Two slices were prepared",
         warnings: [],
         provenance: {
           source_type: "chat_answer",
@@ -278,7 +278,7 @@ describe("ResultSurface", () => {
             kind: "chart",
             title: "By delivery",
             description: null,
-            insight: "Express wins.",
+            insight: "Express wins",
             source_execution_id: "exec-1",
             preview: {
               columns: ["delivery_type", "total_sales"],
@@ -290,7 +290,7 @@ describe("ResultSurface", () => {
               kind: "bar",
               goal: "comparison",
               title: "By delivery",
-              summary: "Express wins.",
+              summary: "Express wins",
               description: null,
               planner_mode: "rule_fallback",
               confidence_score: 0.8,
@@ -339,7 +339,7 @@ describe("ResultSurface", () => {
           {
             kind: "table",
             title: "City rows",
-            description: "Rows for city slice.",
+            description: "Rows for city slice",
             source: "execution_preview",
             source_execution_id: "exec-2",
             preview: {
@@ -361,7 +361,7 @@ describe("ResultSurface", () => {
   });
 
   it("does not duplicate executive summary when the document also includes key takeaway", async () => {
-    const summary = "Запрос выполнен. Данные есть только за первые 4 дня апреля.";
+    const summary = "Запрос выполнен. Данные есть только за первые 4 дня апреля";
 
     renderSurface({
       ...payload,
@@ -386,7 +386,7 @@ describe("ResultSurface", () => {
       },
     });
 
-    expect(await screen.findByText(/executive summary/i)).toBeInTheDocument();
+    expect(await screen.findByText(/краткое резюме/i)).toBeInTheDocument();
     expect(screen.getAllByText(summary)).toHaveLength(1);
     expect(screen.queryByRole("heading", { name: /key takeaway/i })).not.toBeInTheDocument();
   });
@@ -394,12 +394,12 @@ describe("ResultSurface", () => {
   it("renders optimizer trace with original and executed SQL", async () => {
     renderSurface(optimizedPayload);
 
-    fireEvent.click(screen.getByRole("button", { name: /optimizer/i }));
+    fireEvent.click(screen.getByRole("button", { name: /оптимизатор/i }));
 
     expect(await screen.findByText(/push down single-table predicates/i)).toBeInTheDocument();
-    expect(screen.getByText(/original sql/i)).toBeInTheDocument();
-    expect(screen.getByText(/executed sql/i)).toBeInTheDocument();
-    expect(screen.getByText(/evidence used/i)).toBeInTheDocument();
+    expect(screen.getByText(/исходный sql/i)).toBeInTheDocument();
+    expect(screen.getByText(/выполненный sql/i)).toBeInTheDocument();
+    expect(screen.getByText(/использованные доказательства/i)).toBeInTheDocument();
   });
 
   it("keeps recent executions hidden until expanded", () => {
@@ -425,7 +425,7 @@ describe("ResultSurface", () => {
 
     expect(screen.queryByText(/select \* from metrics/i)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /recent executions/i }));
+    fireEvent.click(screen.getByRole("button", { name: /последние выполнения/i }));
 
     expect(screen.getByText(/select \* from metrics/i)).toBeInTheDocument();
   });
@@ -470,12 +470,12 @@ describe("ResultSurface", () => {
       claims: [
         {
           claim_id: ": ",
-          text: "First duplicate claim.",
+          text: "First duplicate claim",
           status: "verified",
         },
         {
           claim_id: ": ",
-          text: "Second duplicate claim.",
+          text: "Second duplicate claim",
           status: "unverified",
         },
       ],
@@ -487,7 +487,7 @@ describe("ResultSurface", () => {
 
     try {
       renderSurface(payloadWithDuplicateClaims);
-      fireEvent.click(screen.getByRole("button", { name: /evidence/i }));
+      fireEvent.click(screen.getByRole("button", { name: /доказательств/i }));
 
       expect(await screen.findByText(/first duplicate claim/i)).toBeInTheDocument();
       expect(screen.getByText(/second duplicate claim/i)).toBeInTheDocument();
@@ -526,7 +526,7 @@ describe("ResultSurface", () => {
       </ToastProvider>
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /hide/i }));
+    fireEvent.click(screen.getByRole("button", { name: /скрыть/i }));
 
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -563,7 +563,7 @@ describe("ResultSurface", () => {
 
     renderSurface(reportPayload);
 
-    fireEvent.click(screen.getByRole("button", { name: /export/i }));
+    fireEvent.click(screen.getByRole("button", { name: /экспорт/i }));
     fireEvent.click(await screen.findByRole("menuitem", { name: /html/i }));
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -571,7 +571,7 @@ describe("ResultSurface", () => {
       { cache: "no-store" }
     );
 
-    await screen.findByText(/export ready/i);
+    await screen.findByText(/экспорт готов/i);
     expect(click).toHaveBeenCalledTimes(1);
 
     createElement.mockRestore();

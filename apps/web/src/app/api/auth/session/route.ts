@@ -1,6 +1,10 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { WEB_SESSION_COOKIE_NAME, fetchBackend } from "@/lib/backendAuth";
+import {
+  WEB_SESSION_COOKIE_NAME,
+  backendResponseHeaders,
+  fetchBackend,
+} from "@/lib/backendAuth";
 
 export async function GET() {
   try {
@@ -13,17 +17,17 @@ export async function GET() {
       }
       return new NextResponse(body, {
         status: response.status,
-        headers: {
+        headers: backendResponseHeaders(response, {
           "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-        },
+        }),
       });
     }
 
     return new NextResponse(body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch {
     return NextResponse.json({ detail: "session_proxy_failed" }, { status: 500 });

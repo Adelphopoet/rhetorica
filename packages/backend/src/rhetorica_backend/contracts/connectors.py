@@ -27,5 +27,6 @@ class ConnectorItem(BaseModel):
     is_active: bool = True
     connection: EngineConnectionConfig
     has_password: bool
+    has_extra_credentials: bool = False
     created_at: datetime
     updated_at: datetime

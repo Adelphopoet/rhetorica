@@ -9,6 +9,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from rhetorica_backend.contracts.workspace_skills import (
+    BaseUpsertWorkspaceSkillRequest,
+    UpsertGithubWorkspaceSkillRequest,
+    UpsertManualWorkspaceSkillRequest,
     UpsertWorkspaceSkillRequest,
     WorkspaceSkillAsset,
     WorkspaceSkillBundle,
@@ -36,7 +39,7 @@ class WorkspaceSkillValidationError(ValueError):
 
 @dataclass(frozen=True)
 class ValidatedWorkspaceSkillPayload:
-    source_url: str
+    source_url: str | None
     title: str | None
     summary: str | None
     content_markdown: str
@@ -50,6 +53,7 @@ class WorkspaceSkillService:
     """Validates, snapshots, and persists workspace skills."""
 
     _MAX_CONTENT_BYTES = 262_144
+    _MAX_MANUAL_CONTENT_BYTES = 32_768
     _MAX_BUNDLE_BYTES = 1_048_576
     _MAX_BUNDLE_ASSETS = 64
 
@@ -66,17 +70,18 @@ class WorkspaceSkillService:
         return self._repository.list(workspace_id=workspace_id, limit=limit)
 
     def create(self, request: UpsertWorkspaceSkillRequest) -> WorkspaceSkillItem:
-        validated = self._validate_and_snapshot(request.source_url)
+        validated = self._snapshot_request(request)
         return self._repository.create(
             workspace_id=request.workspace_id,
             name=request.name,
             capability_family=request.capability_family,
-            engine_scope=request.engine_scope,
+            engine_scope=self._normalized_engine_scope(request),
             priority=request.priority,
             source_kind=request.source_kind,
             source_url=validated.source_url,
             status=request.status,
             validation_status=validated.validation_status,
+            visible_to_default_assistant=request.visible_to_default_assistant,
             title=validated.title,
             summary=validated.summary,
             content_markdown=validated.content_markdown,
@@ -92,18 +97,19 @@ class WorkspaceSkillService:
         workspace_id: str,
         request: UpsertWorkspaceSkillRequest,
     ) -> WorkspaceSkillItem | None:
-        validated = self._validate_and_snapshot(request.source_url)
+        validated = self._snapshot_request(request)
         return self._repository.update(
             skill_id=skill_id,
             workspace_id=workspace_id,
             name=request.name,
             capability_family=request.capability_family,
-            engine_scope=request.engine_scope,
+            engine_scope=self._normalized_engine_scope(request),
             priority=request.priority,
             source_kind=request.source_kind,
             source_url=validated.source_url,
             status=request.status,
             validation_status=validated.validation_status,
+            visible_to_default_assistant=request.visible_to_default_assistant,
             title=validated.title,
             summary=validated.summary,
             content_markdown=validated.content_markdown,
@@ -114,6 +120,25 @@ class WorkspaceSkillService:
 
     def delete(self, *, skill_id: str, workspace_id: str) -> bool:
         return self._repository.delete(skill_id=skill_id, workspace_id=workspace_id)
+
+    def _snapshot_request(
+        self,
+        request: UpsertWorkspaceSkillRequest,
+    ) -> ValidatedWorkspaceSkillPayload:
+        if isinstance(request, UpsertGithubWorkspaceSkillRequest):
+            return self._validate_and_snapshot_github(request.source_url)
+        if isinstance(request, UpsertManualWorkspaceSkillRequest):
+            return self._validate_and_snapshot_manual(
+                name=request.name,
+                markdown=request.content_markdown,
+            )
+        raise WorkspaceSkillValidationError("workspace_skill_unsupported_source_kind")
+
+    @staticmethod
+    def _normalized_engine_scope(request: BaseUpsertWorkspaceSkillRequest) -> str:
+        if request.capability_family == "chat_instruction":
+            return "any"
+        return request.engine_scope
 
     @classmethod
     def _normalize_source_url(cls, raw_url: str) -> str:
@@ -131,15 +156,13 @@ class WorkspaceSkillService:
                 owner, repo = repo_match.groups()
                 known_skill_path = cls._known_github_skill_path(owner=owner, repo=repo)
                 if known_skill_path is not None:
-                    return urlunsplit(
-                        (
-                            "https",
-                            "raw.githubusercontent.com",
-                            f"/{owner}/{repo}/main/{known_skill_path}",
-                            "",
-                            "",
-                        )
-                    )
+                    return urlunsplit((
+                        "https",
+                        "raw.githubusercontent.com",
+                        f"/{owner}/{repo}/main/{known_skill_path}",
+                        "",
+                        "",
+                    ))
 
             tree_match = _GITHUB_TREE_RE.match(parsed.path)
             if tree_match is not None:
@@ -148,23 +171,25 @@ class WorkspaceSkillService:
                 known_skill_path = cls._known_github_skill_path(owner=owner, repo=repo)
                 allowed_tree_paths = cls._known_github_tree_paths(known_skill_path)
                 if known_skill_path is not None and normalized_tree_path in allowed_tree_paths:
-                    return urlunsplit(
-                        (
-                            "https",
-                            "raw.githubusercontent.com",
-                            f"/{owner}/{repo}/{ref}/{known_skill_path}",
-                            "",
-                            "",
-                        )
-                    )
+                    return urlunsplit((
+                        "https",
+                        "raw.githubusercontent.com",
+                        f"/{owner}/{repo}/{ref}/{known_skill_path}",
+                        "",
+                        "",
+                    ))
 
             match = _GITHUB_BLOB_RE.match(parsed.path)
             if match is None:
                 raise WorkspaceSkillValidationError("workspace_skill_invalid_source_url")
             owner, repo, ref, path = match.groups()
-            return urlunsplit(
-                ("https", "raw.githubusercontent.com", f"/{owner}/{repo}/{ref}/{path}", "", "")
-            )
+            return urlunsplit((
+                "https",
+                "raw.githubusercontent.com",
+                f"/{owner}/{repo}/{ref}/{path}",
+                "",
+                "",
+            ))
 
         if _RAW_GITHUB_RE.match(parsed.path) is None:
             raise WorkspaceSkillValidationError("workspace_skill_invalid_source_url")
@@ -183,7 +208,7 @@ class WorkspaceSkillService:
         skill_dir = str(PurePosixPath(skill_path).parent)
         return {"", "skills", skill_dir}
 
-    def _validate_and_snapshot(self, raw_url: str) -> ValidatedWorkspaceSkillPayload:
+    def _validate_and_snapshot_github(self, raw_url: str) -> ValidatedWorkspaceSkillPayload:
         source_url = self._normalize_source_url(raw_url)
         owner, repo, ref, path = self._parse_raw_github_source(source_url)
         markdown, content = self._fetch_markdown(source_url)
@@ -220,6 +245,32 @@ class WorkspaceSkillService:
             content_markdown=markdown,
             content_bundle=WorkspaceSkillBundle(assets=bundle_assets),
             content_sha256=sha256,
+            validation_status="valid",
+            last_validated_at=datetime.now(tz=UTC),
+        )
+
+    def _validate_and_snapshot_manual(
+        self,
+        *,
+        name: str,
+        markdown: str,
+    ) -> ValidatedWorkspaceSkillPayload:
+        content = markdown.encode("utf-8")
+        if len(content) > self._MAX_MANUAL_CONTENT_BYTES:
+            raise WorkspaceSkillValidationError("workspace_skill_content_too_large")
+        if "\x00" in markdown:
+            raise WorkspaceSkillValidationError("workspace_skill_binary_content")
+        if not markdown.strip():
+            raise WorkspaceSkillValidationError("workspace_skill_empty_content")
+
+        asset = self._build_manual_asset(name=name, markdown=markdown, content=content)
+        return ValidatedWorkspaceSkillPayload(
+            source_url=None,
+            title=asset.title,
+            summary=asset.summary,
+            content_markdown=markdown,
+            content_bundle=WorkspaceSkillBundle(assets=[asset]),
+            content_sha256=hashlib.sha256(content).hexdigest(),
             validation_status="valid",
             last_validated_at=datetime.now(tz=UTC),
         )
@@ -273,15 +324,13 @@ class WorkspaceSkillService:
 
         assets: list[WorkspaceSkillAsset] = []
         for asset_path in sorted(markdown_paths, key=sort_key)[: self._MAX_BUNDLE_ASSETS]:
-            asset_url = urlunsplit(
-                (
-                    "https",
-                    "raw.githubusercontent.com",
-                    f"/{owner}/{repo}/{ref}/{asset_path}",
-                    "",
-                    "",
-                )
-            )
+            asset_url = urlunsplit((
+                "https",
+                "raw.githubusercontent.com",
+                f"/{owner}/{repo}/{ref}/{asset_path}",
+                "",
+                "",
+            ))
             try:
                 markdown, content = self._fetch_markdown(asset_url)
             except WorkspaceSkillValidationError:
@@ -338,15 +387,13 @@ class WorkspaceSkillService:
         frontmatter, body = self._parse_frontmatter(markdown)
         title, summary = self._extract_title_and_summary(markdown)
         title = str(frontmatter.get("title") or title or "").strip() or None
-        summary = (
-            str(frontmatter.get("impactDescription") or summary or "").strip()[:500] or None
-        )
+        summary = str(frontmatter.get("impactDescription") or summary or "").strip()[:500] or None
         tags = frontmatter.get("tags")
-        tag_values = [
-            str(item).strip()
-            for item in tags
-            if str(item).strip()
-        ] if isinstance(tags, list) else []
+        tag_values = (
+            [str(item).strip() for item in tags if str(item).strip()]
+            if isinstance(tags, list)
+            else []
+        )
         rule_id = None
         kind = self._asset_kind(path=path, main_path=main_path, skill_dir=skill_dir)
         if kind == "rule":
@@ -365,6 +412,37 @@ class WorkspaceSkillService:
             frontmatter=frontmatter,
         )
 
+    def _build_manual_asset(
+        self,
+        *,
+        name: str,
+        markdown: str,
+        content: bytes,
+    ) -> WorkspaceSkillAsset:
+        frontmatter, body = self._parse_frontmatter(markdown)
+        title, summary = self._extract_title_and_summary(markdown)
+        title = str(frontmatter.get("title") or title or "").strip() or None
+        summary = (
+            str(
+                frontmatter.get("use_when")
+                or frontmatter.get("usage_description")
+                or frontmatter.get("summary")
+                or summary
+                or ""
+            ).strip()[:500]
+            or None
+        )
+        return WorkspaceSkillAsset(
+            path=f"manual/{name.strip() or 'skill'}.md",
+            source_url=None,
+            kind="main",
+            title=title,
+            summary=summary or self._extract_title_and_summary(body)[1],
+            content_markdown=markdown,
+            content_sha256=hashlib.sha256(content).hexdigest(),
+            frontmatter=frontmatter,
+        )
+
     @staticmethod
     def _parse_raw_github_source(source_url: str) -> tuple[str, str, str, str]:
         parsed = urlsplit(source_url)
@@ -378,7 +456,7 @@ class WorkspaceSkillService:
         if path == main_path:
             return "main"
         asset_name = PurePosixPath(path).name
-        if asset_name == "GUIDE.md":
+        if asset_name == "AGENTS.md":
             return "compiled"
         if path.startswith(f"{skill_dir}/rules/"):
             return "rule"
@@ -408,9 +486,7 @@ class WorkspaceSkillService:
                 continue
             if value.startswith("[") and value.endswith("]"):
                 items = [
-                    item.strip().strip("'\"")
-                    for item in value[1:-1].split(",")
-                    if item.strip()
+                    item.strip().strip("'\"") for item in value[1:-1].split(",") if item.strip()
                 ]
                 frontmatter[key] = items
                 continue
@@ -423,7 +499,9 @@ class WorkspaceSkillService:
     def _extract_title_and_summary(markdown: str) -> tuple[str | None, str | None]:
         lines = [line.strip() for line in markdown.splitlines()]
         if lines and lines[0] == "---":
-            closing_index = next((index for index, line in enumerate(lines[1:], start=1) if line == "---"), None)
+            closing_index = next(
+                (index for index, line in enumerate(lines[1:], start=1) if line == "---"), None
+            )
             if closing_index is not None:
                 lines = lines[closing_index + 1 :]
         title: str | None = None

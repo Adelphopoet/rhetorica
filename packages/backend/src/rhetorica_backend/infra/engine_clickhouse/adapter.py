@@ -10,6 +10,7 @@ from rhetorica_backend.domain.execution.models import (
     EngineAdapter,
     EngineRunRequest,
     EngineRunResult,
+    ResultBlockConsumer,
 )
 
 
@@ -20,20 +21,50 @@ class ClickHouseActiveExecution(ActiveExecution):
         sql: str,
         settings: dict[str, str | int | float | bool],
         query_id: str,
+        row_limit: int,
     ):
         self._client = client
         self._sql = sql
         self._settings = settings
         self.query_id: str | None = query_id
+        self._row_limit = row_limit
 
     def fetch(self) -> EngineRunResult:
-        result = self._client.query(self._sql, settings=self._settings)
-        self.query_id = result.query_id
+        return self.fetch_streaming(
+            consumer=None,
+            preview_row_limit=self._row_limit,
+        )
+
+    def fetch_streaming(
+        self,
+        *,
+        consumer: ResultBlockConsumer | None,
+        preview_row_limit: int,
+    ) -> EngineRunResult:
+        preview: list[list[object]] = []
+        row_count = 0
+        columns: list[str] = []
+        with self._client.query_row_block_stream(
+            self._sql,
+            settings=self._settings,
+        ) as stream:
+            source = stream.source
+            columns = list(source.column_names)
+            if consumer is not None:
+                consumer.start(columns)
+            for block in stream:
+                rows = [list(row) for row in block]
+                row_count += len(rows)
+                if len(preview) < preview_row_limit:
+                    preview.extend(rows[: preview_row_limit - len(preview)])
+                if consumer is not None:
+                    consumer.write_rows(rows)
+            self.query_id = getattr(source, "query_id", None) or self.query_id
         return EngineRunResult(
             query_id=self.query_id,
-            columns=list(result.column_names),
-            rows=[list(row) for row in result.result_rows],
-            row_count=result.row_count,
+            columns=columns,
+            rows=preview,
+            row_count=row_count,
         )
 
     def cancel(self) -> None:
@@ -58,6 +89,18 @@ class ClickHouseAdapter(EngineAdapter):
             "max_execution_time": max(1, ceil(request.timeout_ms / 1000)),
             "query_id": request.execution_id,
         }
+        configured_block_rows = settings.get("max_block_size")
+        settings["max_block_size"] = (
+            min(configured_block_rows, 10_000)
+            if isinstance(configured_block_rows, int) and configured_block_rows > 0
+            else 10_000
+        )
+        configured_block_bytes = settings.get("preferred_block_size_bytes")
+        settings["preferred_block_size_bytes"] = (
+            min(configured_block_bytes, 8 * 1024 * 1024)
+            if isinstance(configured_block_bytes, int) and configured_block_bytes > 0
+            else 8 * 1024 * 1024
+        )
         client = clickhouse_connect.get_client(
             host=connection.host,
             port=connection.port,
@@ -72,6 +115,7 @@ class ClickHouseAdapter(EngineAdapter):
             sql=request.sql,
             settings=settings,
             query_id=request.execution_id,
+            row_limit=request.row_limit,
         )
 
     @staticmethod

@@ -20,14 +20,14 @@ def test_tool_capability_registry_resolves_and_executes_bound_capability() -> No
     registry = ToolCapabilityRegistry(
         [
             BoundToolCapability(
-                name="search_metadata_catalog",
+                name="catalog__search",
                 requires_db_connectors=True,
                 handler=_handler,
             )
         ]
     )
 
-    capability = registry.get("search_metadata_catalog")
+    capability = registry.get("catalog__search")
 
     assert capability is not None
     result = capability.execute(

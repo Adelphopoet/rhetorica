@@ -10,24 +10,35 @@ from functools import lru_cache
 from typing import Any
 
 import jwt
-from fastapi import HTTPException, Request, WebSocket, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from jwt import (
     ExpiredSignatureError,
     InvalidTokenError,
     MissingRequiredClaimError,
+    PyJWKClient,
+)
+from rhetorica_backend.infra.postgres.api_token_repository import (
+    PersonalAccessTokenRepository,
 )
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from rhetorica_backend.infra.postgres.user_repository import (
+    ADMIN_ROLE,
+    ANALYST_ROLE,
     LOCAL_AUTH_PROVIDER,
     UserAccountItem,
     UserAccountRepository,
+)
+from rhetorica_backend.infra.security.api_tokens import (
+    api_token_prefix,
+    digest_api_token,
 )
 from rhetorica_backend.infra.security.passwords import (
     hash_password,
     password_hash_needs_rehash,
     verify_password,
 )
+from starlette.middleware.base import RequestResponseEndpoint
 
 from rhetorica_api.app.settings import settings
 
@@ -42,9 +53,41 @@ PUBLIC_PATH_PREFIXES = (
     "/favicon.ico",
     "/v1/auth/login",
     "/v1/auth/bootstrap/session",
+    "/v1/auth/keycloak/session",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+    "/oauth/authorize",
+    "/oauth/token",
+    "/oauth/register",
+    "/oauth/revoke",
 )
 DEV_ENV_NAMES = {"dev", "local", "test"}
+KEYCLOAK_AUTH_PROVIDER = "keycloak"
 logger = logging.getLogger(__name__)
+
+
+def api_token_pepper() -> str:
+    """Return the dedicated PAT digest pepper."""
+    pepper = settings.auth_api_token_pepper.strip()
+    if not pepper:
+        raise RuntimeError("AUTH_API_TOKEN_PEPPER_required")
+    return pepper
+
+
+def validate_auth_token_peppers() -> None:
+    """Reject missing or reused digest/signing secrets before serving traffic."""
+    secrets_by_name = {
+        "AUTH_JWT_SECRET": settings.auth_jwt_secret.strip(),
+        "AUTH_API_TOKEN_PEPPER": settings.auth_api_token_pepper.strip(),
+        "AUTH_OAUTH_TOKEN_PEPPER": settings.auth_oauth_token_pepper.strip(),
+    }
+    missing = [name for name, value in secrets_by_name.items() if not value]
+    if missing:
+        raise RuntimeError(f"{missing[0]}_required")
+    if len(set(secrets_by_name.values())) != len(secrets_by_name):
+        raise RuntimeError("auth_token_secrets_must_be_distinct")
+    if settings.app_env not in DEV_ENV_NAMES and settings.mcp_enabled and not settings.auth_enabled:
+        raise RuntimeError("MCP_requires_AUTH_ENABLED")
 
 
 class AuthError(Exception):
@@ -57,7 +100,7 @@ class AuthError(Exception):
     ) -> None:
         self.detail = detail
         self.status_code = status_code
-        self.headers = headers or WWW_AUTHENTICATE_HEADER
+        self.headers = headers if headers is not None else WWW_AUTHENTICATE_HEADER
         super().__init__(detail)
 
 
@@ -71,6 +114,9 @@ class AuthContext:
     user: UserAccountItem
     issued_at: datetime
     expires_at: datetime
+    scopes: frozenset[str] = frozenset({"*"})
+    credential_type: str = "session"
+    token_id: str | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -104,6 +150,21 @@ class AuthContext:
     def is_bootstrap_user(self) -> bool:
         return self.user.is_bootstrap_user
 
+    def has_scope(self, scope: str) -> bool:
+        return "*" in self.scopes or scope in self.scopes
+
+    @property
+    def is_personal_access_token(self) -> bool:
+        return self.credential_type == "personal_access_token"
+
+    @property
+    def is_oauth_access_token(self) -> bool:
+        return self.credential_type == "oauth_access_token"
+
+    @property
+    def is_limited_token(self) -> bool:
+        return self.is_personal_access_token or self.is_oauth_access_token
+
 
 _auth_context_var: ContextVar[AuthContext | None] = ContextVar(
     "rhetorica_api_auth_context",
@@ -118,16 +179,29 @@ def _user_repository() -> UserAccountRepository:
     return UserAccountRepository(db=runtime)
 
 
+@lru_cache(maxsize=1)
+def _api_token_repository() -> PersonalAccessTokenRepository:
+    runtime = DatabaseRuntime(settings.database_url)
+    runtime.create_schema()
+    return PersonalAccessTokenRepository(db=runtime)
+
+
 def _build_auth_context(
     user: UserAccountItem,
     *,
     issued_at: datetime,
     expires_at: datetime,
+    scopes: frozenset[str] = frozenset({"*"}),
+    credential_type: str = "session",
+    token_id: str | None = None,
 ) -> AuthContext:
     return AuthContext(
         user=user,
         issued_at=issued_at,
         expires_at=expires_at,
+        scopes=scopes,
+        credential_type=credential_type,
+        token_id=token_id,
     )
 
 
@@ -163,7 +237,158 @@ def create_bootstrap_access_token() -> tuple[str, AuthContext]:
     return create_access_token_for_user(touched_user or user)
 
 
+def _split_csv(value: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _normalized_keycloak_issuer_url() -> str:
+    return settings.auth_keycloak_issuer_url.rstrip("/")
+
+
+@lru_cache(maxsize=8)
+def _keycloak_jwks_client(issuer_url: str) -> PyJWKClient:
+    return PyJWKClient(f"{issuer_url}/protocol/openid-connect/certs")
+
+
+def decode_keycloak_id_token(id_token: str) -> dict[str, Any]:
+    if not settings.auth_keycloak_enabled:
+        raise AuthError(
+            "keycloak_auth_disabled",
+            status_code=status.HTTP_404_NOT_FOUND,
+            headers={},
+        )
+    issuer_url = _normalized_keycloak_issuer_url()
+    if not issuer_url or not settings.auth_keycloak_client_id:
+        raise AuthError(
+            "keycloak_auth_misconfigured",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={},
+        )
+    try:
+        signing_key = _keycloak_jwks_client(issuer_url).get_signing_key_from_jwt(id_token)
+        return jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=settings.auth_keycloak_client_id,
+            issuer=issuer_url,
+            options={"require": ["sub", "iat", "exp", "iss"]},
+        )
+    except ExpiredSignatureError as exc:
+        raise AuthError("keycloak_token_expired") from exc
+    except MissingRequiredClaimError as exc:
+        raise AuthError(f"missing_keycloak_claim:{exc.claim}") from exc
+    except InvalidTokenError as exc:
+        raise AuthError("invalid_keycloak_token") from exc
+
+
+def _claim_groups(claims: dict[str, Any]) -> set[str]:
+    raw_groups = claims.get("groups", [])
+    if not isinstance(raw_groups, list):
+        return set()
+    return {str(group) for group in raw_groups if str(group).strip()}
+
+
+def _role_from_keycloak_groups(groups: set[str]) -> str:
+    admin_groups = set(_split_csv(settings.auth_keycloak_admin_groups))
+    analyst_groups = set(_split_csv(settings.auth_keycloak_analyst_groups))
+    if groups & admin_groups:
+        return ADMIN_ROLE
+    if groups & analyst_groups:
+        return ANALYST_ROLE
+    if settings.auth_keycloak_require_mapped_group:
+        raise AuthError(
+            "keycloak_group_access_denied",
+            status_code=status.HTTP_403_FORBIDDEN,
+            headers={},
+        )
+    return ANALYST_ROLE
+
+
+def _keycloak_login_from_claims(claims: dict[str, Any]) -> str:
+    for claim_name in ("preferred_username", "email", "name", "sub"):
+        value = claims.get(claim_name)
+        if isinstance(value, str) and value.strip():
+            return value
+    raise AuthError("missing_keycloak_login_claim")
+
+
+def create_keycloak_access_token(id_token: str) -> tuple[str, AuthContext]:
+    claims = decode_keycloak_id_token(id_token)
+    auth_subject = str(claims["sub"])
+    groups = _claim_groups(claims)
+    role = _role_from_keycloak_groups(groups)
+    login = _keycloak_login_from_claims(claims)
+    email = claims.get("email")
+    display_name = claims.get("name")
+    user = _user_repository().ensure_external_user(
+        workspace_id=settings.auth_default_workspace_id,
+        auth_provider=KEYCLOAK_AUTH_PROVIDER,
+        auth_subject=auth_subject,
+        login=login,
+        role=role,
+        email=email if isinstance(email, str) else None,
+        display_name=display_name if isinstance(display_name, str) else login,
+        is_active=True,
+    )
+    return create_access_token_for_user(user)
+
+
+def decode_personal_access_token(token: str) -> AuthContext:
+    prefix = api_token_prefix(token)
+    if prefix is None:
+        raise AuthError("invalid_personal_access_token")
+    item = _api_token_repository().find_for_authentication(
+        token_prefix=prefix,
+        token_digest=digest_api_token(token, pepper=api_token_pepper()),
+    )
+    if item is None:
+        raise AuthError("invalid_or_expired_personal_access_token")
+    user = _user_repository().get_by_id(user_id=item.user_id)
+    if user is None:
+        raise AuthError("unknown_subject")
+    if not user.is_active:
+        raise AuthError("inactive_user", status_code=status.HTTP_403_FORBIDDEN, headers={})
+    used_item = _api_token_repository().record_successful_use(token_id=item.id) or item
+    return _build_auth_context(
+        user,
+        issued_at=used_item.created_at,
+        expires_at=used_item.expires_at,
+        scopes=frozenset(used_item.scopes),
+        credential_type="personal_access_token",
+        token_id=used_item.id,
+    )
+
+
+def decode_oauth_access_token(token: str) -> AuthContext:
+    from rhetorica_api.app.oauth import oauth_repository, oauth_resource
+
+    item = oauth_repository().find_access_token(
+        access_token=token,
+        resource=oauth_resource(),
+    )
+    if item is None:
+        raise AuthError("invalid_or_expired_oauth_access_token")
+    user = _user_repository().get_by_id(user_id=item.user_id)
+    if user is None or user.workspace_id != item.workspace_id:
+        raise AuthError("unknown_subject")
+    if not user.is_active:
+        raise AuthError("inactive_user", status_code=status.HTTP_403_FORBIDDEN, headers={})
+    return _build_auth_context(
+        user,
+        issued_at=item.created_at,
+        expires_at=item.access_expires_at,
+        scopes=frozenset(item.scopes),
+        credential_type="oauth_access_token",
+        token_id=item.id,
+    )
+
+
 def decode_access_token(token: str) -> AuthContext:
+    if token.startswith("rh_pat_"):
+        return decode_personal_access_token(token)
+    if token.startswith("rh_oat_"):
+        return decode_oauth_access_token(token)
     try:
         payload = jwt.decode(
             token,
@@ -291,24 +516,69 @@ def authenticate_http_request(request: Request) -> AuthContext:
     return decode_access_token(extract_access_token_from_request(request))
 
 
-def extract_access_token_from_websocket(websocket: WebSocket) -> str:
-    authorization = websocket.headers.get("Authorization", "")
-    if authorization.lower().startswith("bearer "):
-        return authorization.split(" ", 1)[1].strip()
+def require_scope(auth_context: AuthContext, scope: str) -> None:
+    if not auth_context.has_scope(scope):
+        headers = {"WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{scope}"'}
+        if auth_context.is_oauth_access_token:
+            from rhetorica_api.app.oauth import oauth_resource_metadata_url
 
-    query_token = websocket.query_params.get("token")
-    if query_token:
-        return query_token
+            headers["WWW-Authenticate"] = (
+                f'Bearer error="insufficient_scope", scope="{scope}", '
+                f'resource_metadata="{oauth_resource_metadata_url()}"'
+            )
+        raise AuthError(
+            "insufficient_token_scope",
+            status_code=status.HTTP_403_FORBIDDEN,
+            headers=headers,
+        )
 
-    cookie_token = websocket.cookies.get(settings.auth_cookie_name)
-    if cookie_token:
-        return cookie_token
 
-    raise AuthError("not_authenticated")
+def _mcp_scope_from_payload(payload: object) -> str:
+    if isinstance(payload, list):
+        required = {_mcp_scope_from_payload(item) for item in payload}
+        return "mcp:execute" if "mcp:execute" in required else "mcp:read"
+    if not isinstance(payload, dict):
+        return "mcp:read"
+    if payload.get("method") != "tools/call":
+        return "mcp:read"
+    params = payload.get("params")
+    tool_name = params.get("name") if isinstance(params, dict) else None
+    if tool_name in {"list_agents", "list_connectors", "get_conversation", "list_conversations"}:
+        return "mcp:read"
+    return "mcp:execute"
 
 
-def authenticate_websocket(websocket: WebSocket) -> AuthContext:
-    return decode_access_token(extract_access_token_from_websocket(websocket))
+async def validate_token_scope(request: Request, auth_context: AuthContext) -> None:
+    path = request.url.path.rstrip("/") or "/"
+    if path == "/mcp" or path.startswith("/mcp/"):
+        if not auth_context.is_limited_token:
+            from rhetorica_api.app.oauth import oauth_resource_metadata_url
+
+            raise AuthError(
+                "mcp_integration_credential_required",
+                headers={
+                    "WWW-Authenticate": (
+                        'Bearer error="invalid_token", scope="mcp:read mcp:execute", '
+                        f'resource_metadata="{oauth_resource_metadata_url()}"'
+                    )
+                },
+            )
+        if request.method in {"HEAD", "OPTIONS"}:
+            return
+        payload: object = None
+        body = await request.body()
+        if body:
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payload = None
+        require_scope(auth_context, _mcp_scope_from_payload(payload))
+        return
+    if not auth_context.is_limited_token:
+        return
+    if path.startswith("/v1/"):
+        required = "api:read" if request.method in {"GET", "HEAD", "OPTIONS"} else "api:write"
+        require_scope(auth_context, required)
 
 
 def is_public_path(path: str) -> bool:
@@ -403,20 +673,37 @@ def require_admin_access() -> AuthContext:
     return auth_context
 
 
-def install_auth(app) -> None:
+def install_auth(app: FastAPI) -> None:
     @app.middleware("http")
-    async def auth_middleware(request: Request, call_next):
+    async def auth_middleware(
+        request: Request,
+        call_next: RequestResponseEndpoint,
+    ) -> Response:
         if not settings.auth_enabled or is_public_path(request.url.path):
             return await call_next(request)
 
         try:
             auth_context = authenticate_http_request(request)
+            await validate_token_scope(request, auth_context)
             await validate_http_workspace_binding(request, auth_context)
         except AuthError as exc:
+            headers = exc.headers
+            path = request.url.path.rstrip("/") or "/"
+            if exc.status_code == status.HTTP_401_UNAUTHORIZED and (
+                path == "/mcp" or path.startswith("/mcp/")
+            ):
+                from rhetorica_api.app.oauth import oauth_resource_metadata_url
+
+                headers = {
+                    "WWW-Authenticate": (
+                        'Bearer error="invalid_token", scope="mcp:read mcp:execute", '
+                        f'resource_metadata="{oauth_resource_metadata_url()}"'
+                    )
+                }
             return JSONResponse(
                 {"detail": exc.detail},
                 status_code=exc.status_code,
-                headers=exc.headers,
+                headers=headers,
             )
 
         request.state.auth_context = auth_context

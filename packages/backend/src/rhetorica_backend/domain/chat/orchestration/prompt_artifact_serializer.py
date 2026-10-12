@@ -14,10 +14,9 @@ from rhetorica_backend.domain.chat.sql_prompt_window import (
 )
 
 PromptArtifactType = Literal[
-    "analysis_plan",
-    "worker_result",
-    "checkpoint_digest",
     "evidence_summary",
+    "tool_control",
+    "tool_artifact_access",
 ]
 
 
@@ -96,12 +95,20 @@ class PromptContextBudgetPolicy:
     _MAX_SCHEMA_COLUMNS = 200
     _MAX_TOKENS = 16_000
 
-    def __init__(self, *, max_rows: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_rows: int | None = None,
+        max_payload_chars: int | None = None,
+        max_tokens: int | None = None,
+    ) -> None:
         self._max_rows = normalize_sql_prompt_row_limit(max_rows)
+        self._max_payload_chars = max_payload_chars or self._MAX_PAYLOAD_CHARS
+        self._max_tokens = max_tokens or self._MAX_TOKENS
 
     @property
     def max_payload_chars(self) -> int:
-        return self._MAX_PAYLOAD_CHARS
+        return self._max_payload_chars
 
     @property
     def max_text_chars(self) -> int:
@@ -129,52 +136,48 @@ class PromptContextBudgetPolicy:
 
     @property
     def max_tokens(self) -> int:
-        return self._MAX_TOKENS
+        return self._max_tokens
 
 
 class PromptArtifactSerializer:
     """Builds typed compact artifacts; raw runtime payloads stay outside prompts."""
 
     _ARTIFACT_FIELDS: ClassVar[dict[PromptArtifactType, tuple[str, ...]]] = {
-        "analysis_plan": (
-            "goal",
-            "status",
-            "steps",
-            "required_evidence",
-            "open_questions",
-            "warnings",
-        ),
-        "worker_result": (
-            "task_id",
-            "goal",
-            "status",
-            "key_finding",
-            "evidence_ids",
-            "blocker",
-            "next_action",
-            "warnings",
-        ),
-        "checkpoint_digest": (
-            "run_id",
-            "plan_id",
-            "status",
-            "active_step_id",
-            "completed_step_ids",
-            "blocked_step_id",
-            "budget_state",
-            "evidence_ids",
-            "blocker",
-            "next_action",
-            "warnings",
-        ),
         "evidence_summary": (
             "tool_name",
+            "connector_name",
+            "remote_tool_name",
+            "mcp",
+            "tool_artifact",
+            "skill_id",
+            "skill_name",
+            "title",
+            "summary",
+            "content_markdown",
+            "content_sha256",
             "run_sql",
             "ok",
+            "duplicate",
+            "new_evidence",
+            "previous_result_reused",
+            "previous_execution_count",
+            "previous_artifact_ids",
+            "previous_result_sha256s",
+            "previous_results_identical",
+            "blocked_for_turn",
+            "blocked_call_count",
+            "blocked_call_signatures",
             "count",
+            "metadata_sources",
+            "cached_result",
+            "arguments_json",
+            "instruction",
+            "next_allowed_actions",
+            "required_next_action",
             "execution_id",
             "status",
             "execution_status",
+            "discovery",
             "result_state",
             "row_count",
             "columns",
@@ -184,7 +187,48 @@ class PromptArtifactSerializer:
             "candidates",
             "results",
             "items",
+            "artifacts",
+            "files",
+            "filename",
+            "media_type",
+            "size_bytes",
+            "kind",
+            "sha256",
+            "source_artifact_ids",
+            "preview",
+            "structure",
+            "schema",
+            "sheets",
+            "paragraphs",
+            "table_count",
+            "slides",
+            "page_count",
+            "width",
+            "height",
+            "mode",
+            "format",
+            "exit_code",
+            "stdout",
+            "stderr",
+            "outputs",
+            "output_id",
+            "timed_out",
+            "oom_killed",
+            "possibly_truncated",
+            "published",
+            "already_published",
+            "requires_publish_files",
+            "delivery_state",
+            "scope",
+            "file",
+            "tree",
+            "blame",
+            "ranges",
             "pages",
+            "page",
+            "airflow",
+            "kubernetes",
+            "victoriametrics",
             "lineage",
             "entity",
             "columnNames",
@@ -192,15 +236,60 @@ class PromptArtifactSerializer:
             "claims",
             "warnings",
             "error_code",
+            "error_category",
+            "error",
             "error_message",
             "message",
+            "user_message",
+            "usage_guidance",
             "user_hint",
+            "next_action_hint",
+            "retry_recommended",
+            "retryable",
             "can_continue",
+            "validation_errors",
+            "found",
             "issue_key",
             "url",
             "project_key",
             "assignee",
+            "assignee_resolved",
             "issue_type",
+            "routing_notes",
+            "created",
+            "updated",
+            "reporter",
+        ),
+        "tool_control": (
+            "tool_name",
+            "tool_artifact",
+            "ok",
+            "group_name",
+            "groups",
+            "group_count",
+            "selection_policy",
+            "loaded_tool_names",
+            "unloaded_tool_names",
+            "already_loaded",
+            "already_unloaded",
+            "connector_name",
+            "offset",
+            "limit",
+            "total",
+            "has_more",
+            "next_offset",
+            "tools",
+            "loaded_tools",
+            "unloaded_tools",
+            "missing_remote_tool_names",
+            "error_code",
+            "error_category",
+            "error",
+            "error_message",
+            "message",
+            "user_message",
+            "retry_recommended",
+            "can_continue",
         ),
     }
     _FORBIDDEN_KEYS: ClassVar[frozenset[str]] = frozenset({
@@ -223,8 +312,26 @@ class PromptArtifactSerializer:
         "results",
         "candidates",
         "items",
+        "artifacts",
+        "files",
+        "outputs",
+        "sheets",
+        "paragraphs",
+        "slides",
+        "dags",
+        "dag_runs",
+        "task_instances",
+        "import_errors",
     })
     _COLUMN_KEYS: ClassVar[frozenset[str]] = frozenset({"columns", "columnNames"})
+    _FULL_TEXT_KEYS: ClassVar[frozenset[str]] = frozenset({
+        "content_markdown",
+        "preview",
+        "schema",
+        "stdout",
+        "stderr",
+    })
+    _MAX_FULL_TEXT_CHARS: ClassVar[int] = 32_768
     _ENTITY_KEY_PRIORITY: ClassVar[tuple[str, ...]] = (
         "ok",
         "execution_status",
@@ -251,6 +358,28 @@ class PromptArtifactSerializer:
         "issue_type",
         "entityType",
         "source",
+        "access",
+        "project_path",
+        "project_id",
+        "group_path",
+        "file_path",
+        "path",
+        "ref",
+        "startline",
+        "start_line",
+        "end_line",
+        "line_count",
+        "snippet",
+        "type",
+        "mode",
+        "id",
+        "commit_id",
+        "short_id",
+        "title",
+        "author_name",
+        "author_email",
+        "authored_date",
+        "committed_date",
         "fqn",
         "fullyQualifiedName",
         "name",
@@ -295,13 +424,22 @@ class PromptArtifactSerializer:
         warnings: list[str] = []
         truncation_flags: list[str] = []
         artifact = self._normalize_artifact(artifact_type=artifact_type, artifact=artifact)
-        compact_payload = self._select_payload(
-            artifact_type=artifact_type,
-            artifact=artifact,
-            warnings=warnings,
-            truncation_flags=truncation_flags,
-        )
-        compact_payload = self._fit_payload_chars(
+        if artifact_type == "tool_control":
+            compact_payload = self._select_control_payload(
+                artifact=artifact,
+                warnings=warnings,
+                truncation_flags=truncation_flags,
+            )
+        elif artifact_type == "tool_artifact_access":
+            compact_payload = dict(artifact)
+        else:
+            compact_payload = self._select_payload(
+                artifact_type=artifact_type,
+                artifact=artifact,
+                warnings=warnings,
+                truncation_flags=truncation_flags,
+            )
+        compact_payload = self._fit_payload_budget(
             payload=compact_payload,
             warnings=warnings,
             truncation_flags=truncation_flags,
@@ -309,7 +447,11 @@ class PromptArtifactSerializer:
         payload_chars = self._json_char_count(compact_payload)
         token_estimate = self._estimator.count_json(compact_payload)
         if token_estimate > self._budget_policy.max_tokens:
-            self._append_once(warnings, "prompt_artifact_budget_warning")
+            warning = {
+                "tool_control": "prompt_tool_control_budget_warning",
+                "tool_artifact_access": "prompt_tool_artifact_access_budget_warning",
+            }.get(artifact_type, "prompt_artifact_budget_warning")
+            self._append_once(warnings, warning)
         return PromptArtifactEnvelope(
             artifact_type=artifact_type,
             compact_payload=compact_payload,
@@ -340,9 +482,7 @@ class PromptArtifactSerializer:
         return PromptArtifactDiagnostics(
             artifact_type=envelope.artifact_type,
             tool_name=(
-                payload.get("tool_name")
-                if isinstance(payload.get("tool_name"), str)
-                else None
+                payload.get("tool_name") if isinstance(payload.get("tool_name"), str) else None
             ),
             original_row_count=original_row_count,
             rows_sent=rows_sent,
@@ -361,9 +501,266 @@ class PromptArtifactSerializer:
     ) -> dict[str, Any]:
         if artifact_type != "evidence_summary":
             return artifact
+        artifact = self._normalize_duplicate_artifact(artifact)
         if artifact.get("tool_name") == "run_sql":
             return self._normalize_run_sql_artifact(artifact)
+        if artifact.get("tool_name") == "search_documentation":
+            return self._normalize_search_documentation_artifact(artifact)
+        if artifact.get("tool_name") == "read_documentation_page":
+            return self._normalize_read_documentation_page_artifact(artifact)
+        if artifact.get("tool_name") == "read_gitlab_file":
+            return self._normalize_read_gitlab_file_artifact(artifact)
+        if isinstance(artifact.get("result"), dict) and isinstance(
+            artifact.get("remote_tool_name"), str
+        ):
+            return self._normalize_mcp_artifact(artifact)
+        if isinstance(artifact.get("airflow"), dict):
+            return self._normalize_airflow_artifact(artifact)
         return artifact
+
+    @staticmethod
+    def _normalize_mcp_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(artifact)
+        result = normalized.pop("result")
+        if not isinstance(result, dict):
+            return normalized
+        mcp_payload: dict[str, Any] = {}
+        is_error = result.get("isError")
+        if is_error is None:
+            is_error = result.get("is_error")
+        if isinstance(is_error, bool):
+            mcp_payload["is_error"] = is_error
+
+        structured_content = result.get("structuredContent")
+        if structured_content is None:
+            structured_content = result.get("structured_content")
+        if structured_content is not None:
+            mcp_payload["structured_content"] = structured_content
+
+        content = result.get("content")
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            non_text_content: list[dict[str, Any]] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                text = item.get("text")
+                if item_type == "text" and isinstance(text, str):
+                    text_parts.append(text)
+                    continue
+                compact_item = {
+                    key: value
+                    for key, value in item.items()
+                    if key in {"type", "mimeType", "mime_type", "name", "uri"}
+                }
+                if compact_item:
+                    non_text_content.append(compact_item)
+            if text_parts:
+                mcp_payload["content_markdown"] = "\n\n".join(text_parts)
+            if non_text_content:
+                mcp_payload["content"] = non_text_content
+
+        normalized["mcp"] = mcp_payload
+        return normalized
+
+    @staticmethod
+    def _normalize_duplicate_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+        if artifact.get("duplicate") is not True:
+            return artifact
+        cached_result = artifact.get("cached_result")
+        if not isinstance(cached_result, dict):
+            return artifact
+        normalized = dict(artifact)
+        for key in (
+            "count",
+            "metadata_sources",
+            "results",
+            "warnings",
+            "page",
+            "run_sql",
+            "execution",
+            "execution_status",
+            "row_count",
+            "columns",
+            "rows",
+            "result_state",
+        ):
+            if key in cached_result and key not in normalized:
+                normalized[key] = cached_result[key]
+        return normalized
+
+    @staticmethod
+    def _normalize_search_documentation_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(artifact)
+        results = normalized.get("results")
+        if not isinstance(results, list):
+            return normalized
+
+        prompt_results: list[dict[str, Any]] = []
+        allowed_keys = (
+            "connector_name",
+            "page_ref",
+            "url",
+            "title",
+            "section",
+            "snippet",
+            "chunk_ref",
+        )
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            prompt_item = {key: item[key] for key in allowed_keys if key in item}
+            if prompt_item:
+                prompt_results.append(prompt_item)
+        normalized["results"] = prompt_results
+        return normalized
+
+    @staticmethod
+    def _normalize_read_documentation_page_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(artifact)
+        page = normalized.get("page")
+        if not isinstance(page, dict):
+            return normalized
+        prompt_page = dict(page)
+        content = prompt_page.pop("content", None)
+        if isinstance(content, str):
+            prompt_page["content_markdown"] = content
+        normalized["page"] = prompt_page
+        return normalized
+
+    @staticmethod
+    def _normalize_read_gitlab_file_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(artifact)
+        file_payload = normalized.get("file")
+        if not isinstance(file_payload, dict):
+            return normalized
+        prompt_file = dict(file_payload)
+        content = prompt_file.pop("content", None)
+        if isinstance(content, str):
+            prompt_file["content_markdown"] = content
+        normalized["file"] = prompt_file
+        return normalized
+
+    @staticmethod
+    def _normalize_airflow_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(artifact)
+        airflow = normalized.get("airflow")
+        if not isinstance(airflow, dict):
+            return normalized
+
+        allowed_payload_keys = (
+            "dags",
+            "dag_runs",
+            "task_instances",
+            "import_errors",
+            "total_entries",
+            "limit",
+            "offset",
+            "dag_id",
+            "dag_run_id",
+            "state",
+            "is_paused",
+            "is_active",
+            "timetable_description",
+            "description",
+            "fileloc",
+            "owners",
+            "tags",
+            "logical_date",
+            "start_date",
+            "end_date",
+            "data_interval_start",
+            "data_interval_end",
+            "duration",
+            "content",
+            "content_length",
+            "max_chars",
+            "truncated",
+            "next_offset",
+            "next_continuation_token",
+            "end_of_log",
+            "log_available",
+            "user_message",
+            "metadatabase",
+            "scheduler",
+            "dag_processor",
+            "triggerer",
+            "status",
+        )
+        allowed_entity_keys = (
+            "dag_id",
+            "dag_run_id",
+            "run_id",
+            "state",
+            "task_id",
+            "task_display_name",
+            "operator",
+            "try_number",
+            "map_index",
+            "start_date",
+            "end_date",
+            "duration",
+            "logical_date",
+            "execution_date",
+            "data_interval_start",
+            "data_interval_end",
+            "queued_at",
+            "queued_when",
+            "hostname",
+            "unixname",
+            "pool",
+            "queue",
+            "max_tries",
+            "is_paused",
+            "is_active",
+            "timetable_description",
+            "description",
+            "fileloc",
+            "owners",
+            "tags",
+            "filename",
+            "stacktrace",
+            "import_error_id",
+            "timestamp",
+        )
+        list_keys = {"dags", "dag_runs", "task_instances", "import_errors"}
+
+        prompt_airflow: dict[str, Any] = {}
+        for key in allowed_payload_keys:
+            if key not in airflow:
+                continue
+            value = airflow[key]
+            if key in list_keys and isinstance(value, list):
+                prompt_airflow[key] = [
+                    PromptArtifactSerializer._compact_airflow_entity(
+                        item=item,
+                        allowed_entity_keys=allowed_entity_keys,
+                    )
+                    if isinstance(item, dict)
+                    else item
+                    for item in value
+                ]
+            elif key == "content" and isinstance(value, str):
+                prompt_airflow["content_markdown"] = value
+            else:
+                prompt_airflow[key] = value
+        normalized["airflow"] = prompt_airflow
+        return normalized
+
+    @staticmethod
+    def _compact_airflow_entity(
+        *,
+        item: dict[str, Any],
+        allowed_entity_keys: tuple[str, ...],
+    ) -> dict[str, Any]:
+        compacted = {
+            entity_key: item[entity_key] for entity_key in allowed_entity_keys if entity_key in item
+        }
+        try_number = compacted.get("try_number")
+        if isinstance(try_number, int) and try_number < 1 and compacted.get("task_id"):
+            compacted["log_try_number"] = 1
+        return compacted
 
     def _normalize_run_sql_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(artifact)
@@ -467,7 +864,9 @@ class PromptArtifactSerializer:
         artifact: dict[str, Any],
         execution: dict[str, Any],
     ) -> str:
-        status = execution.get("status") or artifact.get("execution_status") or artifact.get("status")
+        status = (
+            execution.get("status") or artifact.get("execution_status") or artifact.get("status")
+        )
         return status if isinstance(status, str) and status.strip() else "unknown"
 
     @staticmethod
@@ -557,6 +956,87 @@ class PromptArtifactSerializer:
             payload["_omitted_keys"] = omitted_keys
         return payload
 
+    def _select_control_payload(
+        self,
+        *,
+        artifact: dict[str, Any],
+        warnings: list[str],
+        truncation_flags: list[str],
+    ) -> dict[str, Any]:
+        """Keep exact catalog names inline; control results must never become opaque."""
+        payload: dict[str, Any] = {}
+        allowed_fields = self._ARTIFACT_FIELDS["tool_control"]
+        for key in allowed_fields:
+            if key not in artifact:
+                continue
+            payload[key] = self._compact_control_value(
+                key=key,
+                value=artifact[key],
+                truncation_flags=truncation_flags,
+            )
+        omitted_keys = len(set(artifact) - set(allowed_fields))
+        if omitted_keys:
+            payload["_omitted_keys"] = omitted_keys
+            self._append_once(warnings, "prompt_tool_control_fields_omitted")
+        return payload
+
+    def _compact_control_value(
+        self,
+        *,
+        key: str,
+        value: Any,
+        truncation_flags: list[str],
+    ) -> Any:
+        if key in {
+            "loaded_tool_names",
+            "unloaded_tool_names",
+            "missing_remote_tool_names",
+        }:
+            return list(value) if isinstance(value, list) else value
+        if key == "groups" and isinstance(value, list):
+            return [
+                {
+                    "group_name": item.get("group_name"),
+                    "description": self._compact_text(
+                        value=str(item.get("description") or ""),
+                        key="description",
+                        truncation_flags=truncation_flags,
+                    ),
+                    "tool_names": list(item.get("tool_names", [])),
+                    "tool_count": item.get("tool_count"),
+                }
+                for item in value
+                if isinstance(item, dict)
+            ]
+        if key == "tools" and isinstance(value, list):
+            return [
+                {
+                    "remote_tool_name": item.get("remote_tool_name"),
+                    "exposed_tool_name": item.get("exposed_tool_name"),
+                    "description": self._compact_text(
+                        value=str(item.get("description") or ""),
+                        key="description",
+                        truncation_flags=truncation_flags,
+                    ),
+                }
+                for item in value
+                if isinstance(item, dict)
+            ]
+        if key in {"loaded_tools", "unloaded_tools"} and isinstance(value, list):
+            return [
+                {
+                    "remote_tool_name": item.get("remote_tool_name"),
+                    "exposed_tool_name": item.get("exposed_tool_name"),
+                }
+                for item in value
+                if isinstance(item, dict)
+            ]
+        return self._compact_value(
+            value=value,
+            key=key,
+            truncation_flags=truncation_flags,
+        )
+
     def _compact_value(
         self,
         *,
@@ -581,12 +1061,30 @@ class PromptArtifactSerializer:
                 truncation_flags=truncation_flags,
             )
         if isinstance(value, str):
+            if key in self._FULL_TEXT_KEYS:
+                return self._compact_full_text(
+                    value=value,
+                    key=key,
+                    truncation_flags=truncation_flags,
+                )
             return self._compact_text(
                 value=value,
                 key=key,
                 truncation_flags=truncation_flags,
             )
         return value
+
+    def _compact_full_text(
+        self,
+        *,
+        value: str,
+        key: str,
+        truncation_flags: list[str],
+    ) -> str:
+        if len(value) <= self._MAX_FULL_TEXT_CHARS:
+            return value
+        self._append_once(truncation_flags, f"{key}_truncated")
+        return f"{value[: self._MAX_FULL_TEXT_CHARS]}...[truncated]"
 
     def _compact_run_sql_dict(
         self,
@@ -702,14 +1200,14 @@ class PromptArtifactSerializer:
         self._append_once(truncation_flags, f"{key}_truncated")
         return f"{value[: self._budget_policy.max_text_chars]}...[truncated]"
 
-    def _fit_payload_chars(
+    def _fit_payload_budget(
         self,
         *,
         payload: dict[str, Any],
         warnings: list[str],
         truncation_flags: list[str],
     ) -> dict[str, Any]:
-        if self._json_char_count(payload) <= self._budget_policy.max_payload_chars:
+        if self._within_payload_budget(payload):
             return payload
         self._append_once(truncation_flags, "artifact_payload_truncated")
         self._append_once(warnings, "prompt_artifact_budget_warning")
@@ -724,9 +1222,16 @@ class PromptArtifactSerializer:
                 column_limit=column_limit,
                 text_limit=text_limit,
             )
-            if self._json_char_count(fitted) <= self._budget_policy.max_payload_chars:
+            if self._within_payload_budget(fitted):
                 return fitted
-        return self._summary_fallback_payload(payload)
+        summary = self._summary_fallback_payload(payload)
+        return summary if self._within_payload_budget(summary) else {}
+
+    def _within_payload_budget(self, payload: dict[str, Any]) -> bool:
+        return (
+            self._json_char_count(payload) <= self._budget_policy.max_payload_chars
+            and self._estimator.count_json(payload) <= self._budget_policy.max_tokens
+        )
 
     def _compact_oversized_payload(
         self,
@@ -813,7 +1318,9 @@ class PromptArtifactSerializer:
     ) -> dict[str, Any]:
         compacted: dict[str, Any] = {}
         ordered_keys = [
-            key for key in self._ENTITY_KEY_PRIORITY if key in value and key not in self._FORBIDDEN_KEYS
+            key
+            for key in self._ENTITY_KEY_PRIORITY
+            if key in value and key not in self._FORBIDDEN_KEYS
         ]
         ordered_keys.extend(
             key

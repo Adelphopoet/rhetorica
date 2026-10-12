@@ -10,8 +10,8 @@ from rhetorica_backend.domain.scenarios import ScenarioCatalogService
 from rhetorica_backend.infra.postgres.chat_repository import ChatRepository
 from rhetorica_backend.infra.postgres.connector_repository import ConnectorRepository
 from rhetorica_backend.infra.postgres.llm_connector_repository import LlmConnectorRepository
-from rhetorica_backend.infra.postgres.openmetadata_connector_repository import (
-    OpenMetadataConnectorRepository,
+from rhetorica_backend.infra.postgres.scenario_authoring_repository import (
+    ScenarioAuthoringRepository,
 )
 from rhetorica_backend.infra.postgres.scenario_repository import ScenarioRepository
 
@@ -29,14 +29,19 @@ def _service() -> ScenarioCatalogService:
         chat_factory=get_chat_service_factory(),
         db_connector_repository=ConnectorRepository(db=db_runtime),
         llm_connector_repository=LlmConnectorRepository(db=db_runtime),
-        openmetadata_connector_repository=OpenMetadataConnectorRepository(db=db_runtime),
     )
 
 
 @router.get("", response_model=list[ScenarioDefinitionItem])
 def list_scenarios(workspace_id: str = Query(default="default", min_length=1, max_length=128)):
     current_user = resolve_current_user(workspace_id)
-    return _service().list_definitions(workspace_id=workspace_id, current_user=current_user)
+    definitions = _service().list_definitions(workspace_id=workspace_id, current_user=current_user)
+    authoring = ScenarioAuthoringRepository(get_db_runtime())
+    for definition in definitions:
+        definition.execution_kind = (
+            "workflow" if authoring.has_workflow(definition.id) else "legacy"
+        )
+    return definitions
 
 
 @router.post("", response_model=ScenarioDefinitionItem)
@@ -51,6 +56,10 @@ def create_scenario(payload: CreateScenarioRequest) -> ScenarioDefinitionItem:
 @router.put("/{scenario_id}", response_model=ScenarioDefinitionItem)
 def update_scenario(scenario_id: str, payload: UpdateScenarioRequest) -> ScenarioDefinitionItem:
     current_user = resolve_current_user(payload.workspace_id)
+    authoring = ScenarioAuthoringRepository(get_db_runtime())
+    authoring.get_draft(scenario_id, current_user)
+    if authoring.has_workflow(scenario_id):
+        raise HTTPException(status_code=409, detail="workflow_requires_draft_api")
     try:
         return _service().update_definition(
             scenario_id=scenario_id,
@@ -84,6 +93,10 @@ def archive_scenario(
 @router.post("/{scenario_id}/run", response_model=ScenarioRunResponse)
 def run_scenario(scenario_id: str, payload: ScenarioRunRequest) -> ScenarioRunResponse:
     current_user = resolve_current_user(payload.workspace_id)
+    authoring = ScenarioAuthoringRepository(get_db_runtime())
+    authoring.list_versions(scenario_id, current_user)
+    if authoring.has_workflow(scenario_id):
+        raise HTTPException(status_code=409, detail="workflow_requires_async_runs_api")
     try:
         return _service().run_definition(
             scenario_id=scenario_id,

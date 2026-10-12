@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from rhetorica_backend.contracts.analysis_document import AnalysisDocument
@@ -17,6 +18,7 @@ from rhetorica_backend.contracts.chat import (
 )
 from rhetorica_backend.contracts.connectors import ConnectorItem
 from rhetorica_backend.contracts.execution import ExecuteSqlResponse
+from rhetorica_backend.contracts.files import FileArtifactRef
 from rhetorica_backend.contracts.visualization import VisualizationSpec
 from rhetorica_backend.domain.chat.conversation.conversation_manager import (
     ConversationManager,
@@ -38,6 +40,11 @@ from rhetorica_backend.domain.results.visualization_planner import (
 logger = logging.getLogger(__name__)
 
 
+def _nonnegative_int(value: object) -> int:
+    """Read persisted review counters without allowing malformed runtime data."""
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
 @dataclass(frozen=True)
 class AssembledChatTurn:
     """Normalized final turn payload used by sync and streaming responses."""
@@ -57,12 +64,10 @@ class AssembledChatTurn:
     execution: ExecuteSqlResponse | None
     analysis_document: AnalysisDocument | None
     visualization: VisualizationSpec | None
-    analysis_plan: dict[str, Any] | None = None
-    worker_results: list[dict[str, Any]] = field(default_factory=list)
-    checkpoint_digest: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     llm_usages: list[dict[str, Any]] = field(default_factory=list)
     clarification_request: ClarificationRequest | None = None
+    files: list[FileArtifactRef] = field(default_factory=list)
 
     def to_chat_response(
         self,
@@ -86,12 +91,10 @@ class AssembledChatTurn:
             execution=self.execution,
             analysis_document=self.analysis_document,
             visualization=self.visualization,
-            analysis_plan=self.analysis_plan,
-            worker_results=self.worker_results,
-            checkpoint_digest=self.checkpoint_digest,
             warnings=self.warnings,
             assistant_message_id=assistant_message_id,
             clarification_request=self.clarification_request,
+            files=self.files,
         )
 
     def to_done_event(
@@ -108,9 +111,6 @@ class AssembledChatTurn:
             execution=self.execution,
             analysis_document=self.analysis_document,
             visualization=self.visualization,
-            analysis_plan=self.analysis_plan,
-            worker_results=self.worker_results,
-            checkpoint_digest=self.checkpoint_digest,
             selected_database_connector=self.selected_database_connector,
             metadata_sources=self.metadata_sources,
             context_tables=self.context_tables,
@@ -124,6 +124,7 @@ class AssembledChatTurn:
             assistant_message_id=assistant_message_id,
             cancelled=cancelled,
             clarification_request=self.clarification_request,
+            files=self.files,
         )
 
 
@@ -139,27 +140,54 @@ class ChatHistoryPersistenceService:
         conversation_id: str | None,
         request: ChatAskRequest,
         turn: AssembledChatTurn,
+        persist_user_message: bool = True,
+        persisted_user_message_id: str | None = None,
     ) -> str | None:
         if not conversation_id:
             return None
 
-        user_message = self._conversation_manager.save_message(
-            conversation_id=conversation_id,
-            role="user",
-            content=request.question,
-        )
+        if persist_user_message:
+            user_message = self.save_user_message(
+                conversation_id=conversation_id,
+                request=request,
+            )
+        else:
+            user_message = SimpleNamespace(
+                id=persisted_user_message_id,
+                conversation_id=conversation_id,
+                role="user",
+                content=request.question,
+            )
+
+        if (
+            not persist_user_message
+            and user_message is not None
+            and request.attachment_ids
+        ):
+            self._conversation_manager.attach_files_to_message(
+                artifact_ids=request.attachment_ids,
+                message_id=user_message.id,
+                conversation_id=conversation_id,
+                relation="input",
+            )
 
         capability_trace_payload = turn.capability_trace.model_dump(
             mode="json",
             by_alias=True,
         )
         runtime_context = dict(turn.runtime_context or {})
-        if turn.analysis_plan is not None:
-            runtime_context["analysis_plan"] = turn.analysis_plan
-        if turn.worker_results:
-            runtime_context["worker_results"] = turn.worker_results
-        if turn.checkpoint_digest is not None:
-            runtime_context["checkpoint_digest"] = turn.checkpoint_digest
+        if turn.llm_usages:
+            runtime_context["llm_calls"] = turn.llm_usages
+        if request.agent_id:
+            trace_runtime_context = capability_trace_payload.get("runtime_context")
+            if isinstance(trace_runtime_context, dict):
+                trace_runtime_context.update(runtime_context)
+                runtime_context = trace_runtime_context
+            runtime_context["agent"] = {
+                "id": request.agent_id,
+                "has_prompt": bool(request.agent_prompt),
+                "llm_connector_name": request.llm_connector_name,
+            }
         if runtime_context:
             capability_trace_payload["runtime_context"] = runtime_context
         assistant_message = self._conversation_manager.save_message(
@@ -188,7 +216,24 @@ class ChatHistoryPersistenceService:
                 else None
             ),
             warnings=turn.warnings,
+            agent_id=request.agent_id,
         )
+        if assistant_message is not None and turn.files:
+            self._conversation_manager.attach_files_to_message(
+                artifact_ids=[item.id for item in turn.files],
+                message_id=assistant_message.id,
+                conversation_id=conversation_id,
+                relation="output",
+            )
+        langfuse_trace_id = runtime_context.get("langfuse_trace_id")
+        if assistant_message is not None and isinstance(langfuse_trace_id, str) and langfuse_trace_id:
+            self._conversation_manager.save_answer_trace(
+                assistant_message_id=assistant_message.id,
+                conversation_id=conversation_id,
+                trace_id=langfuse_trace_id,
+                tool_call_count=_nonnegative_int(runtime_context.get("review_tool_call_count")),
+                tool_error_count=_nonnegative_int(runtime_context.get("review_tool_error_count")),
+            )
         persisted_messages = [
             message for message in (user_message, assistant_message) if message is not None
         ]
@@ -196,36 +241,50 @@ class ChatHistoryPersistenceService:
             self._conversation_manager,
             "update_conversation_state_from_turn",
         ):
-            checkpoint = runtime_context.get("checkpoint_digest")
             self._conversation_manager.update_conversation_state_from_turn(
                 conversation_id=conversation_id,
                 messages=persisted_messages,
-                checkpoint_digest=checkpoint if isinstance(checkpoint, dict) else None,
                 llm_usages=turn.llm_usages if hasattr(turn, "llm_usages") else None,
             )
         return assistant_message.id if assistant_message else None
 
-    def persist_runtime_state(
+    def add_token_usage(
+        self,
+        *,
+        conversation_id: str,
+        llm_usages: list[dict[str, Any]],
+    ) -> None:
+        """Persist billed usage independently from optional conversation history."""
+        self._conversation_manager.add_token_usage(
+            conversation_id=conversation_id,
+            llm_usages=llm_usages,
+        )
+
+    def save_user_message(
         self,
         *,
         conversation_id: str | None,
-        state: Any,
-    ) -> None:
-        """Persist compact live runtime state for reload/resume surfaces."""
+        request: ChatAskRequest,
+    ) -> Any | None:
+        """Persist the analyst question as soon as the turn is ready to run."""
         if not conversation_id:
-            return
-        checkpoint = getattr(state, "checkpoint", None)
-        analysis_plan = getattr(state, "analysis_plan", None)
-        worker_results = getattr(state, "worker_results", [])
-        self._conversation_manager.update_analysis_runtime_state(
+            return None
+        user_message = self._conversation_manager.save_message(
             conversation_id=conversation_id,
-            checkpoint_digest=(checkpoint.digest_payload() if checkpoint is not None else None),
-            analysis_plan=(
-                analysis_plan.model_dump(mode="json") if analysis_plan is not None else None
-            ),
-            worker_results=[result.model_dump(mode="json") for result in worker_results[-5:]],
+            role="user",
+            content=request.question,
+            agent_id=request.agent_id,
+            source_provider=request.source_provider,
+            source_message_id=request.source_message_id,
         )
-
+        if user_message is not None and request.attachment_ids:
+            self._conversation_manager.attach_files_to_message(
+                artifact_ids=request.attachment_ids,
+                message_id=user_message.id,
+                conversation_id=conversation_id,
+                relation="input",
+            )
+        return user_message
 
 class ChatResponseAssembler:
     """Builds final chat responses and persists them into conversation history."""
@@ -284,15 +343,6 @@ class ChatResponseAssembler:
         metadata_sources = self._extract_metadata_sources(llm_payload)
         context_tables = self._extract_context_tables(llm_payload)
         runtime_context = self._extract_runtime_context(llm_payload)
-        analysis_plan = self._extract_optional_dict(
-            llm_payload.get("analysis_plan") or runtime_context.get("analysis_plan")
-        )
-        worker_results = self._extract_dict_list(
-            llm_payload.get("worker_results") or runtime_context.get("worker_results")
-        )
-        checkpoint_digest = self._extract_optional_dict(
-            llm_payload.get("checkpoint_digest") or runtime_context.get("checkpoint_digest")
-        )
 
         return AssembledChatTurn(
             answer=answer,
@@ -316,13 +366,28 @@ class ChatResponseAssembler:
             execution=execution,
             analysis_document=analysis_document,
             visualization=primary_visualization,
-            analysis_plan=analysis_plan,
-            worker_results=worker_results,
-            checkpoint_digest=checkpoint_digest,
             warnings=turn_warnings,
             llm_usages=self._serialize_llm_usages(llm_usages),
             clarification_request=self._extract_clarification_request(llm_payload),
+            files=self._extract_files(llm_payload),
         )
+
+    @staticmethod
+    def _extract_files(llm_payload: dict[str, Any]) -> list[FileArtifactRef]:
+        raw_files = llm_payload.get("files")
+        if not isinstance(raw_files, list):
+            return []
+        result: list[FileArtifactRef] = []
+        for item in raw_files:
+            try:
+                result.append(FileArtifactRef.model_validate(item))
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "chat.invalid_file_reference",
+                    extra={"error_type": type(exc).__name__},
+                )
+                continue
+        return result
 
     def save_to_history(
         self,
@@ -330,12 +395,28 @@ class ChatResponseAssembler:
         conversation_id: str | None,
         request: ChatAskRequest,
         turn: AssembledChatTurn,
+        persist_user_message: bool = True,
+        persisted_user_message_id: str | None = None,
     ) -> str | None:
         return self._history_persistence_service.save_turn(
             conversation_id=conversation_id,
             request=request,
             turn=turn,
+            persist_user_message=persist_user_message,
+            persisted_user_message_id=persisted_user_message_id,
         )
+
+    def save_user_to_history(
+        self,
+        *,
+        conversation_id: str | None,
+        request: ChatAskRequest,
+    ) -> str | None:
+        message = self._history_persistence_service.save_user_message(
+            conversation_id=conversation_id,
+            request=request,
+        )
+        return str(message.id) if message is not None else None
 
     def _plan_visualization(
         self,
@@ -523,10 +604,7 @@ class ChatResponseAssembler:
             elif isinstance(usage, dict):
                 result.append(usage)
             elif hasattr(usage, "__dataclass_fields__"):
-                # Handle frozen dataclass
-                result.append({
-                    f.name: getattr(usage, f.name) for f in usage.__dataclass_fields__.values()
-                })
+                result.append(asdict(usage))
         return result
 
     @staticmethod

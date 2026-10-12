@@ -7,7 +7,7 @@ describe("chatCopy", () => {
   it("serializes a message with the full system run log", () => {
     const serialized = serializeChatMessageForCopy({
       role: "assistant",
-      text: "Revenue is up 12%.",
+      text: "Revenue is up 12%",
       timestamp: new Date("2026-04-04T09:00:00Z"),
       thinkingBlocks: [
         {
@@ -19,7 +19,7 @@ describe("chatCopy", () => {
       toolCalls: [
         {
           id: "tool-1",
-          tool_name: "search_metadata",
+          tool_name: "catalog__search",
           arguments: { entityType: "table", query: "revenue" },
           result_summary: "Found 2 tables",
           success: true,
@@ -37,11 +37,11 @@ describe("chatCopy", () => {
     });
 
     expect(serialized).toContain("Rhetorica Assistant");
-    expect(serialized).toContain("Revenue is up 12%.");
-    expect(serialized).toContain("System run log:");
+    expect(serialized).toContain("Revenue is up 12%");
+    expect(serialized).toContain("Журнал выполнения:");
     expect(serialized).toContain("Checking revenue sources");
-    expect(serialized).toContain("Tool call: search_metadata");
-    expect(serialized).toContain("Execution status: running");
+    expect(serialized).toContain("Вызов инструмента: catalog__search");
+    expect(serialized).toContain("Статус выполнения: running");
   });
 
   it("includes optimizer trace entries when copying whole chat history", () => {
@@ -49,11 +49,11 @@ describe("chatCopy", () => {
       {
         id: "assistant-optimizer",
         role: "assistant",
-        text: "Optimizer inspected the query.",
+        text: "Optimizer inspected the query",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
         payload: {
-          answer: "Optimizer inspected the query.",
+          answer: "Optimizer inspected the query",
           conversation_id: "conv-1",
           generated_sql: "select * from revenue",
           optimization_trace: {
@@ -73,7 +73,7 @@ describe("chatCopy", () => {
               {
                 rule_id: "query-join-filter-before",
                 title: "Push filters earlier",
-                summary: "Filter before joining the large fact.",
+                summary: "Filter before joining the large fact",
                 severity: "warning",
                 applies_to: ["dm.revenue"],
                 citations: [],
@@ -104,8 +104,8 @@ describe("chatCopy", () => {
 
     const serialized = serializeChatHistoryForCopy(messages, { userLabel: "Ada Lovelace" });
 
-    expect(serialized).toContain("Tool call: sql_optimization_advisor");
-    expect(serialized).toContain("Advisory only: 1 finding");
+    expect(serialized).toContain("Вызов инструмента: sql_optimization_advisor");
+    expect(serialized).toContain("Только рекомендации: 1 замечание");
     expect(serialized).toContain("Push filters earlier");
   });
 

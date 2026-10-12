@@ -9,6 +9,7 @@ from secrets import randbelow
 from typing import Any, TypeVar
 
 import httpx
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 T = TypeVar("T")
 
@@ -46,8 +47,37 @@ def classify_exception(exc: Exception) -> tuple[ErrorCategory, str, str, bool]:
             "Temporary network issue. Please retry.",
             True,
         )
+    if isinstance(exc, APIConnectionError | APITimeoutError):
+        return (
+            ErrorCategory.TRANSIENT,
+            "provider_connection_transient_error",
+            "Temporary network issue. Please retry.",
+            True,
+        )
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
+        if is_transient_http_status(status):
+            return (
+                ErrorCategory.TRANSIENT,
+                f"http_{status}",
+                f"Temporary upstream error ({status}). Please retry.",
+                True,
+            )
+        if status in {400, 404, 422}:
+            return (
+                ErrorCategory.RECOVERABLE,
+                f"http_{status}",
+                "Request parameters are invalid for this operation.",
+                False,
+            )
+        return (
+            ErrorCategory.FATAL,
+            f"http_{status}",
+            "Upstream service returned a fatal error.",
+            False,
+        )
+    if isinstance(exc, APIStatusError):
+        status = exc.status_code
         if is_transient_http_status(status):
             return (
                 ErrorCategory.TRANSIENT,

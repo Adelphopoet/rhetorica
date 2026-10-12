@@ -10,6 +10,10 @@ type ScenarioCatalogModalProps = {
   scenarios: ScenarioDefinition[];
   loading: boolean;
   runningScenarioId: string | null;
+  launchingScenarioId: string | null;
+  authoringTarget: "create" | "edit" | null;
+  authoringPending: boolean;
+  runDisabled: boolean;
   saving: boolean;
   archivingScenarioId: string | null;
   onClose: () => void;
@@ -28,6 +32,10 @@ export function ScenarioCatalogModal({
   scenarios,
   loading,
   runningScenarioId,
+  launchingScenarioId,
+  authoringTarget,
+  authoringPending,
+  runDisabled,
   saving,
   archivingScenarioId,
   onClose,
@@ -42,25 +50,25 @@ export function ScenarioCatalogModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[#02050c]/72 p-3 backdrop-blur-sm sm:p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-overlay/[0.72] p-3 backdrop-blur-sm sm:p-4"
       onClick={onClose}
     >
       <div
-        className="flex h-[min(92vh,960px)] w-full max-w-6xl flex-col overflow-hidden rounded-[30px] border border-[#1d2940] bg-[linear-gradient(180deg,rgba(12,18,31,0.98),rgba(8,12,22,0.99))] shadow-[0_30px_90px_rgba(0,0,0,0.48)]"
+        className="flex h-[min(92vh,960px)] w-full max-w-6xl flex-col overflow-hidden rounded-[30px] border border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.99))] shadow-[0_30px_90px_rgb(var(--color-shadow)/calc(0.48*var(--shadow-opacity-scale)))]"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4 border-b border-[#172338] px-5 py-4 sm:px-6">
+        <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4 sm:px-6">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6e84a8]">
-              Quick access
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+              Быстрый доступ
             </p>
-            <h3 className="mt-1 text-xl font-semibold text-[#eef4ff]">Scenarios</h3>
+            <h3 className="mt-1 text-xl font-semibold text-primary">Сценарии</h3>
           </div>
           <button
             type="button"
-            aria-label="Close scenarios"
+            aria-label="Закрыть сценарии"
             onClick={onClose}
-            className="rounded-full border border-[#23324e] p-2 text-[#a6b8d6] transition hover:text-white"
+            className="rounded-full border border-border-strong p-2 text-secondary transition hover:text-primary"
           >
             <X className="h-4 w-4" />
           </button>
@@ -71,6 +79,10 @@ export function ScenarioCatalogModal({
             scenarios={scenarios}
             loading={loading}
             runningScenarioId={runningScenarioId}
+            launchingScenarioId={launchingScenarioId}
+            authoringTarget={authoringTarget}
+            authoringPending={authoringPending}
+            runDisabled={runDisabled}
             saving={saving}
             archivingScenarioId={archivingScenarioId}
             onRunScenario={onRunScenario}

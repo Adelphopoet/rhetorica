@@ -41,6 +41,8 @@ def upsert_connector(payload: UpsertConnectorRequest) -> ConnectorItem:
         return _repository().upsert(payload)
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="connector_name_conflict") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.put("/{connector_id}", response_model=ConnectorItem)
@@ -58,6 +60,8 @@ def update_connector(
         )
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="connector_name_conflict") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="connector_not_found")
     return updated

@@ -31,12 +31,12 @@ class ScenarioConnectorBindings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     llm_connector_name: str | None = Field(default=None, min_length=1, max_length=128)
-    metadata_connector_name: str | None = Field(default=None, min_length=1, max_length=128)
     database_connector_name: str | None = Field(default=None, min_length=1, max_length=128)
     run_sql: bool | None = None
 
 
 class ScenarioDefinitionItem(BaseModel):
+    execution_kind: str = "legacy"
     id: str
     slug: str
     workspace_id: str

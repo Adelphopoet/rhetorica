@@ -17,7 +17,7 @@ class MetadataEntityReference:
 
 @dataclass(frozen=True)
 class MetadataMetricReference:
-    """Compact OpenMetadata metric reference."""
+    """Compact governed metric reference."""
 
     name: str
     display_name: str | None = None

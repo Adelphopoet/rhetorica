@@ -11,24 +11,15 @@ _IMPACT_PRIORITY = {
     "MEDIUM": 2,
     "LOW": 3,
 }
-_MAX_PROMPT_RULES_PER_SKILL = 16
-_MAX_PROMPT_CHARS = 5000
+_MAX_CHAT_SKILL_CATALOG_CHARS = 4000
 
 
 def iter_skill_assets(skill: WorkspaceSkillItem) -> list[WorkspaceSkillAsset]:
-    return [
-        asset
-        for asset in skill.content_bundle.assets
-        if asset.content_markdown.strip()
-    ]
+    return [asset for asset in skill.content_bundle.assets if asset.content_markdown.strip()]
 
 
 def iter_rule_assets(skill: WorkspaceSkillItem) -> list[WorkspaceSkillAsset]:
-    assets = [
-        asset
-        for asset in iter_skill_assets(skill)
-        if asset.kind == "rule" and asset.rule_id
-    ]
+    assets = [asset for asset in iter_skill_assets(skill) if asset.kind == "rule" and asset.rule_id]
     return sorted(
         assets,
         key=lambda asset: (
@@ -48,44 +39,41 @@ def find_rule_asset(skill: WorkspaceSkillItem, rule_id: str) -> WorkspaceSkillAs
     return None
 
 
-def build_workspace_skill_prompt_guidance(skills: list[WorkspaceSkillItem]) -> str | None:
-    if not skills:
+def skill_use_when(skill: WorkspaceSkillItem, fallback: str) -> str:
+    if skill.summary:
+        return skill.summary
+    for asset in iter_skill_assets(skill):
+        if asset.kind == "main" and asset.summary:
+            return asset.summary
+    return fallback
+
+
+def build_workspace_chat_skill_catalog(skills: list[WorkspaceSkillItem]) -> str | None:
+    """Build a compact prompt catalog for on-demand chat instruction skills."""
+    chat_skills = [
+        skill
+        for skill in skills
+        if skill.capability_family == "chat_instruction"
+        and skill.status == "active"
+        and skill.validation_status == "valid"
+    ]
+    if not chat_skills:
         return None
 
-    lines = [
-        "Workspace skill guidance:",
-        "- Treat the following workspace rules as local engine policy when you draft or repair SQL.",
-        "- Prefer these rules over generic database intuition when they apply.",
-    ]
+    lines = ["Workspace chat skills catalog:"]
     used_chars = sum(len(line) for line in lines)
-
-    for skill in skills:
-        header = f"- Skill `{skill.name}` for engine `{skill.engine_scope}`."
-        if used_chars + len(header) > _MAX_PROMPT_CHARS:
-            break
-        lines.append(header)
-        used_chars += len(header)
-
-        rule_assets = iter_rule_assets(skill)
-        if rule_assets:
-            for asset in rule_assets[:_MAX_PROMPT_RULES_PER_SKILL]:
-                rule_label = asset.rule_id or asset.path
-                title = asset.title or rule_label
-                summary = asset.summary or ""
-                line = f"- `{rule_label}`: {title}. {summary}".strip()
-                if used_chars + len(line) > _MAX_PROMPT_CHARS:
-                    break
-                lines.append(line)
-                used_chars += len(line)
-            continue
-
-        fallback_summary = skill.summary or "Use this workspace skill when SQL optimization advice is relevant."
-        line = f"- `{skill.name}`: {fallback_summary}"
-        if used_chars + len(line) > _MAX_PROMPT_CHARS:
+    for skill in chat_skills:
+        title = skill.title or skill.name
+        use_when = skill_use_when(skill, "No usage guidance provided.")
+        line = (
+            f"- id={skill.id}; name={skill.name}; title={title}; "
+            f"priority={skill.priority}; use_when={use_when}"
+        )
+        if used_chars + len(line) > _MAX_CHAT_SKILL_CATALOG_CHARS:
             break
         lines.append(line)
         used_chars += len(line)
 
-    if len(lines) <= 3:
+    if len(lines) == 1:
         return None
     return "\n".join(lines)

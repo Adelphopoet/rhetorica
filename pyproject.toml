@@ -1,6 +1,7 @@
 [tool.uv.workspace]
 members = [
   "apps/api",
+  "apps/sandbox",
   "apps/worker",
   "packages/backend",
 ]
@@ -49,13 +50,15 @@ warn_return_any = true
 warn_unused_ignores = true
 warn_unused_configs = true
 show_error_codes = true
-files = ["apps/api/src", "apps/worker/src", "packages/backend/src"]
+files = ["apps/api/src", "apps/sandbox/src", "apps/worker/src", "packages/backend/src"]
 exclude = ["\\.venv", "node_modules"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 addopts = "-ra --import-mode=importlib"
 testpaths = [
   "apps/api/tests",
+  "apps/sandbox/tests",
   "apps/worker/tests",
   "packages/backend/tests",
   "tests",

@@ -1,0 +1,22 @@
+{{- if .Values.infra.enabled }}
+{{- $storageClassName := .Values.infra.storageClassName -}}
+{{- range $name, $size := dict "postgres" .Values.infra.postgres.storageSize "redis" .Values.infra.redis.storageSize "qdrant" .Values.infra.qdrant.storageSize "minio" .Values.infra.minio.storageSize }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rhetorica.fullname" $ }}-{{ $name }}
+  labels:
+    {{- include "rhetorica.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: infra
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if $storageClassName }}
+  storageClassName: {{ $storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $size | quote }}
+{{- end }}
+{{- end }}

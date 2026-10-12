@@ -61,6 +61,18 @@ class TestFeedbackPolicyValidation:
         assert is_valid is True
         assert error == ""
 
+    def test_expanded_thumbs_down_reason_other_is_valid(self) -> None:
+        """The simplified thumbs-down form maps to OTHER instead of being ignored."""
+        policy = FeedbackPolicy()
+
+        is_valid, error = policy.validate_feedback_request(
+            feedback=AssistantFeedbackValue.WRONG,
+            reason=FeedbackReason.OTHER,
+        )
+
+        assert is_valid is True
+        assert error == ""
+
 
 class TestFeedbackPolicyRouting:
     """Test feedback routing decisions."""
@@ -224,3 +236,23 @@ class TestFeedbackPipelineService:
         assert FeedbackRoutingAction.RECORD_NEGATIVE_METADATA_SIGNAL in decision.actions
         assert FeedbackRoutingAction.TRIGGER_REPAIR_TURN in decision.actions
         assert decision.table_fqns_to_downrank == ["table1"]
+
+    def test_process_expanded_thumbs_down_keeps_normal_wrong_routing(self) -> None:
+        service = FeedbackPipelineService()
+        context = FeedbackContext(
+            message_id="msg-123",
+            conversation_id="conv-456",
+            workspace_id="default",
+            feedback=AssistantFeedbackValue.WRONG,
+            reason=FeedbackReason.OTHER,
+            comment=None,
+            context_tables=["table1"],
+            selected_connector="om",
+        )
+
+        decision = service.process_feedback(context)
+
+        assert FeedbackRoutingAction.LOG_AND_IGNORE not in decision.actions
+        assert FeedbackRoutingAction.RECORD_NEGATIVE_METADATA_SIGNAL in decision.actions
+        assert FeedbackRoutingAction.TRIGGER_REPAIR_TURN in decision.actions
+        assert decision.table_fqns_to_downrank == []

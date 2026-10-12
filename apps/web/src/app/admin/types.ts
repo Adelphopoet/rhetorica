@@ -1,4 +1,11 @@
 import type { ScenarioDefinition } from "@/features/scenarios/scenariosApi";
+import type { AgentProfile } from "@/features/agents/agentsApi";
+
+export type DatabaseExtraSetting =
+  | string
+  | number
+  | boolean
+  | Record<string, string | number | boolean>;
 
 export type DatabaseConnectorItem = {
   id: string;
@@ -6,17 +13,20 @@ export type DatabaseConnectorItem = {
   workspace_id: string;
   is_active: boolean;
   has_password: boolean;
+  has_extra_credentials?: boolean;
   connection: {
     engine: "clickhouse" | "trino" | "greenplum" | "impala";
     host: string;
     port: number;
     username: string;
+    usage_description: string | null;
     database: string | null;
     catalog: string | null;
     schema: string | null;
     secure: boolean;
     verify: boolean;
-    extra_settings: Record<string, string | number | boolean>;
+    extra_settings: Record<string, DatabaseExtraSetting>;
+    extra_credentials?: Record<string, null> | null;
   };
   created_at: string;
   updated_at: string;
@@ -27,14 +37,22 @@ export type LlmConnectorItem = {
   name: string;
   workspace_id: string;
   is_active: boolean;
+  is_default?: boolean;
+  capability_profile?: Record<string, unknown> | null;
   has_api_key: boolean;
+  api_key_count: number;
   connection: {
     base_url: string;
     model: string;
+    api_keys?: string[] | null;
+    retained_api_key_indexes?: number[] | null;
     endpoint_path: string;
     verify_tls: boolean;
     temperature: number | null;
+    top_p?: number | null;
+    reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
     max_tokens: number | null;
+    max_tokens_parameter?: "max_tokens" | "max_completion_tokens";
     headers: Record<string, string>;
     extra_settings?: Record<string, string | number | boolean>;
   };
@@ -42,62 +60,178 @@ export type LlmConnectorItem = {
   updated_at: string;
 };
 
-export type OpenMetadataConnectorItem = {
+export type DocumentationConnectorItem = {
   id: string;
   name: string;
   workspace_id: string;
   is_active: boolean;
+  visible_to_default_assistant: boolean;
   has_api_token: boolean;
+  has_embedding_api_key: boolean;
+  has_qdrant_api_key: boolean;
+  last_sync_status: string | null;
+  last_sync_at: string | null;
+  next_sync_at: string | null;
   connection: {
-    provider: "openmetadata";
+    provider: "docsy_hugo";
     base_url: string;
+    index_url: string | null;
+    content_format: "markdown" | "json" | "html";
+    username: string | null;
+    usage_description: string | null;
+    auth_type: "none" | "bearer" | "basic";
     verify_tls: boolean;
-    mcp_tables_url: string | null;
-    service_name: string | null;
-    database_name: string | null;
-    schema_name: string | null;
-    table_limit: number;
-    fields: string;
+    include_paths: string[];
+    exclude_paths: string[];
+    sync_enabled: boolean;
+    sync_interval_minutes: number;
+    qdrant_base_url: string;
+    qdrant_collection_name: string;
+    qdrant_prefer_grpc: boolean;
+    vector_size: number;
+    embedding_base_url: string | null;
+    embedding_model: string;
+    embedding_endpoint_path: string;
+    embedding_timeout_seconds: number;
     extra_settings?: Record<string, string | number | boolean>;
   };
   created_at: string;
   updated_at: string;
 };
 
-export type ConfluenceConnectorItem = {
+export type GitLabConnectorItem = {
   id: string;
   name: string;
   workspace_id: string;
   is_active: boolean;
   has_api_token: boolean;
   connection: {
-    provider: "confluence";
+    provider: "gitlab";
     base_url: string;
-    username: string | null;
-    auth_type: "bearer" | "basic";
+    use_when: string;
     verify_tls: boolean;
-    space_key: string | null;
-    page_limit: number;
+    default_project_paths: string[];
+    default_group_paths: string[];
+    search_limit: number;
+    read_max_tokens: number;
     extra_settings?: Record<string, string | number | boolean>;
   };
   created_at: string;
   updated_at: string;
 };
 
-export type JiraConnectorItem = {
+export type McpConnectorItem = {
   id: string;
   name: string;
   workspace_id: string;
   is_active: boolean;
-  has_api_token: boolean;
+  visible_to_external_mcp: boolean;
+  has_secret_headers: boolean;
+  secret_header_names: string[];
+  tool_count: number;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+  last_sync_at: string | null;
   connection: {
-    provider: "jira";
-    base_url: string;
-    username: string | null;
-    auth_type: "bearer" | "basic";
+    provider: "jira" | "confluence" | "gitlab" | "generic";
+    transport: "streamable-http";
+    url: string;
     verify_tls: boolean;
-    project_keys: string[];
-    issue_limit: number;
+    headers: Record<string, string>;
+    secret_headers?: Array<{ name: string; value: string; mode: "raw" | "bearer" }> | null;
+    enabled_groups: string | null;
+    allowed_tool_names?: string[];
+    timeout_seconds: number;
+    tool_name_prefix: string | null;
+    llm_connector_name: string | null;
+    usage_description: string | null;
+    extra_settings?: Record<string, string | number | boolean>;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type AirflowConnectorItem = {
+  id: string;
+  name: string;
+  workspace_id: string;
+  is_active: boolean;
+  has_password: boolean;
+  connection: {
+    provider: "airflow";
+    base_url: string;
+    username: string;
+    use_when: string;
+    auth_type: "basic";
+    verify_tls: boolean;
+    api_path: string;
+    dag_limit: number;
+    dag_run_limit: number;
+    task_limit: number;
+    log_max_chars: number;
+    timeout_seconds: number;
+    extra_settings?: Record<string, string | number | boolean>;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type KubernetesConnectorItem = {
+  id: string;
+  name: string;
+  workspace_id: string;
+  is_active: boolean;
+  visible_to_default_assistant: boolean;
+  has_bearer_token: boolean;
+  connection: {
+    provider: "kubernetes";
+    base_url: string;
+    use_when: string;
+    auth_type: "bearer";
+    verify_tls: boolean;
+    namespace_allowlist: string[];
+    default_limit: number;
+    max_limit: number;
+    log_max_chars: number;
+    timeout_seconds: number;
+    extra_settings?: Record<string, string | number | boolean>;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
+export type VictoriaMetricsTemplateConfig = {
+  template_id: string;
+  title: string;
+  use_when: string;
+  query_template: string;
+  mode: "instant" | "range" | "both";
+  allowed_filters: string[];
+  default_step: string;
+  max_range_seconds: number;
+  unit: string | null;
+  result_limit: number;
+};
+
+export type VictoriaMetricsConnectorItem = {
+  id: string;
+  name: string;
+  workspace_id: string;
+  is_active: boolean;
+  visible_to_default_assistant: boolean;
+  has_bearer_token: boolean;
+  connection: {
+    provider: "victoriametrics";
+    base_url: string;
+    use_when: string;
+    auth_type: "none" | "bearer";
+    verify_tls: boolean;
+    query_path: string;
+    query_range_path: string;
+    templates: VictoriaMetricsTemplateConfig[];
+    timeout_seconds: number;
+    max_series: number;
+    max_datapoints: number;
     extra_settings?: Record<string, string | number | boolean>;
   };
   created_at: string;
@@ -109,6 +243,7 @@ export type MattermostConnectorItem = {
   name: string;
   workspace_id: string;
   is_active: boolean;
+  agent_id: string | null;
   has_bot_token: boolean;
   connection: {
     provider: "mattermost";
@@ -116,6 +251,10 @@ export type MattermostConnectorItem = {
     bot_username: string | null;
     verify_tls: boolean;
     listen_enabled: boolean;
+    send_sql_enabled: boolean;
+    ambient_listen_enabled: boolean;
+    ambient_channel_ids: string[];
+    ambient_decision_prompt: string | null;
     extra_settings?: Record<string, string | number | boolean>;
   };
   created_at: string;
@@ -150,20 +289,21 @@ export type WorkspaceSkillItem = {
   id: string;
   workspace_id: string;
   name: string;
-  capability_family: "sql_optimization_advisor";
+  capability_family: "sql_optimization_advisor" | "chat_instruction";
   engine_scope: "clickhouse" | "trino" | "greenplum" | "impala" | "any";
   priority: number;
-  source_kind: "github_markdown_url";
-  source_url: string;
+  source_kind: "github_markdown_url" | "manual_markdown";
+  source_url: string | null;
   status: "active" | "inactive";
   validation_status: "valid" | "invalid" | "pending";
+  visible_to_default_assistant: boolean;
   title: string | null;
   summary: string | null;
   content_markdown: string;
   content_bundle: {
     assets: Array<{
       path: string;
-      source_url: string;
+      source_url: string | null;
       kind: "main" | "compiled" | "rule" | "doc";
       title: string | null;
       summary: string | null;
@@ -190,18 +330,31 @@ export type LocalUserItem = {
   auth_provider: string;
   auth_subject: string;
   display_name: string | null;
+  api_rate_limit_per_hour: number | null;
   created_at: string;
   updated_at: string;
 };
 
-export type ConnectorType = "database" | "llm" | "metadata" | "confluence" | "jira" | "mattermost";
+export type ConnectorType =
+  | "database"
+  | "llm"
+  | "documentation"
+  | "gitlab"
+  | "mcp"
+  | "airflow"
+  | "kubernetes"
+  | "victoriametrics"
+  | "mattermost";
 
 export type AnyConnectorItem =
   | DatabaseConnectorItem
   | LlmConnectorItem
-  | OpenMetadataConnectorItem
-  | ConfluenceConnectorItem
-  | JiraConnectorItem
+  | DocumentationConnectorItem
+  | GitLabConnectorItem
+  | McpConnectorItem
+  | AirflowConnectorItem
+  | KubernetesConnectorItem
+  | VictoriaMetricsConnectorItem
   | MattermostConnectorItem;
 
 export type AdminSectionId = "overview" | "setup" | "governance" | "access" | "review";
@@ -209,13 +362,17 @@ export type AdminSectionId = "overview" | "setup" | "governance" | "access" | "r
 export type AdminPageData = {
   databaseConnectors: DatabaseConnectorItem[];
   llmConnectors: LlmConnectorItem[];
-  openMetadataConnectors: OpenMetadataConnectorItem[];
-  confluenceConnectors: ConfluenceConnectorItem[];
-  jiraConnectors: JiraConnectorItem[];
+  documentationConnectors: DocumentationConnectorItem[];
+  gitlabConnectors: GitLabConnectorItem[];
+  mcpConnectors: McpConnectorItem[];
+  airflowConnectors: AirflowConnectorItem[];
+  kubernetesConnectors: KubernetesConnectorItem[];
+  victoriametricsConnectors: VictoriaMetricsConnectorItem[];
   mattermostConnectors: MattermostConnectorItem[];
   pendingInsights: RagInsightReviewItem[];
   scenarios: ScenarioDefinition[];
   workspaceSkills: WorkspaceSkillItem[];
+  agents?: AgentProfile[];
   localUsers: LocalUserItem[];
   currentUserId: string;
   workspaceId: string;

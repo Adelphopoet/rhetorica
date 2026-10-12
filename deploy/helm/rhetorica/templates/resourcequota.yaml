@@ -1,0 +1,11 @@
+{{- if .Values.namespaceControls.resourceQuota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ns-resource-limits
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml .Values.namespaceControls.resourceQuota.hard | nindent 4 }}
+{{- end }}

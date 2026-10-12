@@ -5,6 +5,10 @@ metadata:
   name: {{ include "rhetorica.fullname" . }}-web
   labels:
     {{- include "rhetorica.labels" . | nindent 4 }}
+  {{- with .Values.web.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   {{- if .Values.web.ingress.className }}
   ingressClassName: {{ .Values.web.ingress.className }}

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { fetchBackend } from "@/lib/backendAuth";
+import { backendResponseHeaders, fetchBackend } from "@/lib/backendAuth";
 
 export async function GET(
   _request: Request,
@@ -19,21 +19,21 @@ export async function GET(
           status: response.status,
           body: body.slice(0, 500),
         },
-        { status: response.status }
+        { status: response.status, headers: backendResponseHeaders(response) }
       );
     }
 
     return new NextResponse(body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch (error) {
     return NextResponse.json(
       {
         error: "chat_conversation_detail_proxy_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: error instanceof Error ? error.message : "Неизвестная ошибка",
       },
       { status: 500 }
     );
@@ -59,21 +59,21 @@ export async function DELETE(
           status: response.status,
           body: body.slice(0, 500),
         },
-        { status: response.status }
+        { status: response.status, headers: backendResponseHeaders(response) }
       );
     }
 
     return new NextResponse(body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch (error) {
     return NextResponse.json(
       {
         error: "chat_conversation_delete_proxy_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: error instanceof Error ? error.message : "Неизвестная ошибка",
       },
       { status: 500 }
     );

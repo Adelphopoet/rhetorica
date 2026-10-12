@@ -1,0 +1,5 @@
+import { ArrowRightLeft, Braces, Database, FileCheck2, GitBranch, GitFork, GitMerge, ListFilter, Sparkles } from "lucide-react";
+
+export const nodeIcons = { input: ListFilter, sql: Database, python: Braces, llm: Sparkles, condition: GitBranch, parallel: GitFork, join: GitMerge, approval: FileCheck2, result: ArrowRightLeft };
+export const nodeColors = { input: "rgb(var(--color-cyan))", sql: "rgb(var(--color-accent))", python: "rgb(var(--color-warning))", llm: "rgb(var(--color-purple))", condition: "rgb(var(--color-orange))", parallel: "rgb(var(--color-cyan))", join: "rgb(var(--color-cyan))", approval: "rgb(var(--color-warning))", result: "rgb(var(--color-success))" };
+export const nodeDescriptions = { input: "Данные для запуска", sql: "Запрос к базе данных", python: "Обработка данных и файлов", llm: "Анализ с помощью агента", condition: "Выбор ветки по условию", parallel: "Одновременное выполнение", join: "Сбор результатов веток", approval: "Решение пользователя", result: "Ответ и файлы" };

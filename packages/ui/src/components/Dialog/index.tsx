@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { X } from "lucide-react";
 
@@ -66,6 +67,11 @@ export function Dialog({
 }: DialogProps) {
   const prefersReducedMotion = useReducedMotion();
   const containerRef = React.useRef<HTMLDivElement | null>(null);
+  const [mounted, setMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useOverlayLifecycle(open, onOpenChange);
 
@@ -110,13 +116,17 @@ export function Dialog({
     }
   }, []);
 
-  return (
+  if (!mounted) {
+    return null;
+  }
+
+  return createPortal(
     <AnimatePresence>
       {open ? (
         <motion.div
           aria-hidden={!open}
           className={cn(
-            "fixed inset-0 z-[90] flex items-center justify-center bg-[#02050c]/78 p-4 backdrop-blur-md",
+            "fixed inset-0 z-[90] flex items-center justify-center bg-overlay/[0.78] p-4 backdrop-blur-md",
             overlayClassName
           )}
           initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0 }}
@@ -130,7 +140,7 @@ export function Dialog({
             aria-modal="true"
             tabIndex={-1}
             className={cn(
-              "relative w-full max-w-2xl rounded-[28px] border border-[#1d2940] bg-[linear-gradient(180deg,rgba(12,18,31,0.98),rgba(8,12,22,0.99))] p-6 text-[#edf3ff] shadow-[0_30px_90px_rgba(0,0,0,0.48)] outline-none",
+              "relative w-full max-w-2xl rounded-[28px] border border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.99))] p-6 text-primary shadow-[0_30px_90px_rgb(var(--color-shadow)/calc(0.48*var(--shadow-opacity-scale)))] outline-none",
               className
             )}
             initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, y: 18, scale: 0.98 }}
@@ -144,18 +154,18 @@ export function Dialog({
               <div className="mb-5 flex items-start justify-between gap-4">
                 <div className={cn("min-w-0", contentClassName)}>
                   {title ? (
-                    <h3 className="text-xl font-semibold text-[#eef4ff]">{title}</h3>
+                    <h3 className="text-xl font-semibold text-primary">{title}</h3>
                   ) : null}
                   {description ? (
-                    <p className="mt-1 text-sm leading-6 text-[#8ea3c5]">{description}</p>
+                    <p className="mt-1 text-sm leading-6 text-secondary">{description}</p>
                   ) : null}
                 </div>
                 {showCloseButton ? (
                   <button
                     type="button"
                     onClick={() => onOpenChange(false)}
-                    aria-label="Close dialog"
-                    className="rounded-full border border-[#23324e] p-2 text-[#a6b8d6] transition hover:border-[#36537a] hover:text-white"
+                    aria-label="Закрыть диалог"
+                    className="rounded-full border border-border-strong p-2 text-secondary transition hover:border-border-strong hover:text-primary"
                   >
                     <X className="h-4 w-4" />
                   </button>
@@ -166,7 +176,8 @@ export function Dialog({
           </motion.div>
         </motion.div>
       ) : null}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 }
 
@@ -187,8 +198,8 @@ export function ConfirmDialog({
   onOpenChange,
   title,
   description,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  confirmLabel = "Подтвердить",
+  cancelLabel = "Отмена",
   confirmVariant = "danger",
   onConfirm,
   isPending = false,
@@ -199,7 +210,7 @@ export function ConfirmDialog({
         <button
           type="button"
           onClick={() => onOpenChange(false)}
-          className="inline-flex h-10 items-center justify-center rounded-xl border border-[#24344f] bg-[#0b1322] px-4 text-sm font-medium text-[#d7e6ff] transition hover:bg-[#132033]"
+          className="inline-flex h-10 items-center justify-center rounded-xl border border-border-strong bg-surface px-4 text-sm font-medium text-primary transition hover:bg-elevated"
         >
           {cancelLabel}
         </button>
@@ -209,10 +220,10 @@ export function ConfirmDialog({
           disabled={isPending}
           onClick={onConfirm}
           className={cn(
-            "inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-70",
+            "inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-medium text-on-accent transition disabled:cursor-not-allowed disabled:opacity-70",
             confirmVariant === "danger"
-              ? "bg-[#ff6d7c] shadow-[0_10px_30px_rgba(255,109,124,0.25)] hover:bg-[#ff5569]"
-              : "bg-[#5da8ff] shadow-[0_10px_30px_rgba(93,168,255,0.25)] hover:bg-[#4893ed]"
+              ? "bg-danger shadow-[0_10px_30px_rgb(var(--color-danger)/0.25)] hover:bg-danger"
+              : "bg-accent shadow-[0_10px_30px_rgb(var(--color-accent)/0.25)] hover:bg-accent"
           )}
         >
           {isPending ? "Working..." : confirmLabel}

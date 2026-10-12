@@ -1,0 +1,11 @@
+{{- if .Values.namespaceControls.limitRange.enabled }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-pod-limits
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+spec:
+  limits:
+    {{- toYaml .Values.namespaceControls.limitRange.limits | nindent 4 }}
+{{- end }}

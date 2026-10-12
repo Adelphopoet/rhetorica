@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from threading import Event, RLock, Thread
 from time import perf_counter
-from typing import ClassVar
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from rhetorica_backend.contracts.execution import (
@@ -23,6 +24,12 @@ from rhetorica_backend.domain.execution.models import (
     EngineAdapter,
     EngineRunRequest,
     EngineRunResult,
+    ResultBlockConsumer,
+)
+from rhetorica_backend.domain.execution.snapshots import (
+    SqlResultSnapshot,
+    SqlResultSnapshotCapture,
+    SqlResultSnapshotStore,
 )
 from rhetorica_backend.infra.postgres.execution_history_repository import ExecutionHistoryRepository
 from rhetorica_backend.sql_guard.models import SqlGuardViolation
@@ -40,6 +47,40 @@ class _FetchOutcome:
     error: Exception | None = None
 
 
+@dataclass
+class _ResilientSnapshotCapture(ResultBlockConsumer):
+    capture: SqlResultSnapshotCapture
+    error: Exception | None = None
+
+    def start(self, columns: Iterable[str]) -> None:
+        self._call(self.capture.start, columns)
+
+    def write_rows(self, rows: Iterable[Iterable[object]]) -> None:
+        self._call(self.capture.write_rows, rows)
+
+    def finish(self, *, possibly_truncated: bool) -> SqlResultSnapshot | None:
+        if self.error is not None:
+            return None
+        try:
+            return self.capture.finish(possibly_truncated=possibly_truncated)
+        except Exception as exc:
+            self.error = exc
+            self.capture.abort()
+            return None
+
+    def abort(self) -> None:
+        self.capture.abort()
+
+    def _call(self, operation: Any, value: Any) -> None:
+        if self.error is not None:
+            return
+        try:
+            operation(value)
+        except Exception as exc:
+            self.error = exc
+            self.capture.abort()
+
+
 class ExecutionService:
     """Runs guarded SQL against configured engines and tracks execution history."""
 
@@ -53,11 +94,15 @@ class ExecutionService:
         history_repository: ExecutionHistoryRepository,
         adapters: dict[str, EngineAdapter],
         sql_guard_service: SqlGuardService | None = None,
+        snapshot_store: SqlResultSnapshotStore | None = None,
+        preview_row_limit: int = 500,
     ):
         self._logger = logging.getLogger(__name__)
         self._history_repository = history_repository
         self._adapters = adapters
         self._sql_guard = sql_guard_service or SqlGuardService()
+        self._snapshot_store = snapshot_store
+        self._preview_row_limit = max(1, min(preview_row_limit, 500))
         self._active_executions: dict[str, _ActiveExecutionState] = {}
         self._cancel_requested: set[str] = set()
         self._lock = RLock()
@@ -108,6 +153,13 @@ class ExecutionService:
 
     def get(self, execution_id: str) -> ExecutionHistoryItem | None:
         return self._history_repository.get(execution_id)
+
+    def get_snapshot(self, execution_id: str) -> SqlResultSnapshot | None:
+        return self._history_repository.get_snapshot(execution_id)
+
+    @property
+    def snapshot_store(self) -> SqlResultSnapshotStore | None:
+        return self._snapshot_store
 
     def mark_enqueue_failed(self, execution_id: str, error_message: str) -> None:
         self._history_repository.complete(
@@ -272,6 +324,9 @@ class ExecutionService:
             )
 
         active_execution: ActiveExecution | None = None
+        snapshot_capture: _ResilientSnapshotCapture | None = None
+        snapshot: SqlResultSnapshot | None = None
+        snapshot_committed = False
         started = perf_counter()
 
         try:
@@ -287,14 +342,34 @@ class ExecutionService:
             self._register_active(execution_id, active_execution)
             self._history_repository.set_query_id(execution_id, active_execution.query_id)
 
+            if (
+                self._snapshot_store is not None
+                and actor_id is not None
+                and request.conversation_id is not None
+            ):
+                try:
+                    snapshot_capture = _ResilientSnapshotCapture(
+                        self._snapshot_store.begin(
+                            execution_id=execution_id,
+                            workspace_id=request.workspace_id,
+                            owner_user_id=actor_id,
+                            conversation_id=request.conversation_id,
+                        )
+                    )
+                except Exception:
+                    warnings.append("sql_result_snapshot_unavailable")
+
             result = self._fetch_with_cancel_monitor(
                 execution_id=execution_id,
                 active_execution=active_execution,
+                consumer=snapshot_capture,
             )
             duration_ms = int((perf_counter() - started) * 1000)
             self._history_repository.set_query_id(execution_id, result.query_id)
 
             if self._is_cancel_requested(execution_id):
+                if snapshot_capture is not None:
+                    snapshot_capture.abort()
                 self._history_repository.complete(
                     execution_id=execution_id,
                     status="cancelled",
@@ -314,6 +389,16 @@ class ExecutionService:
                     violations=guard_decision.violations,
                 )
 
+            if snapshot_capture is not None:
+                snapshot = snapshot_capture.finish(
+                    possibly_truncated=(
+                        guard_decision.applied_row_limit is not None
+                        and result.row_count >= guard_decision.applied_row_limit
+                    )
+                )
+                if snapshot is None:
+                    warnings.append("sql_result_snapshot_unavailable")
+
             self._history_repository.complete(
                 execution_id=execution_id,
                 status="succeeded",
@@ -325,7 +410,10 @@ class ExecutionService:
                     columns=result.columns,
                     rows=result.rows,
                 ).model_dump(mode="json"),
+                snapshot=snapshot,
+                warnings=warnings,
             )
+            snapshot_committed = True
             return ExecuteSqlResponse(
                 execution_id=execution_id,
                 status="succeeded",
@@ -335,11 +423,21 @@ class ExecutionService:
                 applied_row_limit=guard_decision.applied_row_limit,
                 row_count=result.row_count,
                 duration_ms=duration_ms,
-                warnings=guard_decision.warnings,
+                warnings=warnings,
                 violations=guard_decision.violations,
                 preview=QueryPreview(columns=result.columns, rows=result.rows),
             )
         except Exception as exc:
+            if snapshot_capture is not None:
+                snapshot_capture.abort()
+            if snapshot is not None and not snapshot_committed and self._snapshot_store is not None:
+                try:
+                    self._snapshot_store.delete(snapshot)
+                except Exception:
+                    self._logger.warning(
+                        "sql_result_snapshot_compensation_failed",
+                        extra={"execution_id": execution_id},
+                    )
             duration_ms = int((perf_counter() - started) * 1000)
             cancelled = self._is_cancel_requested(execution_id)
             status: ExecutionStatus = "cancelled" if cancelled else "failed"
@@ -448,13 +546,35 @@ class ExecutionService:
         *,
         execution_id: str,
         active_execution: ActiveExecution,
+        consumer: ResultBlockConsumer | None,
     ) -> EngineRunResult:
         outcome = _FetchOutcome()
         completed = Event()
 
         def _target() -> None:
             try:
-                outcome.result = active_execution.fetch()
+                fetch_streaming = getattr(active_execution, "fetch_streaming", None)
+                implements_streaming = (
+                    callable(fetch_streaming)
+                    and getattr(type(active_execution), "fetch_streaming", None)
+                    is not ActiveExecution.fetch_streaming
+                )
+                if implements_streaming:
+                    outcome.result = fetch_streaming(
+                        consumer=consumer,
+                        preview_row_limit=self._preview_row_limit,
+                    )
+                else:
+                    materialized = active_execution.fetch()
+                    if consumer is not None:
+                        consumer.start(materialized.columns)
+                        consumer.write_rows(materialized.rows)
+                    outcome.result = EngineRunResult(
+                        query_id=materialized.query_id,
+                        columns=materialized.columns,
+                        rows=materialized.rows[: self._preview_row_limit],
+                        row_count=materialized.row_count,
+                    )
             except Exception as exc:  # pragma: no cover - propagated below
                 outcome.error = exc
             finally:

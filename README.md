@@ -2,6 +2,16 @@
 
 Self-hosted AI workspace for governed analytics.
 
+## Documentation
+
+- Published Russian documentation: [`docs/rhetorica`](docs/rhetorica/)
+- Canonical FR, NFR and UC: [`openspec/specs`](openspec/specs/)
+
+```bash
+npx --yes @fission-ai/openspec@1.7.0 validate --all --strict --no-interactive
+python tools/sync_openspec_docsy.py --check
+```
+
 ## Monorepo layout
 
 - `apps/api` - FastAPI transport layer and API runtime.
@@ -11,8 +21,7 @@ Self-hosted AI workspace for governed analytics.
 - `packages/ui` - shared frontend primitives.
 - `packages/contracts` - API, event, and schema contracts.
 - `deploy` - Docker-first local bootstrap and Helm chart.
-- `docs` - architecture, development, security, and operations documentation.
-- `ops` - runbooks and production support assets.
+- `docs/rhetorica` - product documentation.
 - `tests` - cross-app fixtures, e2e, performance scenarios.
 
 ## Local development stance
@@ -61,5 +70,5 @@ pnpm test
 - Shared backend logic lives in `packages/backend`, not inside the API runtime.
 - Backend stays a modular monolith, split by bounded context.
 - SQL governance is a product capability and must stay explicit.
-- dbt artifacts are normalized into the semantic registry.
+- dbt artifacts are normalized into an internal semantic registry.
 - The golden path stays: question -> semantic plan -> SQL -> guarded execution -> result -> chart -> saved answer.

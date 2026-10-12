@@ -1,16 +1,21 @@
+import type { Metadata } from "next";
 import { AdminPageClient } from "./AdminPageClient";
+import type { AgentProfile } from "@/features/agents/agentsApi";
 import type { ScenarioDefinition } from "@/features/scenarios/scenariosApi";
 import { fetchBackend } from "@/lib/backendAuth";
 import { requireAdminSession } from "@/lib/serverSession";
 import type {
-  ConfluenceConnectorItem,
+  AirflowConnectorItem,
   DatabaseConnectorItem,
-  JiraConnectorItem,
+  DocumentationConnectorItem,
+  GitLabConnectorItem,
+  KubernetesConnectorItem,
   LlmConnectorItem,
   LocalUserItem,
   MattermostConnectorItem,
-  OpenMetadataConnectorItem,
+  McpConnectorItem,
   RagInsightReviewItem,
+  VictoriaMetricsConnectorItem,
   WorkspaceSkillItem,
 } from "./types";
 
@@ -38,29 +43,47 @@ async function fetchLlmConnectors(workspaceId: string): Promise<LlmConnectorItem
   );
 }
 
-async function fetchOpenMetadataConnectors(
-  workspaceId: string,
-): Promise<OpenMetadataConnectorItem[]> {
-  return fetchApi<OpenMetadataConnectorItem>(
-    `/v1/admin/openmetadata-connectors?workspace_id=${workspaceId}&limit=200`,
-  );
-}
-
 async function fetchPendingRagInsights(workspaceId: string): Promise<RagInsightReviewItem[]> {
   return fetchApi<RagInsightReviewItem>(
     `/v1/admin/rag-insights/pending?workspace_id=${workspaceId}&limit=100`,
   );
 }
 
-async function fetchConfluenceConnectors(workspaceId: string): Promise<ConfluenceConnectorItem[]> {
-  return fetchApi<ConfluenceConnectorItem>(
-    `/v1/admin/confluence-connectors?workspace_id=${workspaceId}&limit=200`,
+async function fetchDocumentationConnectors(workspaceId: string): Promise<DocumentationConnectorItem[]> {
+  return fetchApi<DocumentationConnectorItem>(
+    `/v1/admin/documentation-connectors?workspace_id=${workspaceId}&limit=200`,
   );
 }
 
-async function fetchJiraConnectors(workspaceId: string): Promise<JiraConnectorItem[]> {
-  return fetchApi<JiraConnectorItem>(
-    `/v1/admin/jira-connectors?workspace_id=${workspaceId}&limit=200`,
+async function fetchGitLabConnectors(workspaceId: string): Promise<GitLabConnectorItem[]> {
+  return fetchApi<GitLabConnectorItem>(
+    `/v1/admin/gitlab-connectors?workspace_id=${workspaceId}&limit=200`,
+  );
+}
+
+async function fetchMcpConnectors(workspaceId: string): Promise<McpConnectorItem[]> {
+  return fetchApi<McpConnectorItem>(
+    `/v1/admin/mcp-connectors?workspace_id=${workspaceId}&limit=200`,
+  );
+}
+
+async function fetchAirflowConnectors(workspaceId: string): Promise<AirflowConnectorItem[]> {
+  return fetchApi<AirflowConnectorItem>(
+    `/v1/admin/airflow-connectors?workspace_id=${workspaceId}&limit=200`,
+  );
+}
+
+async function fetchKubernetesConnectors(workspaceId: string): Promise<KubernetesConnectorItem[]> {
+  return fetchApi<KubernetesConnectorItem>(
+    `/v1/admin/kubernetes-connectors?workspace_id=${workspaceId}&limit=200`,
+  );
+}
+
+async function fetchVictoriaMetricsConnectors(
+  workspaceId: string,
+): Promise<VictoriaMetricsConnectorItem[]> {
+  return fetchApi<VictoriaMetricsConnectorItem>(
+    `/v1/admin/victoriametrics-connectors?workspace_id=${workspaceId}&limit=200`,
   );
 }
 
@@ -78,27 +101,39 @@ async function fetchScenarios(workspaceId: string): Promise<ScenarioDefinition[]
 
 async function fetchWorkspaceSkills(workspaceId: string): Promise<WorkspaceSkillItem[]> {
   return fetchApi<WorkspaceSkillItem>(
-    `/v1/admin/skills?workspace_id=${workspaceId}&limit=200`,
+    `/v1/admin/skills?workspace_id=${workspaceId}&limit=500`,
   );
+}
+
+async function fetchAgents(workspaceId: string): Promise<AgentProfile[]> {
+  return fetchApi<AgentProfile>(`/v1/admin/agents?workspace_id=${workspaceId}&limit=200`);
 }
 
 async function fetchLocalUsers(): Promise<LocalUserItem[]> {
   return fetchApi<LocalUserItem>("/v1/admin/users");
 }
 
+export const metadata: Metadata = {
+  title: "Администрирование | Rhetorica",
+};
+
 export default async function AdminPage() {
   const session = await requireAdminSession("/admin");
   const workspaceId = session.workspace_id;
-  const [databaseConnectors, llmConnectors, openMetadataConnectors, confluenceConnectors, jiraConnectors, mattermostConnectors, pendingInsights, scenarios, workspaceSkills, localUsers] = await Promise.all([
+  const [databaseConnectors, llmConnectors, documentationConnectors, gitlabConnectors, mcpConnectors, airflowConnectors, kubernetesConnectors, victoriametricsConnectors, mattermostConnectors, pendingInsights, scenarios, workspaceSkills, agents, localUsers] = await Promise.all([
     fetchDatabaseConnectors(workspaceId),
     fetchLlmConnectors(workspaceId),
-    fetchOpenMetadataConnectors(workspaceId),
-    fetchConfluenceConnectors(workspaceId),
-    fetchJiraConnectors(workspaceId),
+    fetchDocumentationConnectors(workspaceId),
+    fetchGitLabConnectors(workspaceId),
+    fetchMcpConnectors(workspaceId),
+    fetchAirflowConnectors(workspaceId),
+    fetchKubernetesConnectors(workspaceId),
+    fetchVictoriaMetricsConnectors(workspaceId),
     fetchMattermostConnectors(workspaceId),
     fetchPendingRagInsights(workspaceId),
     fetchScenarios(workspaceId),
     fetchWorkspaceSkills(workspaceId),
+    fetchAgents(workspaceId),
     fetchLocalUsers(),
   ]);
 
@@ -106,13 +141,17 @@ export default async function AdminPage() {
     <AdminPageClient
       databaseConnectors={databaseConnectors}
       llmConnectors={llmConnectors}
-      openMetadataConnectors={openMetadataConnectors}
-      confluenceConnectors={confluenceConnectors}
-      jiraConnectors={jiraConnectors}
+      documentationConnectors={documentationConnectors}
+      gitlabConnectors={gitlabConnectors}
+      mcpConnectors={mcpConnectors}
+      airflowConnectors={airflowConnectors}
+      kubernetesConnectors={kubernetesConnectors}
+      victoriametricsConnectors={victoriametricsConnectors}
       mattermostConnectors={mattermostConnectors}
       pendingInsights={pendingInsights}
       scenarios={scenarios}
       workspaceSkills={workspaceSkills}
+      agents={agents}
       localUsers={localUsers}
       currentUserId={session.user.id}
       workspaceId={workspaceId}

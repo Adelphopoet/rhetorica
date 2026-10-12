@@ -1,0 +1,40 @@
+/* Small visible ports with a forgiving pointer target. Keep the handle itself
+   measurable so React Flow can position edges and validate connections. */
+.scenario-canvas .workflow-handle::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 6px;
+}
+
+.scenario-canvas .workflow-order-handle {
+  width: 8px !important;
+  border-radius: 2px !important;
+}
+
+.scenario-canvas {
+  --xy-background-color: rgb(var(--color-page));
+  --xy-controls-button-background-color: rgb(var(--color-elevated));
+  --xy-controls-button-background-color-hover: rgb(var(--color-hover));
+  --xy-controls-button-color: rgb(var(--color-primary));
+  --xy-controls-button-border-color: rgb(var(--color-border-strong));
+  --xy-minimap-background-color: rgb(var(--color-surface));
+}
+
+.scenario-canvas .react-flow__controls,
+.scenario-canvas .react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid rgb(var(--color-border-strong));
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgb(var(--color-shadow) / calc(.2 * var(--shadow-opacity-scale)));
+}
+
+.scenario-canvas .react-flow__controls-button {
+  width: 32px;
+  height: 32px;
+}
+
+.scenario-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: rgb(var(--color-cyan));
+  stroke-width: 3;
+}

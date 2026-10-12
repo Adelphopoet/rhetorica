@@ -1,32 +1,38 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import {
   mergeToolCallsWithOptimizationTrace,
+  type ChatFeedbackDetails,
   type ChatFeedbackValue,
   type ChatMessageViewModel,
 } from "@/features/chat/chatViewModel";
 import { serializeChatMessageBodyForCopy } from "@/features/chat/chatCopy";
+import { cn } from "@rhetorica/ui";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatMessageComponent } from "./chat-message";
+import { ChatThreadSkeleton } from "./chat-thread-skeleton";
 import { TypingIndicator } from "./typing-indicator";
+import type { ChatWidth } from "./chat-tools";
 
 interface ChatThreadProps {
+  chatWidth: ChatWidth;
+  conversationId: string | null;
   messages: ChatMessageViewModel[];
   userLabel?: string;
   loading: boolean;
-  scenarioCount: number;
+  /** A saved conversation is being fetched; the thread must not fall back to the empty state. */
+  threadLoading?: boolean;
   feedbackPendingByMessageId: Record<string, boolean>;
   onFeedback: (
     messageId: string,
     feedback: ChatFeedbackValue,
-    messageConversationId: string | null | undefined
+    messageConversationId: string | null | undefined,
+    details?: ChatFeedbackDetails
   ) => void;
-  onApproveAnalysis?: () => void;
-  onResumeAnalysis?: () => void;
-  onCancelAnalysis?: () => void;
+  onRepairTurn?: (messageId: string) => void;
   onSelectClarification?: (clarificationId: string, choiceId: string, resolvedValue: string) => void;
   onOpenScenarioCatalog: () => void;
   /** Called when user clicks "Inspect result" on an assistant message */
@@ -34,30 +40,59 @@ interface ChatThreadProps {
 }
 
 export function ChatThread({
+  chatWidth,
+  conversationId,
   messages,
   userLabel,
   loading,
-  scenarioCount,
+  threadLoading = false,
   feedbackPendingByMessageId,
   onFeedback,
-  onApproveAnalysis,
-  onResumeAnalysis,
-  onCancelAnalysis,
+  onRepairTurn,
   onSelectClarification,
   onOpenScenarioCatalog,
   onInspectResult,
 }: ChatThreadProps) {
-  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  const previousConversationIdRef = useRef(conversationId);
+  const previousLastMessageIdRef = useRef<string | null>(null);
+  const lastMessage = messages.at(-1) ?? null;
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    if (conversationId !== previousConversationIdRef.current) {
+      previousConversationIdRef.current = conversationId;
+      previousLastMessageIdRef.current = null;
+      stickToBottomRef.current = true;
+    }
+    const isNewOutgoingMessage =
+      lastMessage?.role === "user" && lastMessage.id !== previousLastMessageIdRef.current;
+    previousLastMessageIdRef.current = lastMessage?.id ?? null;
+    if (isNewOutgoingMessage) {
+      stickToBottomRef.current = true;
+    }
+    if (stickToBottomRef.current) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [conversationId, lastMessage, loading]);
 
   if (messages.length === 0) {
+    if (threadLoading) {
+      return <ChatThreadSkeleton chatWidth={chatWidth} />;
+    }
+
     return (
-      <div className="flex-1 overflow-auto p-4 sm:p-5 xl:p-6">
+      <div
+        className="min-h-0 flex-1 overflow-auto p-4 sm:p-5 xl:p-6"
+        data-tour="tour-chat-thread"
+      >
         <ChatEmptyState
-          scenarioCount={scenarioCount}
+          chatWidth={chatWidth}
           onOpenScenarioCatalog={onOpenScenarioCatalog}
         />
       </div>
@@ -66,12 +101,26 @@ export function ChatThread({
 
   return (
     <motion.div
+      ref={scrollContainerRef}
+      onScroll={(event) => {
+        const container = event.currentTarget;
+        const distanceFromBottom =
+          container.scrollHeight - container.scrollTop - container.clientHeight;
+        stickToBottomRef.current = distanceFromBottom <= 96;
+      }}
       className="chat-thread flex-1 overflow-auto px-4 pb-5 pt-4 sm:px-5 xl:px-6"
+      data-tour="tour-chat-thread"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ duration: 0.25 }}
     >
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+      <div
+        className={cn(
+          "mx-auto flex w-full flex-col gap-6",
+          chatWidth === 1100 && "max-w-[1100px]",
+          chatWidth === 1600 && "max-w-[1600px]"
+        )}
+      >
         <AnimatePresence initial={false}>
           {messages.map((message) => {
             const mergedToolCalls = mergeToolCallsWithOptimizationTrace({
@@ -92,25 +141,24 @@ export function ChatThread({
                 toolCalls={mergedToolCalls}
                 executionStatuses={message.executionStatuses}
                 payload={message.payload}
-                analysisPlan={message.payload?.analysis_plan ?? message.analysisPlan ?? null}
-                checkpointDigest={message.payload?.checkpoint_digest ?? message.checkpointDigest ?? null}
+                files={message.files}
                 clarificationRequest={message.clarificationRequest ?? message.payload?.clarification_request ?? null}
-                onApproveAnalysis={onApproveAnalysis}
-                onResumeAnalysis={onResumeAnalysis}
-                onCancelAnalysis={onCancelAnalysis}
                 onSelectClarification={onSelectClarification}
                 isStreaming={message.deliveryState === "streaming"}
                 isComplete={message.deliveryState === "complete"}
                 feedback={message.feedback ?? null}
+                feedbackWhatWentWrong={message.feedbackWhatWentWrong ?? null}
+                feedbackExpectedAnswer={message.feedbackExpectedAnswer ?? null}
                 feedbackLoading={
                   message.backendMessageId
                     ? Boolean(feedbackPendingByMessageId[message.backendMessageId])
                     : false
                 }
                 copyText={serializeChatMessageBodyForCopy(message.text, message.payload)}
-                onFeedback={(messageId, feedback) =>
-                  onFeedback(messageId, feedback, message.payload?.conversation_id)
+                onFeedback={(messageId, feedback, details) =>
+                  onFeedback(messageId, feedback, message.payload?.conversation_id, details)
                 }
+                onRepairTurn={onRepairTurn}
                 deliveryState={message.deliveryState}
                 onInspectResult={onInspectResult ? (executionId) => onInspectResult(message.id, executionId) : undefined}
               />
@@ -118,7 +166,6 @@ export function ChatThread({
           })}
           {loading ? <TypingIndicator key="typing-indicator" /> : null}
         </AnimatePresence>
-        <div ref={bottomRef} />
       </div>
     </motion.div>
   );

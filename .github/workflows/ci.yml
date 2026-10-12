@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - release/coding
 
 jobs:
   repo-shape:
@@ -31,6 +32,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Sync Python workspace
         run: uv sync --all-packages --all-groups --frozen
+      - name: Test Python workspace
+        run: uv run --all-packages --all-extras pytest -q
 
   web-quality:
     runs-on: ubuntu-latest

@@ -1,0 +1,53 @@
+.rhetorica-tour-popover {
+  min-width: 340px;
+  max-width: 420px;
+}
+
+.rhetorica-tour-popover-wide {
+  min-width: 460px;
+  max-width: 550px;
+}
+
+.rhetorica-tour-popover .driver-tour-sparkles {
+  margin-right: 10px;
+
+  flex-shrink: 0;
+}
+
+.rhetorica-tour-popover .driver-popover-title {
+  display: flex!important;
+  align-items: center;
+  margin-bottom: 8px;
+  color: #13316b;
+  font-size: 22px;
+}
+
+.rhetorica-tour-popover .driver-popover-description {
+  font-size: 16px;
+}
+
+.rhetorica-tour-popover a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.rhetorica-tour-popover .tour-popover-hint {
+  display: block;
+  margin-top: 8px;
+  color: #7a7a7a;
+  font-size: 15px;
+}
+
+@media (max-width: 1600px) {
+  .rhetorica-tour-popover .driver-popover-title {
+    font-size: 19px;
+  }
+
+  .rhetorica-tour-popover .driver-popover-description {
+    font-size: 14px;
+  }
+
+  .rhetorica-tour-popover .tour-popover-hint {
+    font-size: 13px;
+  }
+}

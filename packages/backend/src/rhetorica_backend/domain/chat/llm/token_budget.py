@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,11 +35,16 @@ class LlmTokenEstimator:
     _TOKENS_PER_MESSAGE = 4
     _TOKENS_PER_NAME = 1
     _REQUEST_OVERHEAD_TOKENS = 3
+    _ENABLE_TIKTOKEN_ENV = "RHETORICA_ENABLE_TIKTOKEN_ESTIMATOR"
+    _KNOWN_MODEL_PREFIXES = ("gpt-4o", "o1", "o3", "o4", "gpt-5", "gpt-4", "gpt-3.5")
 
     def __init__(self, model_name: str | None):
         self._encoding = None
         self.used_fallback = False
-        self.unknown_model = False
+        self.unknown_model = not self._is_known_model(model_name)
+        if not self._tiktoken_enabled():
+            self.used_fallback = True
+            return
         try:
             import tiktoken  # type: ignore[import-not-found]
 
@@ -54,6 +60,21 @@ class LlmTokenEstimator:
         except Exception:
             self.used_fallback = True
             self._encoding = None
+
+    @classmethod
+    def _tiktoken_enabled(cls) -> bool:
+        return os.getenv(cls._ENABLE_TIKTOKEN_ENV, "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @classmethod
+    def _is_known_model(cls, model_name: str | None) -> bool:
+        if not isinstance(model_name, str) or not model_name.strip():
+            return False
+        return model_name.strip().lower().startswith(cls._KNOWN_MODEL_PREFIXES)
 
     def count_text(self, text: str) -> int:
         """Estimate tokens in plain text."""
@@ -225,6 +246,20 @@ class LlmPromptBudgetService:
             warnings=warnings,
         )
 
+    def estimate_request(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> TokenEstimate:
+        """Estimate a complete request with the same accounting used by hard fitting."""
+        return self._estimate(
+            messages=messages,
+            tools=tools,
+            response_schema=response_schema,
+        )
+
     def _estimate(
         self,
         *,
@@ -253,6 +288,8 @@ class LlmPromptBudgetService:
             protected.add(last_user_index)
         for index, message in enumerate(messages):
             if index in protected:
+                continue
+            if message.get("role") == "system":
                 continue
             if message.get("role") == "tool":
                 continue

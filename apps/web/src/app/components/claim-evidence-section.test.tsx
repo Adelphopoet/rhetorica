@@ -37,6 +37,15 @@ vi.mock("lucide-react", () => ({
   ExternalLink: ({ "data-testid": testId }: { "data-testid"?: string }) => (
     <span data-testid={testId ?? "external-link-icon"}>ExternalLink</span>
   ),
+  Gitlab: ({ "data-testid": testId }: { "data-testid"?: string }) => (
+    <span data-testid={testId ?? "gitlab-icon"}>Gitlab</span>
+  ),
+  Search: ({ "data-testid": testId }: { "data-testid"?: string }) => (
+    <span data-testid={testId ?? "search-icon"}>Search</span>
+  ),
+  Ticket: ({ "data-testid": testId }: { "data-testid"?: string }) => (
+    <span data-testid={testId ?? "ticket-icon"}>Ticket</span>
+  ),
   Sparkles: ({ "data-testid": testId }: { "data-testid"?: string }) => (
     <span data-testid={testId ?? "sparkles-icon"}>Sparkles</span>
   ),
@@ -58,12 +67,12 @@ describe("ClaimEvidenceSection", () => {
   const mockClaims: AnswerClaim[] = [
     {
       claim_id: "claim-1",
-      text: "The total revenue increased by 15% in Q4 2024 compared to Q3 2024.",
+      text: "The total revenue increased by 15% in Q4 2024 compared to Q3 2024",
       status: "verified",
     },
     {
       claim_id: "claim-2",
-      text: "North America had the highest sales growth at 22%.",
+      text: "North America had the highest sales growth at 22%",
       status: "unverified",
     },
   ];
@@ -91,7 +100,7 @@ describe("ClaimEvidenceSection", () => {
       reference: "kb_article_456",
       title: "Q4 2024 Financial Report",
       snippet:
-        "The quarterly financial report shows significant growth in revenue.",
+        "The quarterly financial report shows significant growth in revenue",
       status: "unverified",
     },
   ];
@@ -110,7 +119,7 @@ describe("ClaimEvidenceSection", () => {
       />
     );
 
-    expect(screen.getByText(/^Claims$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Утверждения$/i)).toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument(); // claim count badge
   });
 
@@ -142,10 +151,10 @@ describe("ClaimEvidenceSection", () => {
     );
 
     // claim-1 has 2 evidence items (1 SQL + 1 model) - use regex that matches the label container
-    expect(screen.getByText(/1 SQL, 1 model/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 SQL, 1 моделей/i)).toBeInTheDocument();
 
     // claim-2 has 1 evidence item (1 snippet)
-    expect(screen.getByText(/1 snippet/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 фрагментов/i)).toBeInTheDocument();
   });
 
   it("applies warning visual treatment for unverified claims", () => {
@@ -157,10 +166,10 @@ describe("ClaimEvidenceSection", () => {
       />
     );
 
-    // The unverified claim should have amber-tinted styling
+    // The unverified claim should have warning-tinted styling
     const unverifiedText = screen.getByText(/north america had the highest/i);
     const claimContainer = unverifiedText.closest("button");
-    expect(claimContainer).toHaveClass(/border-amber-500|bg-amber-500/);
+    expect(claimContainer).toHaveClass(/border-warning|bg-warning/);
   });
 
   it("opens evidence inspector when claim is clicked", async () => {
@@ -180,7 +189,7 @@ describe("ClaimEvidenceSection", () => {
     fireEvent.click(firstClaim!);
 
     // Evidence inspector should be open - check for the title
-    await screen.findByRole("heading", { name: /Evidence Inspector/i });
+    await screen.findByRole("heading", { name: /Инспектор доказательств/i });
 
     // The evidence should be displayed in the inspector (check for evidence titles)
     expect(screen.getByText("Revenue by Quarter Query")).toBeInTheDocument();
@@ -234,9 +243,9 @@ describe("ClaimEvidenceSection", () => {
     fireEvent.click(firstClaim!);
 
     // Should show evidence items
-    await screen.findByText(/Evidence$/i);
+    await screen.findByText(/Доказательства$/i);
     expect(screen.getByText("SQL")).toBeInTheDocument();
-    expect(screen.getByText("Metadata model")).toBeInTheDocument();
+    expect(screen.getByText("Модель метаданных")).toBeInTheDocument();
     expect(screen.getByText("Revenue by Quarter Query")).toBeInTheDocument();
     expect(screen.getByText("Sales Data Table")).toBeInTheDocument();
   });
@@ -245,7 +254,7 @@ describe("ClaimEvidenceSection", () => {
     const claimsWithNoEvidence: AnswerClaim[] = [
       {
         claim_id: "claim-no-ev",
-        text: "This claim has no evidence attached.",
+        text: "This claim has no evidence attached",
         status: "unverified",
       },
     ];
@@ -263,7 +272,7 @@ describe("ClaimEvidenceSection", () => {
     expect(
       screen.getByText(/this claim has no evidence attached/i)
     ).toBeInTheDocument();
-    expect(screen.getByText(/0 refs/i)).toBeInTheDocument();
+    expect(screen.getByText(/0 ссылок/i)).toBeInTheDocument();
   });
 
   it("handles empty claims array gracefully", () => {
@@ -272,7 +281,7 @@ describe("ClaimEvidenceSection", () => {
     );
 
     // Should render but show 0 claims
-    expect(screen.getByText(/^Claims$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^Утверждения$/i)).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
@@ -281,12 +290,12 @@ describe("ClaimEvidenceSection", () => {
     const duplicateClaims: AnswerClaim[] = [
       {
         claim_id: "},{",
-        text: "First duplicate claim.",
+        text: "First duplicate claim",
         status: "verified",
       },
       {
         claim_id: "},{",
-        text: "Second duplicate claim.",
+        text: "Second duplicate claim",
         status: "unverified",
       },
     ];
@@ -316,9 +325,9 @@ describe("ClaimEvidenceSection", () => {
       );
       fireEvent.click(secondClaim!);
 
-      await screen.findByRole("heading", { name: /Evidence Inspector/i });
+      await screen.findByRole("heading", { name: /Инспектор доказательств/i });
       expect(screen.getAllByText(/second duplicate claim/i)).toHaveLength(2);
-      expect(screen.getByText(/no evidence linked/i)).toBeInTheDocument();
+      expect(screen.getByText(/доказательства не привязаны/i)).toBeInTheDocument();
     } finally {
       consoleErrorSpy.mockRestore();
     }
@@ -355,7 +364,7 @@ describe("ClaimEvidenceSection", () => {
     fireEvent.click(firstClaim!);
 
     // Should show metadata unavailable message
-    await screen.findByText(/Metadata unavailable/i);
+    await screen.findByText(/Метаданные недоступны/i);
   });
 
   it("correctly maps evidence types to summary labels", () => {
@@ -364,11 +373,15 @@ describe("ClaimEvidenceSection", () => {
       { evidence_id: "ev2", type: "execution_result", reference: "ref2", status: "verified" },
       { evidence_id: "ev3", type: "metadata_entity", reference: "ref3", status: "verified" },
       { evidence_id: "ev4", type: "rag_insight", reference: "ref4", status: "verified" },
-      { evidence_id: "ev5", type: "confluence_page", reference: "ref5", status: "verified" },
+      { evidence_id: "ev5", type: "internal_documentation", reference: "ref5", status: "verified" },
+      { evidence_id: "ev6", type: "gitlab_file", reference: "ref6", status: "verified" },
     ];
 
     const link: ClaimEvidenceLink[] = [
-      { claim_id: "claim-1", evidence_ids: ["ev1", "ev2", "ev3", "ev4", "ev5"] },
+      {
+        claim_id: "claim-1",
+        evidence_ids: ["ev1", "ev2", "ev3", "ev4", "ev5", "ev6"],
+      },
     ];
 
     render(
@@ -381,8 +394,9 @@ describe("ClaimEvidenceSection", () => {
 
     // Should show correct counts
     expect(screen.getByText(/2 SQL/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 model/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 snippet/i)).toBeInTheDocument();
-    expect(screen.getByText(/1 doc/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 моделей/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 фрагментов/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 документов/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 файлов GitLab/i)).toBeInTheDocument();
   });
 });

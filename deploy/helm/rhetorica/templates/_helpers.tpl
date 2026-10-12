@@ -16,3 +16,17 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
+
+{{- define "rhetorica.tolerations" -}}
+{{- $root := index . "root" -}}
+{{- $component := index . "component" -}}
+{{- $tolerations := $root.Values.global.tolerations -}}
+{{- $componentTolerations := index $component "tolerations" -}}
+{{- if kindIs "slice" $componentTolerations -}}
+{{- $tolerations = $componentTolerations -}}
+{{- end -}}
+{{- with $tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end -}}
+{{- end -}}

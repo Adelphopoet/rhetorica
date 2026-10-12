@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { CollapsibleThinking } from "./streaming-components";
 
@@ -22,7 +22,7 @@ describe("CollapsibleThinking", () => {
         toolCalls={[
           {
             id: "tool-2000-a",
-            tool_name: "search_metadata",
+            tool_name: "catalog__search",
             started_at: "2026-04-04T14:30:50Z",
             completed_at: "2026-04-04T14:30:51Z",
             success: true,
@@ -35,7 +35,7 @@ describe("CollapsibleThinking", () => {
     );
 
     const firstThought = screen.getByText("First thought");
-    const toolCall = screen.getByText("Search Metadata");
+    const toolCall = screen.getByText(/Catalog\s+Search/);
     const secondThought = screen.getByText("Second thought");
 
     expect(firstThought.compareDocumentPosition(toolCall) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -62,7 +62,7 @@ describe("CollapsibleThinking", () => {
         toolCalls={[
           {
             id: "tool-a",
-            tool_name: "fetch_metadata_tables",
+            tool_name: "catalog__search",
             started_at: "2026-04-04T14:30:48Z",
             completed_at: "2026-04-04T14:30:48Z",
             success: true,
@@ -76,10 +76,47 @@ describe("CollapsibleThinking", () => {
     );
 
     const firstThought = screen.getByText("First thought");
-    const toolCall = screen.getByText("Fetch Metadata Tables");
+    const toolCall = screen.getByText("Catalog Search");
     const secondThought = screen.getByText("Second thought");
 
     expect(firstThought.compareDocumentPosition(toolCall) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(toolCall.compareDocumentPosition(secondThought) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("renders repeated provider tool call ids without duplicate React keys", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      render(
+        <CollapsibleThinking
+          thinkingBlocks={[]}
+          toolCalls={[
+            {
+              id: "functions.mcp_confluence_main__confluence_search:7",
+              tool_name: "catalog__search",
+              started_at: "2026-08-13T18:30:00Z",
+              sequence: 0,
+            },
+            {
+              id: "functions.mcp_confluence_main__confluence_search:7",
+              tool_name: "catalog__search",
+              started_at: "2026-08-13T18:30:01Z",
+              sequence: 1,
+            },
+          ]}
+          executionStatuses={[]}
+          defaultExpanded
+        />
+      );
+
+      expect(screen.getAllByText(/Catalog\s+Search/)).toHaveLength(2);
+      expect(
+        consoleError.mock.calls.some((call) =>
+          call.some((part) => String(part).includes("same key"))
+        )
+      ).toBe(false);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

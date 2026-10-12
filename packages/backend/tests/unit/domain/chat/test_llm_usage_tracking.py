@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from rhetorica_backend.contracts.admin_integrations import LlmConnectionConfig
-from rhetorica_backend.domain.chat.llm.llm_client import LlmCallUsage, LlmClient
+from rhetorica_backend.domain.chat.llm.llm_client import (
+    LlmCallUsage,
+    LlmClient,
+    _normalized_cache_usage,
+)
 
 
 @pytest.fixture
@@ -63,6 +67,20 @@ class TestLlmCallUsage:
         with pytest.raises(AttributeError):
             usage.model = "planner"
 
+    def test_normalizes_anthropic_cache_usage_shape(self):
+        assert _normalized_cache_usage({
+            "cache_read_input_tokens": 700,
+            "cache_creation_input_tokens": 120,
+        }) == (700, 120, True)
+
+    def test_distinguishes_unreported_cache_from_cache_miss(self):
+        assert _normalized_cache_usage({}) == (0, 0, False)
+        assert _normalized_cache_usage({"input_tokens_details": {"cached_tokens": 0}}) == (
+            0,
+            0,
+            True,
+        )
+
 
 class TestLlmClientUsageCapture:
     """Tests for LLM client usage tracking."""
@@ -82,6 +100,10 @@ class TestLlmClientUsageCapture:
                 "prompt_tokens": 100,
                 "completion_tokens": 50,
                 "total_tokens": 150,
+                "prompt_tokens_details": {
+                    "cached_tokens": 80,
+                    "cache_write_tokens": 10,
+                },
             },
         }
 
@@ -94,9 +116,7 @@ class TestLlmClientUsageCapture:
             mock_client.return_value.__exit__ = MagicMock(return_value=False)
             mock_client.post.return_value = mock_response
 
-            response = llm_client.chat_completion(
-                messages=[{"role": "user", "content": "hello"}]
-            )
+            response = llm_client.chat_completion(messages=[{"role": "user", "content": "hello"}])
 
         assert response.message.get("content") == '{"answer": "test"}'
         usages = llm_client.collect_usages()
@@ -106,6 +126,9 @@ class TestLlmClientUsageCapture:
         assert usages[0].total_tokens == 150
         assert usages[0].model == "gpt-4"
         assert usages[0].phase == "tool_loop"
+        assert usages[0].cached_input_tokens == 80
+        assert usages[0].cache_write_input_tokens == 10
+        assert usages[0].cache_usage_reported is True
 
     def test_collect_usages_can_label_phase(self, llm_client):
         """Test that finalizer/repair callers can tag collected usage."""
@@ -233,9 +256,7 @@ class TestLlmClientUsageCapture:
             mock_client.return_value.__exit__ = MagicMock(return_value=False)
             mock_client.post.return_value = mock_response
 
-            response = llm_client.chat_completion(
-                messages=[{"role": "user", "content": "hello"}]
-            )
+            response = llm_client.chat_completion(messages=[{"role": "user", "content": "hello"}])
 
         # Should still work, but usage is recorded with zero tokens
         assert response.message.get("content") == '{"answer": "test"}'

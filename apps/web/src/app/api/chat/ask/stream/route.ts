@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { fetchBackend } from "@/lib/backendAuth";
+import { backendResponseHeaders, fetchBackend } from "@/lib/backendAuth";
 
 function sanitizeChatAskPayload(body: unknown) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -11,13 +11,18 @@ function sanitizeChatAskPayload(body: unknown) {
     question: payload.question,
     workspace_id: payload.workspace_id,
     conversation_id: payload.conversation_id,
+    agent_id: payload.agent_id,
+    attachment_ids: payload.attachment_ids,
     run_sql: payload.run_sql,
+    selected_clarification_id: payload.selected_clarification_id,
+    selected_clarification_value: payload.selected_clarification_value,
   };
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = sanitizeChatAskPayload(await request.json());
+    const runId = request.headers.get("x-rhetorica-run-id");
 
     // Forward to backend SSE endpoint
     const response = await fetchBackend("/v1/chat/ask/stream", {
@@ -25,10 +30,10 @@ export async function POST(request: NextRequest) {
       headers: {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
+        ...(runId ? { "X-Rhetorica-Run-Id": runId } : {}),
       },
       body: JSON.stringify(body),
       cache: "no-store",
-      signal: request.signal,
     });
 
     if (!response.ok) {
@@ -41,7 +46,9 @@ export async function POST(request: NextRequest) {
         }),
         { 
           status: response.status,
-          headers: { "Content-Type": "application/json" },
+          headers: backendResponseHeaders(response, {
+            "Content-Type": "application/json",
+          }),
         }
       );
     }
@@ -49,12 +56,12 @@ export async function POST(request: NextRequest) {
     // Stream SSE response back to client
     return new Response(response.body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
-      },
+      }),
     });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
@@ -63,7 +70,7 @@ export async function POST(request: NextRequest) {
     }
     
     return new Response(
-      JSON.stringify({ error: "chat_proxy_failed", message: error instanceof Error ? error.message : "Unknown error" }),
+      JSON.stringify({ error: "chat_proxy_failed", message: error instanceof Error ? error.message : "Неизвестная ошибка" }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }

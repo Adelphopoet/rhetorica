@@ -282,9 +282,11 @@ class TestPersistence:
         saved_conversation_state = {}
         update_called = False
         update_call_kwargs = {}
+        saved_assistant = {}
 
         def mock_save_message(**kwargs):
             if kwargs["role"] == "assistant":
+                saved_assistant.update(kwargs)
                 return SimpleNamespace(id="assistant-1")
             return SimpleNamespace(id="user-1")
 
@@ -343,6 +345,7 @@ class TestPersistence:
         )
 
         assert result == "assistant-1"
+        assert saved_assistant["capability_trace"]["runtime_context"]["llm_calls"] == llm_usages
         assert update_called, "update_conversation_state_from_turn should have been called"
         assert "llm_usages" in update_call_kwargs
         assert len(update_call_kwargs["llm_usages"]) == 1

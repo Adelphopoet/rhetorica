@@ -53,15 +53,8 @@ class ToolExecutionMetadataContextService:
         metadata_connection: Any | None,
         tables: list[TableContext],
     ) -> list[str]:
-        if metadata_connection is None:
-            return []
-        sources = {"openmetadata"}
-        if getattr(metadata_connection, "mcp_tables_url", None):
-            sources.add("mcp")
-        if not tables:
-            return sorted(sources)
-        sources.update(table.source for table in tables)
-        return sorted(sources)
+        del metadata_connection
+        return sorted({table.source for table in tables if table.source})
 
     @staticmethod
     def normalize_leaf_table_name(value: str) -> str:
@@ -480,18 +473,14 @@ class ToolExecutionMetadataContextService:
         if not table_rows:
             return []
         scored_rows = [
-            row
-            for row in table_rows
-            if isinstance(row.get("relevance_score"), int | float)
+            row for row in table_rows if isinstance(row.get("relevance_score"), int | float)
         ]
         if not scored_rows:
             return [str(row["fullyQualifiedName"]).strip() for row in table_rows[:max_items]]
         best_score = max(float(row.get("relevance_score", 0.0)) for row in scored_rows)
         score_floor = max(35.0, best_score - 18.0)
         strong_rows = [
-            row
-            for row in scored_rows
-            if float(row.get("relevance_score", 0.0)) >= score_floor
+            row for row in scored_rows if float(row.get("relevance_score", 0.0)) >= score_floor
         ]
         if not strong_rows:
             strong_rows = scored_rows[:1]

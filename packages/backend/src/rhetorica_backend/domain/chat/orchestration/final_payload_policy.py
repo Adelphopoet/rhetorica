@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
@@ -14,19 +13,8 @@ from rhetorica_backend.domain.chat.orchestration.state import (
     SqlExecutionAttempt,
     ToolOrchestrationState,
 )
-from rhetorica_backend.domain.chat.orchestration.turn_policy import (
-    is_explicit_sql_inspection_request,
-)
 
-THINKING_TAG_PATTERN = re.compile(
-    r"<(think|thinking)>(.*?)</\1>", flags=re.IGNORECASE | re.DOTALL
-)
-MARKDOWN_STRUCTURE_PATTERN = re.compile(
-    r"(^|\n)(?:#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|\|.+\|\s*$|```|>\s)",
-    flags=re.MULTILINE,
-)
-
-
+THINKING_TAG_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", flags=re.IGNORECASE | re.DOTALL)
 class FinalPayloadPolicy:
     """Single place for final payload acceptance and preservation rules."""
 
@@ -37,32 +25,21 @@ class FinalPayloadPolicy:
     @staticmethod
     def parse_json_payload(raw_content: str) -> tuple[dict[str, Any], bool]:
         raw = raw_content.strip()
-        if raw.startswith("```"):
-            lines = [
-                line
-                for line in raw.splitlines()
-                if not line.strip().startswith("```")
-            ]
-            raw = "\n".join(lines).strip()
+        if not raw.startswith("{") or not raw.endswith("}"):
+            return {}, False
         try:
+            import json
+
             parsed = json.loads(raw)
         except json.JSONDecodeError:
-            left = raw.find("{")
-            right = raw.rfind("}")
-            if left == -1 or right == -1 or right <= left:
-                return {}, False
-            try:
-                parsed = json.loads(raw[left : right + 1])
-            except json.JSONDecodeError:
-                return {}, False
-            else:
-                if isinstance(parsed, dict):
-                    return parsed, True
-                return {}, False
-        else:
-            if isinstance(parsed, dict):
-                return parsed, True
             return {}, False
+        if isinstance(parsed, dict):
+            return parsed, True
+        return {}, False
+
+    @staticmethod
+    def parse_strict_json_payload(raw_content: str) -> tuple[dict[str, Any], bool]:
+        return FinalPayloadPolicy.parse_json_payload(raw_content)
 
     @staticmethod
     def extract_claims(llm_payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -79,9 +56,7 @@ class FinalPayloadPolicy:
         return [item for item in evidence if isinstance(item, dict)]
 
     @staticmethod
-    def extract_claim_evidence_links(
-        llm_payload: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def extract_claim_evidence_links(llm_payload: dict[str, Any]) -> list[dict[str, Any]]:
         links = llm_payload.get("claim_evidence_links")
         if not isinstance(links, list):
             return []
@@ -101,147 +76,10 @@ class FinalPayloadPolicy:
         return None
 
     @staticmethod
-    def has_structured_markdown(text: str | None) -> bool:
-        if not isinstance(text, str):
-            return False
-        return bool("\n\n" in text or MARKDOWN_STRUCTURE_PATTERN.search(text))
-
-    @staticmethod
-    def looks_like_progress_text(text: str | None) -> bool:
-        if not isinstance(text, str):
-            return False
-        normalized = text.casefold()
-        return any(
-            marker in normalized
-            for marker in (
-                "сначала ",
-                "проверю",
-                "ищу",
-                "поищу",
-                "searching",
-                "looking",
-                "checking",
-                "i will ",
-            )
-        )
-
-    @classmethod
-    def looks_like_nonfinal_raw_payload(cls, text: str | None) -> bool:
-        if not isinstance(text, str) or not text.strip():
-            return False
-        parsed, parsed_ok = cls.parse_json_payload(text)
-        if not parsed_ok:
-            return False
-        if parsed.get("schema_version") == "v1":
-            return True
-        if parsed.get("next_action") in {
-            "tool_call",
-            "final_answer",
-            "needs_user_clarification",
-        }:
-            return True
-        contractish_keys = {
-            "answer",
-            "answer_markdown",
-            "sql",
-            "target",
-            "tool_request",
-            "claims",
-            "evidence",
-            "claim_evidence_links",
-            "uncertainty_flags",
-        }
-        if not contractish_keys.intersection(parsed):
-            return False
-        answer = cls.to_optional_str(parsed.get("answer_markdown") or parsed.get("answer"))
-        if answer and cls.looks_like_progress_text(answer):
-            return True
-        return "tool_request" in parsed or "target" in parsed
-
-    @classmethod
-    def preserve_raw_markdown_answer(
-        cls,
-        *,
-        raw_final_text: str,
-        parsed_payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        raw_answer = cls.to_optional_str(cls.strip_thinking_tags(raw_final_text))
-        candidate_answer = cls.to_optional_str(parsed_payload.get("answer"))
-        if raw_answer is None or candidate_answer is None or raw_answer == candidate_answer:
-            return parsed_payload
-        if cls.looks_like_nonfinal_raw_payload(raw_answer):
-            return parsed_payload
-        if (
-            cls._has_explicit_visual_output(parsed_payload)
-            and "```" in raw_answer
-            and not cls._has_markdown_table(raw_answer)
-        ):
-            return parsed_payload
-        if not cls._should_preserve_raw_markdown_answer(
-            raw_answer=raw_answer,
-            candidate_answer=candidate_answer,
-        ):
-            return parsed_payload
-        preserved_payload = dict(parsed_payload)
-        preserved_payload["answer"] = raw_answer
-        preserved_payload["answer_markdown"] = raw_answer
-        return preserved_payload
-
-    @classmethod
-    def preserve_raw_markdown_answer_from_payload(
-        cls,
-        *,
-        raw_final_text: str,
-        parsed_raw_payload: dict[str, Any] | None,
-        parsed_payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        raw_payload_answer = None
-        if isinstance(parsed_raw_payload, dict):
-            raw_payload_answer = cls.to_optional_str(
-                parsed_raw_payload.get("answer_markdown")
-                or parsed_raw_payload.get("answer")
-            )
-        return cls.preserve_raw_markdown_answer(
-            raw_final_text=raw_payload_answer or raw_final_text,
-            parsed_payload=parsed_payload,
-        )
-
-    @staticmethod
-    def _should_preserve_raw_markdown_answer(
-        *,
-        raw_answer: str,
-        candidate_answer: str,
-    ) -> bool:
-        if not FinalPayloadPolicy.has_structured_markdown(raw_answer):
-            return False
-        if not FinalPayloadPolicy.has_structured_markdown(candidate_answer):
-            return True
-        if FinalPayloadPolicy._has_markdown_table(raw_answer) and not (
-            FinalPayloadPolicy._has_markdown_table(candidate_answer)
-        ):
-            return True
-        return len(candidate_answer.strip()) < int(len(raw_answer.strip()) * 0.6)
-
-    @staticmethod
     def _has_markdown_table(text: str) -> bool:
         return any(
             line.strip().startswith("|") and line.strip().endswith("|")
             for line in text.splitlines()
-        )
-
-    @staticmethod
-    def _has_explicit_visual_output(parsed_payload: dict[str, Any]) -> bool:
-        if isinstance(parsed_payload.get("visualization"), dict):
-            return True
-        analysis_document = parsed_payload.get("analysis_document")
-        if not isinstance(analysis_document, dict):
-            return False
-        blocks = analysis_document.get("blocks")
-        if not isinstance(blocks, list):
-            return False
-        return any(
-            isinstance(block, dict) and block.get("kind") == "chart"
-            for block in blocks
         )
 
     @staticmethod
@@ -266,6 +104,11 @@ class FinalPayloadPolicy:
     ) -> bool:
         if cls.has_needs_user_clarification_flag(llm_payload):
             return True
+        answer = cls.to_optional_str(
+            llm_payload.get("answer_markdown") or llm_payload.get("answer")
+        )
+        if answer is None:
+            return False
         if not cls.has_supported_evidence(llm_payload, state):
             return False
         if cls.requires_sql_table_proof(request) and not cls.has_sql_backed_table_answer(
@@ -274,50 +117,7 @@ class FinalPayloadPolicy:
         ):
             state.add_warning("table_proof_required")
             return False
-        if cls.requires_metadata_lookup(request) and not cls.has_non_request_evidence(
-            llm_payload
-        ):
-            return False
-        if cls.successful_execution_attempts(state):
-            return cls.has_runtime_execution_backed_answer(
-                llm_payload=llm_payload,
-                state=state,
-            )
-        if cls.has_successful_jira_create_backed_answer(
-            llm_payload=llm_payload,
-            state=state,
-        ):
-            return True
-        if state.tool_call_count == 0:
-            return True
-        claims = llm_payload.get("claims")
-        if isinstance(claims, list) and claims:
-            return True
-        evidence = llm_payload.get("evidence")
-        return isinstance(evidence, list) and bool(evidence)
-
-    @classmethod
-    def has_successful_jira_create_backed_answer(
-        cls,
-        *,
-        llm_payload: dict[str, Any],
-        state: ToolOrchestrationState,
-    ) -> bool:
-        answer = cls.to_optional_str(
-            llm_payload.get("answer_markdown") or llm_payload.get("answer")
-        )
-        if answer is None:
-            return False
-        normalized_answer = answer.casefold()
-        for (tool_name, _), result in state.tool_call_results.items():
-            if tool_name != "create_jira_issue":
-                continue
-            if not isinstance(result, dict) or result.get("ok") is not True:
-                continue
-            issue_key = cls.to_optional_str(result.get("issue_key"))
-            if issue_key is not None and issue_key.casefold() in normalized_answer:
-                return True
-        return False
+        return True
 
     @classmethod
     def has_runtime_execution_backed_answer(
@@ -383,23 +183,19 @@ class FinalPayloadPolicy:
         )
         if answer is None or "|" not in answer:
             return False
-        if not cls.successful_execution_attempts(state):
-            return False
-        return cls.has_runtime_execution_backed_answer(
-            llm_payload=llm_payload,
-            state=state,
-        )
+        return bool(cls.successful_execution_attempts(state))
 
     @classmethod
     def is_contract_final_payload(cls, raw_content: str) -> bool:
-        parsed, parsed_ok = cls.parse_json_payload(raw_content)
+        parsed, parsed_ok = cls.parse_strict_json_payload(raw_content)
         if not parsed_ok:
             return False
         validated, _ = validate_final_response_payload(parsed)
         return validated is not None
 
-    @staticmethod
+    @classmethod
     def has_supported_evidence(
+        cls,
         llm_payload: dict[str, Any],
         state: ToolOrchestrationState,
     ) -> bool:
@@ -419,9 +215,7 @@ class FinalPayloadPolicy:
                 if reference.startswith("request:"):
                     continue
                 if not (
-                    state.metadata_sources
-                    or state.context_tables
-                    or state.metadata_table_columns
+                    state.metadata_sources or state.context_tables or state.metadata_table_columns
                 ):
                     return False
                 continue
@@ -429,10 +223,27 @@ class FinalPayloadPolicy:
                 if "rag" not in state.metadata_sources:
                     return False
                 continue
-            if evidence_type == "confluence_page":
-                if "confluence" not in state.metadata_sources:
+            if evidence_type == "internal_documentation":
+                if "documentation" not in state.metadata_sources:
                     return False
                 continue
+            if evidence_type == "gitlab_file":
+                if "gitlab" not in state.metadata_sources:
+                    return False
+                continue
+            if evidence_type == "airflow_runtime":
+                if "airflow" not in state.metadata_sources:
+                    return False
+                continue
+            if evidence_type == "kubernetes_runtime":
+                if "kubernetes" not in state.metadata_sources:
+                    return False
+                continue
+            if evidence_type == "metrics_timeseries":
+                if "victoriametrics" not in state.metadata_sources:
+                    return False
+                continue
+            return False
         return True
 
     @staticmethod
@@ -450,48 +261,9 @@ class FinalPayloadPolicy:
 
     @staticmethod
     def requires_metadata_lookup(request: ChatAskRequest) -> bool:
-        normalized = request.question.casefold()
-        if is_explicit_sql_inspection_request(request.question):
-            return False
-        asks_definition = any(
-            phrase in normalized
-            for phrase in (
-                "что такое",
-                "what is",
-                "what's",
-                "опиши",
-                "describe",
-                "что за",
-            )
-        )
-        asks_metadata_discovery = any(
-            phrase in normalized
-            for phrase in (
-                "витрин",
-                "таблиц",
-                "table",
-                "metadata",
-                "метадан",
-                "каталог",
-                "entity",
-            )
-        ) and any(
-            phrase in normalized
-            for phrase in (
-                "есть",
-                "find",
-                "найд",
-                "ищ",
-                "search",
-                "look up",
-            )
-        )
-        if not asks_definition and not asks_metadata_discovery:
-            return False
-        return bool(
-            re.search(r"\b[a-z0-9]+(?:_[a-z0-9]+)+\b", normalized)
-            or re.search(r"\b(?:ft|dm|dds|ods|stg|mart)_[a-z0-9_]+\b", normalized)
-        )
+        """Semantic routing belongs to the agent, not backend text classification."""
+        _ = request
+        return False
 
     @classmethod
     def successful_execution_attempts(

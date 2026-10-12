@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from rhetorica_backend.contracts.chat import ChatAskRequest
+from rhetorica_backend.domain.chat.orchestration.agent_runtime import (
+    AgentRuntimeInput,
+    AgentRuntimeTransport,
+    AgentTurnRuntimePort,
+)
 from rhetorica_backend.domain.chat.orchestration.models import (
     PreparedRuntimeTurnInput,
     RuntimeExecutionResult,
-)
-from rhetorica_backend.domain.chat.orchestration.runtime_loop_coordination import (
-    RuntimeLoopCoordinationService,
-    RuntimeLoopInput,
-    RuntimeLoopTransportAdapter,
 )
 from rhetorica_backend.domain.chat.orchestration.session_turn_flow import (
     OrchestrationSessionTurnFlowService,
@@ -36,28 +36,27 @@ class RuntimeExecutionCore(Generic[TState, TRuntimeResult, TTransportResult]):
         self,
         *,
         session_turn_flow_service: OrchestrationSessionTurnFlowService[TState, Any],
-        runtime_loop_coordination_service: RuntimeLoopCoordinationService[
-            TState, TRuntimeResult
-        ],
-        transport_finalization_service: PostAssemblyTransportFinalizationService[
-            TTransportResult
-        ],
+        agent_runtime: AgentTurnRuntimePort,
+        transport_finalization_service: PostAssemblyTransportFinalizationService[TTransportResult],
         transport_finalization_input_factory: SessionFlowTransportFinalizationInputFactory,
     ) -> None:
         self._session_turn_flow_service = session_turn_flow_service
-        self._runtime_loop_coordination_service = runtime_loop_coordination_service
+        self._agent_runtime = agent_runtime
         self._transport_finalization_service = transport_finalization_service
         self._transport_finalization_input_factory = transport_finalization_input_factory
 
-    def run_loop(
+    async def run_loop(
         self,
         *,
-        runtime: RuntimeLoopInput[TState],
-        transport: RuntimeLoopTransportAdapter[TState, TRuntimeResult],
+        runtime: AgentRuntimeInput[TState],
+        transport: AgentRuntimeTransport[TState, TRuntimeResult],
     ) -> TRuntimeResult:
-        return self._runtime_loop_coordination_service.run(
-            runtime=runtime,
-            transport=transport,
+        return cast(
+            TRuntimeResult,
+            await self._agent_runtime.run(
+                runtime=runtime,
+                transport=transport,
+            ),
         )
 
     def execute_session(

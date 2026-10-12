@@ -32,7 +32,7 @@ Rhetorica has two distinct capability registry modules that serve different purp
 - `RuntimeCapabilityState` - Mutable runtime capability state accumulated during a turn
 
 **Responsibilities**:
-- Tool-to-provider mapping (e.g., `fetch_metadata_tables` -> `openmetadata`)
+- Tool-to-provider mapping (e.g., `run_sql` -> `database`)
 - Degradation state tracking (which capabilities are missing or degraded)
 - Tool provenance and usage tracking
 - Policy decisions for available tools

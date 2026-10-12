@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchBackend } from "@/lib/backendAuth";
+import { backendResponseHeaders, fetchBackend } from "@/lib/backendAuth";
 
 async function proxyAdminRequest(
   request: NextRequest,
@@ -22,6 +22,7 @@ async function proxyAdminRequest(
     if (response.status === 204 || response.status === 205) {
       return new NextResponse(null, {
         status: response.status,
+        headers: backendResponseHeaders(response),
       });
     }
 
@@ -29,15 +30,15 @@ async function proxyAdminRequest(
 
     return new NextResponse(responseBody, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch (error) {
     return NextResponse.json(
       {
         error: "admin_proxy_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: error instanceof Error ? error.message : "Неизвестная ошибка",
       },
       { status: 500 },
     );

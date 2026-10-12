@@ -36,54 +36,33 @@ const TYPE_ICONS: Record<ClarificationChoiceType, LucideIcon> = {
   approve_expensive_query: DollarSign,
 };
 
-// Type-to-color mapping
-const TYPE_COLORS: Record<ClarificationChoiceType, { primary: string; secondary: string; border: string; hover: string }> = {
-  choose_connector: {
-    primary: "#5da8ff",
-    secondary: "rgba(93, 168, 255, 0.12)",
-    border: "rgba(93, 168, 255, 0.35)",
-    hover: "rgba(93, 168, 255, 0.25)",
-  },
-  choose_table: {
-    primary: "#38c67d",
-    secondary: "rgba(56, 198, 125, 0.12)",
-    border: "rgba(56, 198, 125, 0.35)",
-    hover: "rgba(56, 198, 125, 0.25)",
-  },
-  choose_metric_definition: {
-    primary: "#c084fc",
-    secondary: "rgba(192, 132, 252, 0.12)",
-    border: "rgba(192, 132, 252, 0.35)",
-    hover: "rgba(192, 132, 252, 0.25)",
-  },
-  choose_time_range: {
-    primary: "#fb923c",
-    secondary: "rgba(251, 146, 60, 0.12)",
-    border: "rgba(251, 146, 60, 0.35)",
-    hover: "rgba(251, 146, 60, 0.25)",
-  },
-  confirm_assumption: {
-    primary: "#fbbf24",
-    secondary: "rgba(251, 191, 36, 0.12)",
-    border: "rgba(251, 191, 36, 0.35)",
-    hover: "rgba(251, 191, 36, 0.25)",
-  },
-  approve_expensive_query: {
-    primary: "#f87171",
-    secondary: "rgba(248, 113, 113, 0.12)",
-    border: "rgba(248, 113, 113, 0.35)",
-    hover: "rgba(248, 113, 113, 0.25)",
-  },
+// Resolve UI roles through CSS so existing clarification cards update immediately.
+function choiceColors(role: string) {
+  return {
+    primary: `rgb(var(--color-${role}))`,
+    secondary: `rgb(var(--color-${role}) / 0.12)`,
+    border: `rgb(var(--color-${role}) / 0.35)`,
+    hover: `rgb(var(--color-${role}) / 0.25)`,
+  };
+}
+
+const TYPE_COLORS: Record<ClarificationChoiceType, ReturnType<typeof choiceColors>> = {
+  choose_connector: choiceColors("accent"),
+  choose_table: choiceColors("success"),
+  choose_metric_definition: choiceColors("purple"),
+  choose_time_range: choiceColors("orange"),
+  confirm_assumption: choiceColors("warning"),
+  approve_expensive_query: choiceColors("danger"),
 };
 
 // Type labels for accessibility
 const TYPE_LABELS: Record<ClarificationChoiceType, string> = {
-  choose_connector: "Select data source",
-  choose_table: "Select table",
-  choose_metric_definition: "Select metric definition",
-  choose_time_range: "Select time range",
-  confirm_assumption: "Confirm assumption",
-  approve_expensive_query: "Approve expensive query",
+  choose_connector: "Выбор источника данных",
+  choose_table: "Выбор таблицы",
+  choose_metric_definition: "Выбор определения метрики",
+  choose_time_range: "Выбор периода",
+  confirm_assumption: "Подтверждение гипотезы",
+  approve_expensive_query: "Подтверждение дорогого запроса",
 };
 
 function getTypeColors(type: ClarificationChoiceType) {
@@ -116,7 +95,7 @@ function ChoiceButton({
       onClick={() => onSelect(choice.id, choice.label)}
       className={cn(
         "w-full text-left rounded-xl border p-4 transition-all duration-200",
-        "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#0a111d]",
+        "focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-border",
         disabled && "cursor-not-allowed opacity-50",
         !disabled && "cursor-pointer"
       )}
@@ -142,7 +121,7 @@ function ChoiceButton({
         {/* Icon */}
         <div
           className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
-          style={{ backgroundColor: `${colors.primary}20` }}
+          style={{ backgroundColor: colors.secondary }}
         >
           <Icon className="h-5 w-5" style={{ color: colors.primary }} />
         </div>
@@ -152,14 +131,14 @@ function ChoiceButton({
           <div className="flex items-center gap-2">
             <h4
               className="text-sm font-semibold"
-              style={{ color: "#edf3ff" }}
+              style={{ color: "rgb(var(--color-primary))" }}
             >
               {choice.label}
             </h4>
             {!disabled && (
               <div
                 className="ml-auto rounded-full p-1 opacity-0 transition-opacity group-hover:opacity-100"
-                style={{ backgroundColor: `${colors.primary}30` }}
+                style={{ backgroundColor: colors.hover }}
               >
                 <Check className="h-3 w-3" style={{ color: colors.primary }} />
               </div>
@@ -170,7 +149,7 @@ function ChoiceButton({
           {choice.reason && (
             <p
               className="mt-1.5 text-xs leading-relaxed"
-              style={{ color: "#a9b8d4" }}
+              style={{ color: "rgb(var(--color-secondary))" }}
             >
               {choice.reason}
             </p>
@@ -179,10 +158,10 @@ function ChoiceButton({
           {/* Provenance */}
           {choice.provenance_id && (
             <div className="mt-2 flex items-center gap-1.5">
-              <Scale className="h-3 w-3" style={{ color: "#7484a3" }} />
+              <Scale className="h-3 w-3" style={{ color: "rgb(var(--color-muted))" }} />
               <span
                 className="text-[10px] font-medium uppercase tracking-wider"
-                style={{ color: "#7484a3" }}
+                style={{ color: "rgb(var(--color-muted))" }}
               >
                 {choice.provenance_id}
               </span>
@@ -207,7 +186,7 @@ export function ClarificationCard({
 }: ClarificationCardProps) {
   const colors = getTypeColors(clarification.type);
   const Icon = TYPE_ICONS[clarification.type] ?? Settings;
-  const typeLabel = TYPE_LABELS[clarification.type] ?? "Clarification";
+  const typeLabel = TYPE_LABELS[clarification.type] ?? "Уточнение";
 
   return (
     <motion.div
@@ -216,10 +195,9 @@ export function ClarificationCard({
       transition={{ duration: 0.25, ease: "easeOut" }}
       className="my-4 rounded-2xl border p-5"
       style={{
-        backgroundColor: "linear-gradient(180deg, rgba(11,17,30,0.88), rgba(9,14,25,0.94))",
-        background: "linear-gradient(180deg, rgba(14,21,38,0.95), rgba(11,17,28,0.98))",
+        background: "linear-gradient(180deg, rgb(var(--color-surface)/0.95), rgb(var(--color-surface)/0.98))",
         borderColor: colors.border,
-        boxShadow: `0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 ${colors.border}20`,
+        boxShadow: `0 8px 32px rgb(var(--color-shadow)/calc(0.4*var(--shadow-opacity-scale))), inset 0 1px 0 ${colors.secondary}`,
       }}
       data-testid="clarification-card"
     >
@@ -227,7 +205,7 @@ export function ClarificationCard({
       <div className="mb-4 flex items-center gap-3">
         <div
           className="flex h-9 w-9 items-center justify-center rounded-lg"
-          style={{ backgroundColor: `${colors.primary}20` }}
+          style={{ backgroundColor: colors.secondary }}
         >
           <Icon className="h-4 w-4" style={{ color: colors.primary }} />
         </div>
@@ -240,7 +218,7 @@ export function ClarificationCard({
           </span>
           <h3
             className="mt-0.5 text-base font-semibold leading-snug"
-            style={{ color: "#edf3ff" }}
+            style={{ color: "rgb(var(--color-primary))" }}
           >
             {clarification.question}
           </h3>
@@ -279,14 +257,14 @@ export function ClarificationCard({
       <div className="mt-4 flex items-center gap-2">
         <div
           className="h-px flex-1"
-          style={{ backgroundColor: "rgba(46, 61, 89, 0.5)" }}
+          style={{ backgroundColor: "rgb(var(--color-border-strong)/0.5)" }}
         />
-        <span className="text-[10px] uppercase tracking-widest" style={{ color: "#7484a3" }}>
-          Select one to continue
+        <span className="text-[10px] uppercase tracking-widest" style={{ color: "rgb(var(--color-muted))" }}>
+          Выберите один из вариантов, чтобы продолжить
         </span>
         <div
           className="h-px flex-1"
-          style={{ backgroundColor: "rgba(46, 61, 89, 0.5)" }}
+          style={{ backgroundColor: "rgb(var(--color-border-strong)/0.5)" }}
         />
       </div>
     </motion.div>

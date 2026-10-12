@@ -15,6 +15,9 @@ from rhetorica_backend.domain.chat.metadata.models import (
 class MetadataPayloadMapper:
     """Map OM and MCP payloads into chat-facing metadata models."""
 
+    MODEL_DEFINITION_PREVIEW_CHARS = 2_000
+    MODEL_DEFINITION_MAX_CHARS = 20_000
+
     @staticmethod
     def to_optional_str(value: Any) -> str | None:
         if isinstance(value, str) and value.strip():
@@ -89,9 +92,7 @@ class MetadataPayloadMapper:
     @classmethod
     def extract_glossary_terms(cls, item: dict[str, Any]) -> list[MetadataEntityReference]:
         explicit = cls.extract_entity_refs(
-            item.get("glossaryTerms")
-            or item.get("glossary_terms")
-            or item.get("terms")
+            item.get("glossaryTerms") or item.get("glossary_terms") or item.get("terms")
         )
         tag_terms: list[MetadataEntityReference] = []
         raw_tags = item.get("tags")
@@ -231,7 +232,10 @@ class MetadataPayloadMapper:
         direct = cls._governance_value(value)
         if direct:
             lowered = direct.lower()
-            if lowered.startswith("certification.") or lowered in {"certified", "governance.certified"}:
+            if lowered.startswith("certification.") or lowered in {
+                "certified",
+                "governance.certified",
+            }:
                 return direct
             return f"Certification.{direct}"
         return cls.extract_certification(tags)
@@ -291,11 +295,7 @@ class MetadataPayloadMapper:
         if "total" in value or "status" in value:
             failed_tests = value.get("failed_tests")
             normalized_failed_tests = (
-                [
-                    str(item).strip()
-                    for item in failed_tests[:10]
-                    if str(item).strip()
-                ]
+                [str(item).strip() for item in failed_tests[:10] if str(item).strip()]
                 if isinstance(failed_tests, list)
                 else []
             )
@@ -381,35 +381,14 @@ class MetadataPayloadMapper:
             return max(0, int(value))
         return 0
 
-    @staticmethod
-    def extract_search_metadata_results(payload: Any) -> list[dict[str, Any]]:
-        if isinstance(payload, dict):
-            raw_results = payload.get("results")
-            if isinstance(raw_results, list):
-                return [item for item in raw_results if isinstance(item, dict)]
-            if raw_results is None and "data" in payload:
-                data = payload.get("data")
-                if isinstance(data, list):
-                    return [item for item in data if isinstance(item, dict)]
-        if isinstance(payload, list):
-            results: list[dict[str, Any]] = []
-            for item in payload:
-                if not isinstance(item, dict):
-                    continue
-                nested_results = item.get("results")
-                if isinstance(nested_results, list):
-                    results.extend(row for row in nested_results if isinstance(row, dict))
-                if "fullyQualifiedName" in item or "name" in item or "displayName" in item:
-                    results.append(item)
-            return results
-        return []
-
     @classmethod
     def normalize_table_entity_details(
         cls,
         payload: Any,
         *,
         normalize_entity_type: Any,
+        model_definition_max_chars: int | None = None,
+        model_definition_offset: int = 0,
     ) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
@@ -419,12 +398,25 @@ class MetadataPayloadMapper:
             payload.get("fullyQualifiedName") or payload.get("fqn") or payload.get("name")
         )
         raw_columns = payload.get("columns")
-        if entity_type != "table" or not fqn or not isinstance(raw_columns, list):
+        is_table_like = entity_type == "table" or any(
+            key in payload
+            for key in (
+                "columns",
+                "columnNames",
+                "databaseSchema",
+                "schemaDefinition",
+                "dataModel",
+                "extension",
+                "tableType",
+            )
+        )
+        if not is_table_like or not fqn:
             return None
 
         columns: list[dict[str, Any]] = []
         column_names: list[str] = []
-        for column in raw_columns:
+        safe_columns = raw_columns if isinstance(raw_columns, list) else []
+        for column in safe_columns:
             if not isinstance(column, dict):
                 continue
             name = cls.to_optional_str(column.get("name"))
@@ -481,8 +473,7 @@ class MetadataPayloadMapper:
                 ]
             ],
             "glossary_terms": [
-                cls.entity_ref_payload(ref)
-                for ref in cls.extract_glossary_terms(payload)[:10]
+                cls.entity_ref_payload(ref) for ref in cls.extract_glossary_terms(payload)[:10]
             ],
             "related_metrics": [
                 cls.metric_ref_payload(ref)
@@ -501,7 +492,97 @@ class MetadataPayloadMapper:
             normalized["quality_summary"] = quality_summary.to_payload()
         if usage_count > 0:
             normalized["usage_count"] = usage_count
+        source_url = cls.to_optional_str(payload.get("sourceUrl") or payload.get("source_url"))
+        if source_url:
+            normalized["source_url"] = source_url
+        source_hash = cls.to_optional_str(payload.get("sourceHash") or payload.get("source_hash"))
+        if source_hash:
+            normalized["source_hash"] = source_hash
+        model_definition = cls.compact_model_definition(
+            payload,
+            max_chars=model_definition_max_chars,
+            offset=model_definition_offset,
+        )
+        if model_definition:
+            normalized["model_definition"] = model_definition
         return {key: value for key, value in normalized.items() if value not in (None, [], {})}
+
+    @classmethod
+    def compact_model_definition(
+        cls,
+        payload: dict[str, Any],
+        *,
+        max_chars: int | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any] | None:
+        """Keep table model SQL useful for LLMs without returning raw huge DDL."""
+
+        definition_kind: str | None = None
+        sql = cls.to_optional_str(payload.get("schemaDefinition"))
+        if sql:
+            definition_kind = "schemaDefinition"
+
+        data_model = payload.get("dataModel")
+        if isinstance(data_model, dict):
+            data_model_sql = cls.to_optional_str(
+                data_model.get("sql")
+                or data_model.get("query")
+                or data_model.get("rawSql")
+                or data_model.get("compiledSql")
+            )
+            if data_model_sql:
+                sql = data_model_sql
+                definition_kind = "dataModel.sql"
+
+        extension = payload.get("extension")
+        extension_payload = extension if isinstance(extension, dict) else {}
+        if not sql:
+            extension_sql = cls.to_optional_str(
+                extension_payload.get("ddl")
+                or extension_payload.get("sql")
+                or extension_payload.get("query")
+                or extension_payload.get("compiledSql")
+            )
+            if extension_sql:
+                sql = extension_sql
+                definition_kind = "extension.ddl"
+
+        result: dict[str, Any] = {}
+        for key in ("engine", "materialization", "package_name", "path", "original_file_path"):
+            value = cls.to_optional_str(extension_payload.get(key))
+            if value:
+                result[key] = value
+
+        source_url = cls.to_optional_str(payload.get("sourceUrl") or payload.get("source_url"))
+        if source_url:
+            result["source_url"] = source_url
+
+        if sql:
+            char_count = len(sql)
+            safe_max_chars = cls._bounded_model_definition_chars(max_chars)
+            safe_offset = max(0, min(offset, char_count))
+            preview = sql[safe_offset : safe_offset + safe_max_chars]
+            result.update({
+                "definition_kind": definition_kind,
+                "sql_preview": preview,
+                "sql_char_count": char_count,
+                "sql_preview_offset": safe_offset,
+                "sql_preview_char_count": len(preview),
+                "sql_next_offset": (
+                    safe_offset + len(preview) if safe_offset + len(preview) < char_count else None
+                ),
+                "sql_truncated": safe_offset + len(preview) < char_count,
+            })
+
+        return result or None
+
+    @classmethod
+    def _bounded_model_definition_chars(cls, value: int | None) -> int:
+        if value is None:
+            return cls.MODEL_DEFINITION_PREVIEW_CHARS
+        if isinstance(value, bool):
+            return cls.MODEL_DEFINITION_PREVIEW_CHARS
+        return max(0, min(cls.MODEL_DEFINITION_MAX_CHARS, int(value)))
 
     @staticmethod
     def extract_nested_fqn(
@@ -549,11 +630,7 @@ class MetadataPayloadMapper:
         raw_columns = value.get("columns")
         columns: list[str] = []
         if isinstance(column_names, list):
-            columns = [
-                str(column).strip()
-                for column in column_names[:20]
-                if str(column).strip()
-            ]
+            columns = [str(column).strip() for column in column_names[:20] if str(column).strip()]
         elif isinstance(raw_columns, list):
             for column in raw_columns[:20]:
                 if not isinstance(column, dict):
@@ -580,9 +657,7 @@ class MetadataPayloadMapper:
             owners=cls.extract_entity_names(value.get("owners")),
             owner_refs=owner_refs,
             owner_teams=[
-                ref.name
-                for ref in owner_refs
-                if (ref.type or "").strip().lower() == "team"
+                ref.name for ref in owner_refs if (ref.type or "").strip().lower() == "team"
             ],
             tags=tags,
             domains=cls.extract_entity_names(value.get("domains") or value.get("domain")),
@@ -643,16 +718,10 @@ class MetadataPayloadMapper:
             "tags": table.tags[:10],
             "domains": table.domains[:10],
             "domain_refs": [cls.entity_ref_payload(ref) for ref in table.domain_refs[:10]],
-            "glossary_terms": [
-                cls.entity_ref_payload(ref) for ref in table.glossary_terms[:10]
-            ],
-            "related_metrics": [
-                cls.metric_ref_payload(ref) for ref in table.related_metrics[:10]
-            ],
+            "glossary_terms": [cls.entity_ref_payload(ref) for ref in table.glossary_terms[:10]],
+            "related_metrics": [cls.metric_ref_payload(ref) for ref in table.related_metrics[:10]],
             "quality_summary": (
-                table.quality_summary.to_payload()
-                if table.quality_summary is not None
-                else None
+                table.quality_summary.to_payload() if table.quality_summary is not None else None
             ),
             "usageSummary": {"count": table.usage_count} if table.usage_count > 0 else {},
         }

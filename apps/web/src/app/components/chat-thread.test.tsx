@@ -11,30 +11,36 @@ vi.mock("@/features/charts", () => ({
   ),
 }));
 
-function renderThread(messages: ChatMessageViewModel[], userLabel = "Ada Lovelace") {
+function renderThread(
+  messages: ChatMessageViewModel[],
+  userLabel = "Ada Lovelace",
+  overrides: Partial<Parameters<typeof ChatThread>[0]> = {}
+) {
   return render(
     <ToastProvider>
       <ChatThread
+        chatWidth={1100}
+        conversationId="conversation-test"
         messages={messages}
         userLabel={userLabel}
         loading={false}
-        scenarioCount={0}
         feedbackPendingByMessageId={{}}
         onFeedback={() => undefined}
         onOpenScenarioCatalog={() => undefined}
+        {...overrides}
       />
     </ToastProvider>
   );
 }
 
 const reportPayload: ChatAskResponse = {
-  answer: "GMV recovered on paid traffic.",
+  answer: "GMV recovered on paid traffic",
   conversation_id: "conv-report",
   generated_sql: "select day, gmv from dm.gmv_daily",
   optimization_trace: null,
   selected_database_connector: "clickhouse",
   assistant_message_id: "msg-report",
-  metadata_sources: ["openmetadata"],
+  metadata_sources: ["mcp"],
   context_tables: ["dm.gmv_daily"],
   claims: [],
   evidence: [],
@@ -59,12 +65,12 @@ const reportPayload: ChatAskResponse = {
   analysis_document: {
     document_version: "v1",
     title: "Weekly GMV recovery",
-    executive_summary: "GMV is up 23% after paid traffic recovered.",
+    executive_summary: "GMV is up 23% after paid traffic recovered",
     blocks: [
       {
         kind: "metric_grid",
         title: "KPI snapshot",
-        description: "Core movement for the selected period.",
+        description: "Core movement for the selected period",
         items: [
           {
             label: "GMV",
@@ -95,8 +101,8 @@ const reportPayload: ChatAskResponse = {
       {
         kind: "chart",
         title: "GMV trend",
-        description: "Daily GMV by event date.",
-        insight: "Recovery starts after April 1.",
+        description: "Daily GMV by event date",
+        insight: "Recovery starts after April 1",
         source_execution_id: "exec-report",
         preview: {
           columns: ["day", "gmv"],
@@ -111,8 +117,8 @@ const reportPayload: ChatAskResponse = {
           kind: "line",
           goal: "trend",
           title: "GMV trend",
-          description: "Daily GMV by event date.",
-          summary: "Recovery starts after April 1.",
+          description: "Daily GMV by event date",
+          summary: "Recovery starts after April 1",
           planner_mode: "rule_fallback",
           confidence_score: 0.92,
           chart_safe_on_preview: true,
@@ -151,7 +157,7 @@ const reportPayload: ChatAskResponse = {
           },
           annotations: [],
           rationale: {
-            why_kind: "A line chart fits daily movement.",
+            why_kind: "A line chart fits daily movement",
             why_fields: ["day", "gmv"],
           },
           warnings: [],
@@ -160,13 +166,13 @@ const reportPayload: ChatAskResponse = {
       {
         kind: "finding",
         title: "Paid channel recovered",
-        body: "The main lift comes from paid traffic cohorts.",
+        body: "The main lift comes from paid traffic cohorts",
         emphasis: "important",
       },
       {
         kind: "table",
         title: "Preview rows",
-        description: "Raw preview remains available for drilldown.",
+        description: "Raw preview remains available for drilldown",
         source: "execution_preview",
         source_execution_id: "exec-report",
         columns: ["day", "gmv"],
@@ -176,12 +182,12 @@ const reportPayload: ChatAskResponse = {
       {
         kind: "caveat",
         title: "Attribution lag",
-        body: "Late conversions can still adjust the final daily totals.",
+        body: "Late conversions can still adjust the final daily totals",
       },
       {
         kind: "caveat",
         title: "Warnings",
-        body: "analysis_planner_reasoning_envelope_stripped; llm_finalizer_requested; explainability_synthesized; llm_unacceptable_final_payload; llm_finalizer_failed; preview_truncated",
+        body: "llm_finalizer_requested; explainability_synthesized; llm_unacceptable_final_payload; llm_finalizer_failed; preview_truncated",
       },
     ],
     warnings: [],
@@ -210,7 +216,84 @@ describe("ChatThread", () => {
     renderThread([]);
 
     expect(screen.getByText(/разберите просадку метрики/i)).toBeInTheDocument();
-    expect(screen.getByText(/governed execution/i)).toBeInTheDocument();
+    expect(screen.getByText(/прозрачный sql/i)).toBeInTheDocument();
+  });
+
+  it("shows a thread placeholder instead of the empty state while a saved chat loads", () => {
+    renderThread([], "Ada Lovelace", { threadLoading: true });
+
+    expect(screen.getByTestId("chat-thread-skeleton")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-empty-state-card")).not.toBeInTheDocument();
+    expect(screen.queryByText(/разберите просадку метрики/i)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the empty state when a loaded saved chat has no messages", () => {
+    const view = renderThread([], "Ada Lovelace", { threadLoading: true });
+    expect(screen.getByTestId("chat-thread-skeleton")).toBeInTheDocument();
+
+    view.rerender(
+      <ToastProvider>
+        <ChatThread
+          chatWidth={1100}
+          conversationId="conversation-test"
+          messages={[]}
+          userLabel="Ada Lovelace"
+          loading={false}
+          threadLoading={false}
+          feedbackPendingByMessageId={{}}
+          onFeedback={() => undefined}
+          onOpenScenarioCatalog={() => undefined}
+        />
+      </ToastProvider>
+    );
+
+    expect(screen.queryByTestId("chat-thread-skeleton")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-empty-state-card")).toBeInTheDocument();
+  });
+
+  it("keeps message cards compactly spaced", () => {
+    renderThread([
+      {
+        id: "user-spacing",
+        role: "user",
+        text: "Question",
+        timestamp: new Date("2026-04-04T09:00:00Z"),
+        deliveryState: "complete",
+      },
+      {
+        id: "assistant-spacing",
+        role: "assistant",
+        text: "Answer",
+        timestamp: new Date("2026-04-04T09:00:01Z"),
+        deliveryState: "complete",
+      },
+    ]);
+
+    expect(screen.getByTestId("chat-message-user").parentElement).toHaveClass("gap-6");
+  });
+
+  it("applies the selected chat width to the empty state", () => {
+    const { rerender } = renderThread([]);
+    const card = screen.getByTestId("chat-empty-state-card");
+
+    expect(card).toHaveClass("max-w-[1100px]");
+
+    rerender(
+      <ToastProvider>
+        <ChatThread
+          chatWidth={1600}
+          conversationId="conversation-test"
+          messages={[]}
+          userLabel="Ada Lovelace"
+          loading={false}
+          feedbackPendingByMessageId={{}}
+          onFeedback={() => undefined}
+          onOpenScenarioCatalog={() => undefined}
+        />
+      </ToastProvider>
+    );
+    expect(card).toHaveClass("max-w-[1600px]");
+    expect(card).not.toHaveClass("max-w-[1100px]");
   });
 
   it("renders message lifecycle badges for assistant responses", () => {
@@ -232,8 +315,180 @@ describe("ChatThread", () => {
 
     renderThread(messages);
 
-    expect(screen.getByText(/running sql/i)).toBeInTheDocument();
+    expect(screen.getByTestId("chat-message-assistant")).toHaveClass(
+      "border",
+      "border-border",
+      "ring-2",
+      "ring-accent/30"
+    );
+    expect(screen.getByText(/выполняется sql/i)).toBeInTheDocument();
     expect(screen.getByText("Working on it")).toBeInTheDocument();
+  });
+
+  it("renders completed assistant responses inside a bordered surface", () => {
+    renderThread([
+      {
+        id: "assistant-complete",
+        role: "assistant",
+        text: "Done",
+        timestamp: new Date("2026-04-04T09:00:00Z"),
+        deliveryState: "complete",
+      },
+    ]);
+
+    expect(screen.getByTestId("chat-message-assistant")).toHaveClass(
+      "border",
+      "border-border",
+      "px-5",
+      "py-4"
+    );
+  });
+
+  it("does not restart auto-scroll when only the parent render changes", () => {
+    const message: ChatMessageViewModel = {
+      id: "assistant-stable",
+      role: "assistant",
+      text: "Completed answer",
+      timestamp: new Date("2026-04-04T09:00:00Z"),
+      deliveryState: "complete",
+    };
+    const scrollIntoViewSpy = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    const view = renderThread([message]);
+    scrollIntoViewSpy.mockClear();
+
+    view.rerender(
+      <ToastProvider>
+        <ChatThread
+          chatWidth={1100}
+          conversationId="conversation-test"
+          messages={[message]}
+          userLabel="Ada Lovelace"
+          loading={false}
+          feedbackPendingByMessageId={{}}
+          onFeedback={() => undefined}
+          onOpenScenarioCatalog={() => undefined}
+        />
+      </ToastProvider>
+    );
+
+    expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+    scrollIntoViewSpy.mockRestore();
+  });
+
+  it("follows streaming content only while the user remains near the bottom", () => {
+    const message: ChatMessageViewModel = {
+      id: "assistant-streaming",
+      role: "assistant",
+      text: "First chunk",
+      timestamp: new Date("2026-04-04T09:00:00Z"),
+      deliveryState: "streaming",
+    };
+    const view = renderThread([message]);
+    const thread = view.container.querySelector<HTMLElement>(".chat-thread");
+    expect(thread).not.toBeNull();
+    if (!thread) {
+      return;
+    }
+
+    let scrollHeight = 1000;
+    Object.defineProperty(thread, "scrollHeight", {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(thread, "clientHeight", {
+      configurable: true,
+      value: 200,
+    });
+    thread.scrollTop = 800;
+    fireEvent.scroll(thread);
+
+    scrollHeight = 1200;
+    const secondChunk = { ...message, text: "First chunk and second chunk" };
+    view.rerender(
+      <ToastProvider>
+        <ChatThread
+          chatWidth={1100}
+          conversationId="conversation-test"
+          messages={[secondChunk]}
+          loading={false}
+          feedbackPendingByMessageId={{}}
+          onFeedback={() => undefined}
+          onOpenScenarioCatalog={() => undefined}
+        />
+      </ToastProvider>
+    );
+    expect(thread.scrollTop).toBe(1200);
+
+    thread.scrollTop = 400;
+    fireEvent.scroll(thread);
+    scrollHeight = 1400;
+    view.rerender(
+      <ToastProvider>
+        <ChatThread
+          chatWidth={1100}
+          conversationId="conversation-test"
+          messages={[{ ...secondChunk, text: "Third chunk" }]}
+          loading={false}
+          feedbackPendingByMessageId={{}}
+          onFeedback={() => undefined}
+          onOpenScenarioCatalog={() => undefined}
+        />
+      </ToastProvider>
+    );
+    expect(thread.scrollTop).toBe(400);
+  });
+
+  it("resets sticky scroll when the conversation changes", () => {
+    const firstMessage: ChatMessageViewModel = {
+      id: "assistant-a",
+      role: "assistant",
+      text: "Conversation A",
+      timestamp: new Date("2026-04-04T09:00:00Z"),
+      deliveryState: "complete",
+    };
+    const secondMessage: ChatMessageViewModel = {
+      ...firstMessage,
+      id: "assistant-b",
+      text: "Conversation B",
+    };
+    const view = renderThread([firstMessage], "Ada Lovelace", {
+      conversationId: "conversation-a",
+    });
+    const thread = view.container.querySelector<HTMLElement>(".chat-thread");
+    expect(thread).not.toBeNull();
+    if (!thread) {
+      return;
+    }
+
+    let scrollHeight = 1000;
+    Object.defineProperty(thread, "scrollHeight", {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(thread, "clientHeight", {
+      configurable: true,
+      value: 200,
+    });
+    thread.scrollTop = 300;
+    fireEvent.scroll(thread);
+
+    scrollHeight = 1200;
+    view.rerender(
+      <ToastProvider>
+        <ChatThread
+          chatWidth={1100}
+          conversationId="conversation-b"
+          messages={[secondMessage]}
+          userLabel="Ada Lovelace"
+          loading={false}
+          feedbackPendingByMessageId={{}}
+          onFeedback={() => undefined}
+          onOpenScenarioCatalog={() => undefined}
+        />
+      </ToastProvider>,
+    );
+
+    expect(thread.scrollTop).toBe(1200);
   });
 
   it("renders the user profile name instead of the generic analyst label", () => {
@@ -295,7 +550,7 @@ describe("ChatThread", () => {
         id: "assistant-plain",
         backendMessageId: "msg-plain",
         role: "assistant",
-        text: "Plain answer with no report.",
+        text: "Plain answer with no report",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
         payload: {
@@ -308,7 +563,7 @@ describe("ChatThread", () => {
 
     renderThread(messages);
 
-    expect(screen.queryByRole("button", { name: /export report/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /экспорт отчёта/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /export html/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /export pdf/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /export ipynb/i })).not.toBeInTheDocument();
@@ -320,7 +575,7 @@ describe("ChatThread", () => {
         id: "assistant-report",
         backendMessageId: "msg-report",
         role: "assistant",
-        text: "GMV recovered on paid traffic.",
+        text: "GMV recovered on paid traffic",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
         payload: reportPayload,
@@ -341,13 +596,13 @@ describe("ChatThread", () => {
     expect(screen.getByText(/attribution lag/i)).toBeInTheDocument();
     expect(screen.queryByText(/^warnings$/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/llm_finalizer_requested/i)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /export report/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /экспорт отчёта/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /html/i })).not.toBeInTheDocument();
     expect(screen.getByText("SQL", { selector: "summary" })).toBeInTheDocument();
     expect(screen.getByText("select day, gmv from dm.gmv_daily")).toBeInTheDocument();
     expect(screen.queryByRole("cell", { name: "2026-04-01" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /export report/i }));
+    fireEvent.click(screen.getByRole("button", { name: /экспорт отчёта/i }));
 
     expect(screen.getByRole("menuitem", { name: /html/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /pdf/i })).toBeInTheDocument();
@@ -371,7 +626,7 @@ describe("ChatThread", () => {
         id: "assistant-chart",
         backendMessageId: "msg-chart",
         role: "assistant",
-        text: "Количество заказов по дням.",
+        text: "Количество заказов по дням",
         timestamp: new Date("2026-05-08T14:02:09Z"),
         deliveryState: "complete",
         payload: {
@@ -391,7 +646,7 @@ describe("ChatThread", () => {
       "Количество заказов по дням, май 2026"
     );
     expect(screen.getAllByText(/количество заказов по дням/i).length).toBeGreaterThan(1);
-    expect(screen.getByRole("button", { name: /export report/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /экспорт отчёта/i })).toBeInTheDocument();
   });
 
   it.each([
@@ -409,7 +664,7 @@ describe("ChatThread", () => {
         id: `assistant-report-${width}`,
         backendMessageId: `msg-report-${width}`,
         role: "assistant",
-        text: "GMV recovered on paid traffic.",
+        text: "GMV recovered on paid traffic",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
         payload: reportPayload,
@@ -445,7 +700,7 @@ describe("ChatThread", () => {
       {
         id: "assistant-optimizer",
         role: "assistant",
-        text: "Оптимизировал запрос.",
+        text: "Оптимизировал запрос",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
         toolCalls: [
@@ -463,7 +718,7 @@ describe("ChatThread", () => {
           },
         ],
         payload: {
-          answer: "Оптимизировал запрос.",
+          answer: "Оптимизировал запрос",
           conversation_id: "conv-opt",
           generated_sql: "select * from t where x < 3",
           optimization_trace: {
@@ -483,7 +738,7 @@ describe("ChatThread", () => {
               {
                 rule_id: "query-join-filter-before",
                 title: "Date filter can be mirrored before the JOIN",
-                summary: "Mirror the business-date filter on both joined facts to shrink scans.",
+                summary: "Mirror the business-date filter on both joined facts to shrink scans",
                 severity: "warning",
                 applies_to: ["dm.ft_order", "dm.ft_order_unit_economics_v"],
                 citations: [],
@@ -514,34 +769,34 @@ describe("ChatThread", () => {
 
     renderThread(messages);
 
-    fireEvent.click(screen.getByRole("button", { name: /show system run log/i }));
+    fireEvent.click(screen.getByRole("button", { name: /показать журнал выполнения/i }));
 
     expect(screen.getByText(/sql optimization advisor/i)).toBeInTheDocument();
-    expect(screen.getByText(/advisory only: 1 finding/i)).toBeInTheDocument();
+    expect(screen.getByText(/только рекомендации: 1 замечание/i)).toBeInTheDocument();
     expect(
       screen.getByText(/date filter can be mirrored before the join/i, {
-        selector: "span.text-xs.font-medium.text-\\[\\#f4f7ff\\]",
+        selector: "span",
       })
     ).toBeInTheDocument();
     expect(
       screen.getByText(/mirror the business-date filter on both joined facts to shrink scans/i, {
-        selector: "p.mt-1.text-xs.leading-5.text-\\[\\#c6d4ee\\]",
+        selector: "p",
       })
     ).toBeInTheDocument();
   });
 
-  it("renders openmetadata table scoring inside the system log metadata tool card", () => {
+  it("renders semantic table scoring inside the system log metadata tool card", () => {
     const messages: ChatMessageViewModel[] = [
       {
         id: "assistant-metadata",
         role: "assistant",
-        text: "Нашёл подходящую таблицу.",
+        text: "Нашёл подходящую таблицу",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
         toolCalls: [
           {
             id: "call-metadata",
-            tool_name: "fetch_metadata_tables",
+            tool_name: "metadata_table_scoring",
             arguments: {
               search: "gmv",
               limit: 10,
@@ -554,26 +809,26 @@ describe("ChatThread", () => {
           },
         ],
         payload: {
-          answer: "Нашёл подходящую таблицу.",
+          answer: "Нашёл подходящую таблицу",
           conversation_id: "conv-metadata",
           generated_sql: null,
           optimization_trace: null,
           capability_trace: {
-            available_tools: ["fetch_metadata_tables"],
-            used_tools: ["fetch_metadata_tables"],
-            used_providers: ["openmetadata:om-prod"],
+            available_tools: ["catalog__search"],
+            used_tools: ["catalog__search"],
+            used_providers: ["mcp:catalog"],
             evidence_origin: ["metadata"],
             degraded_capabilities: [],
             policy_decisions: [],
             runtime_context: {
               metadata_table_columns: {},
               semantic_grounding: {
-                chosen_table_fqn: "Sample-ClickHouse.default.dm.ft_gmv_daily",
+                chosen_table_fqn: "Clickhouse-Sales.default.dm.ft_gmv_daily",
                 selection_rationale: "Best governed fact table",
                 candidates: [
                   {
-                    fqn: "Sample-ClickHouse.default.dm.ft_gmv_daily",
-                    service: "Sample-ClickHouse",
+                    fqn: "Clickhouse-Sales.default.dm.ft_gmv_daily",
+                    service: "Clickhouse-Sales",
                     database: "default",
                     schema: "dm",
                     relevance_score: 98.4,
@@ -599,8 +854,8 @@ describe("ChatThread", () => {
                     suspicious: false,
                   },
                   {
-                    fqn: "Sample-ClickHouse.default.raw.gmv_events",
-                    service: "Sample-ClickHouse",
+                    fqn: "Clickhouse-Sales.default.raw.gmv_events",
+                    service: "Clickhouse-Sales",
                     database: "default",
                     schema: "raw",
                     relevance_score: 51.2,
@@ -624,8 +879,8 @@ describe("ChatThread", () => {
           },
           selected_database_connector: null,
           assistant_message_id: "msg-metadata",
-          metadata_sources: ["openmetadata"],
-          context_tables: ["Sample-ClickHouse.default.dm.ft_gmv_daily"],
+          metadata_sources: ["mcp"],
+          context_tables: ["Clickhouse-Sales.default.dm.ft_gmv_daily"],
           claims: [],
           evidence: [],
           claim_evidence_links: [],
@@ -641,17 +896,17 @@ describe("ChatThread", () => {
 
     renderThread(messages);
 
-    fireEvent.click(screen.getByRole("button", { name: /show system run log/i }));
+    fireEvent.click(screen.getByRole("button", { name: /показать журнал выполнения/i }));
 
-    expect(screen.getByText(/fetch metadata tables/i)).toBeInTheDocument();
-    expect(screen.getByText(/selected:/i)).toBeInTheDocument();
-    expect(screen.getAllByText("Sample-ClickHouse.default.dm.ft_gmv_daily")).toHaveLength(2);
-    expect(screen.getByText(/score 98.4/i)).toBeInTheDocument();
-    expect(screen.getByText(/reasons: governance_strength, business_layer_preference/i)).toBeInTheDocument();
-    expect(screen.getByText("team: analytics-team")).toBeInTheDocument();
-    expect(screen.getByText("term: GMV")).toBeInTheDocument();
-    expect(screen.getByText("metric: Gross Merchandise Value")).toBeInTheDocument();
-    expect(screen.getByText(/quality: failed \(1\/2 passing\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/metadata table scoring/i)).toBeInTheDocument();
+    expect(screen.getByText(/выбрано:/i)).toBeInTheDocument();
+    expect(screen.getAllByText("Clickhouse-Sales.default.dm.ft_gmv_daily")).toHaveLength(2);
+    expect(screen.getByText(/оценка: 98.4/i)).toBeInTheDocument();
+    expect(screen.getByText(/причины: governance_strength, business_layer_preference/i)).toBeInTheDocument();
+    expect(screen.getByText("команда: analytics-team")).toBeInTheDocument();
+    expect(screen.getByText("термин: GMV")).toBeInTheDocument();
+    expect(screen.getByText("метрика: Gross Merchandise Value")).toBeInTheDocument();
+    expect(screen.getByText(/качество: failed \(1\/2 успешно\)/i)).toBeInTheDocument();
   });
 
   it("copies only assistant message text without header and system log", async () => {
@@ -678,7 +933,7 @@ describe("ChatThread", () => {
         toolCalls: [
           {
             id: "tool-1",
-            tool_name: "search_metadata",
+            tool_name: "catalog__search",
             arguments: { entityType: "table", query: "orders" },
             result_summary: "Found 3 entities",
             success: true,
@@ -698,7 +953,7 @@ describe("ChatThread", () => {
 
     renderThread(messages);
 
-    fireEvent.click(screen.getByRole("button", { name: /copy message/i }));
+    fireEvent.click(screen.getByRole("button", { name: /скопировать сообщение/i }));
 
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledTimes(1);
@@ -718,23 +973,23 @@ describe("ChatThread", () => {
         id: "assistant-report-copy",
         backendMessageId: "msg-report-copy",
         role: "assistant",
-        text: "GMV recovered on paid traffic.",
+        text: "GMV recovered on paid traffic",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
         payload: reportPayload,
       },
     ]);
 
-    fireEvent.click(screen.getByRole("button", { name: /copy message/i }));
+    fireEvent.click(screen.getByRole("button", { name: /скопировать сообщение/i }));
 
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledTimes(1);
     });
     const copiedText = writeText.mock.calls[0]?.[0] ?? "";
     expect(copiedText).toContain("# Weekly GMV recovery");
-    expect(copiedText).toContain("## Executive summary");
+    expect(copiedText).toContain("## Краткое резюме");
     expect(copiedText).toContain("- GMV: $148K");
-    expect(copiedText).toContain("### Chart: GMV trend");
+    expect(copiedText).toContain("### График: GMV trend");
     expect(copiedText).toContain("## SQL");
     expect(copiedText).toContain("select day, gmv from dm.gmv_daily");
     expect(copiedText).not.toContain("Analyst note");
@@ -761,11 +1016,161 @@ describe("ChatThread", () => {
 
     renderThread(messages);
 
-    fireEvent.click(screen.getByRole("button", { name: /copy message/i }));
+    fireEvent.click(screen.getByRole("button", { name: /скопировать сообщение/i }));
 
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledTimes(1);
     });
     expect(writeText).toHaveBeenCalledWith("Почему GMV просел по неделям?");
+  });
+
+  it("collects expanded feedback before saving a negative reaction", () => {
+    const onFeedback = vi.fn();
+    renderThread(
+      [
+        {
+          id: "assistant-feedback",
+          backendMessageId: "msg-feedback",
+          role: "assistant",
+          text: "GMV вырос на 10%.",
+          timestamp: new Date("2026-04-04T09:00:00Z"),
+          deliveryState: "complete",
+        },
+      ],
+      "Ada Lovelace",
+      { onFeedback }
+    );
+
+    const negativeFeedbackButton = screen.getByRole("button", { name: "Не полезно" });
+    fireEvent.mouseEnter(negativeFeedbackButton);
+    expect(screen.queryByText("Ответ нужно улучшить")).not.toBeInTheDocument();
+
+    fireEvent.click(negativeFeedbackButton);
+
+    expect(onFeedback).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Что пошло не так?")).toBeInTheDocument();
+    expect(screen.getByLabelText("Как нужно было ответить?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отправить отзыв" })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Что пошло не так?"), {
+      target: { value: "Неверный период сравнения" },
+    });
+    fireEvent.change(screen.getByLabelText("Как нужно было ответить?"), {
+      target: { value: "Сравнить с тем же периодом прошлого года" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Отправить отзыв" }));
+
+    expect(onFeedback).toHaveBeenCalledWith(
+      "msg-feedback",
+      "wrong",
+      undefined,
+      {
+        whatWentWrong: "Неверный период сравнения",
+        expectedAnswer: "Сравнить с тем же периодом прошлого года",
+      }
+    );
+    expect(screen.queryByLabelText("Что пошло не так?")).not.toBeInTheDocument();
+  });
+
+  it("saves a useful reaction without opening the expanded form", () => {
+    const onFeedback = vi.fn();
+    renderThread(
+      [
+        {
+          id: "assistant-useful-feedback",
+          backendMessageId: "msg-useful-feedback",
+          role: "assistant",
+          text: "GMV вырос на 10%.",
+          timestamp: new Date("2026-04-04T09:00:00Z"),
+          deliveryState: "complete",
+        },
+      ],
+      "Ada Lovelace",
+      { onFeedback }
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Полезно" }));
+
+    expect(onFeedback).toHaveBeenCalledWith("msg-useful-feedback", "useful", undefined, undefined);
+    expect(screen.queryByLabelText("Что пошло не так?")).not.toBeInTheDocument();
+  });
+
+  it("keeps an unsaved draft but clears it after persisted feedback becomes useful", () => {
+    const message: ChatMessageViewModel = {
+      id: "assistant-draft",
+      backendMessageId: "msg-draft",
+      role: "assistant",
+      text: "GMV вырос на 10%.",
+      timestamp: new Date("2026-04-04T09:00:00Z"),
+      deliveryState: "complete",
+      feedback: null,
+    };
+    const view = renderThread([message]);
+    fireEvent.click(screen.getByRole("button", { name: "Не полезно" }));
+    fireEvent.change(screen.getByLabelText("Что пошло не так?"), { target: { value: "Черновик" } });
+
+    view.rerender(
+      <ToastProvider>
+        <ChatThread chatWidth={1100} conversationId="conversation-test" messages={[message]} loading={false} feedbackPendingByMessageId={{}} onFeedback={() => undefined} onOpenScenarioCatalog={() => undefined} />
+      </ToastProvider>
+    );
+    expect(screen.getByLabelText("Что пошло не так?")).toHaveValue("Черновик");
+
+    view.rerender(
+      <ToastProvider>
+        <ChatThread chatWidth={1100} conversationId="conversation-test" messages={[{ ...message, feedback: "useful" }]} loading={false} feedbackPendingByMessageId={{}} onFeedback={() => undefined} onOpenScenarioCatalog={() => undefined} />
+      </ToastProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Не полезно" }));
+    expect(screen.getByLabelText("Что пошло не так?")).toHaveValue("");
+  });
+
+  it("forwards repair action from a negative feedback card", () => {
+    const onRepairTurn = vi.fn();
+    renderThread(
+      [{
+        id: "assistant-repair",
+        backendMessageId: "msg-repair",
+        role: "assistant",
+        text: "GMV вырос на 10%.",
+        timestamp: new Date("2026-04-04T09:00:00Z"),
+        deliveryState: "complete",
+        feedback: "wrong",
+        feedbackWhatWentWrong: "Неверный период",
+        feedbackExpectedAnswer: "Нужен аналогичный период",
+      }],
+      "Ada Lovelace",
+      { onRepairTurn }
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Исправить ответ" }));
+    expect(onRepairTurn).toHaveBeenCalledWith("msg-repair");
+  });
+
+  it("blocks repair while negative feedback is being saved", () => {
+    const onRepairTurn = vi.fn();
+    renderThread(
+      [{
+        id: "assistant-repair-pending",
+        backendMessageId: "msg-repair-pending",
+        role: "assistant",
+        text: "Ответ, который нужно исправить",
+        timestamp: new Date("2026-01-01T00:00:00Z"),
+        deliveryState: "complete",
+        feedback: "wrong",
+        feedbackWhatWentWrong: "Неверный период",
+        feedbackExpectedAnswer: "Нужен аналогичный период",
+      }],
+      "Ada Lovelace",
+      {
+        feedbackPendingByMessageId: { "msg-repair-pending": true },
+        onRepairTurn,
+      }
+    );
+
+    const repairButton = screen.getByRole("button", { name: "Исправить ответ" });
+    expect(repairButton).toBeDisabled();
+    fireEvent.click(repairButton);
+    expect(onRepairTurn).not.toHaveBeenCalled();
   });
 });

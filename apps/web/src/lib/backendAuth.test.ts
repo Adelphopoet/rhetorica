@@ -48,4 +48,28 @@ describe("backendAuth", () => {
     expect(backendHeaders).toBeInstanceOf(Headers);
     expect((backendHeaders as Headers).get("Authorization")).toBe("Bearer session-token");
   });
+
+  it("forwards only public rate-limit response headers", async () => {
+    const authModule = await import("./backendAuth");
+    const backendResponse = new Response(null, {
+      headers: {
+        "Retry-After": "120",
+        "RateLimit-Limit": "20",
+        "RateLimit-Remaining": "0",
+        "RateLimit-Reset": "120",
+        "X-Backend-Secret": "do-not-forward",
+      },
+    });
+
+    const headers = authModule.backendResponseHeaders(backendResponse, {
+      "Content-Type": "application/json",
+    });
+
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("Retry-After")).toBe("120");
+    expect(headers.get("RateLimit-Limit")).toBe("20");
+    expect(headers.get("RateLimit-Remaining")).toBe("0");
+    expect(headers.get("RateLimit-Reset")).toBe("120");
+    expect(headers.has("X-Backend-Secret")).toBe(false);
+  });
 });

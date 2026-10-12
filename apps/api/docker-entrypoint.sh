@@ -29,7 +29,7 @@ install_extra_cas
 
 UV_RUN_ARGS=""
 if [ "${RHETORICA_SYNC_ON_START:-true}" = "true" ]; then
-  uv sync --all-packages --all-extras
+  uv sync --package rhetorica-api --all-extras
 else
   UV_RUN_ARGS="--no-sync"
 fi

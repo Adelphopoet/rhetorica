@@ -2,19 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from rhetorica_backend.domain.chat.conversation.conversation_manager import (
     ConversationManager,
-)
-from rhetorica_backend.domain.chat.metadata import (
-    MetadataCatalogSearchService,
-    MetadataFetcher,
-    MetadataRankingService,
-    MetadataSemanticGroundingService,
-    MetadataTableLoader,
-    resolve_metadata_runtime_services,
 )
 from rhetorica_backend.domain.chat.orchestration.response_assembly import (
     ChatHistoryPersistenceService,
@@ -29,6 +22,7 @@ from rhetorica_backend.domain.chat.orchestration.transport_finalization import (
 )
 from rhetorica_backend.domain.chat.orchestration.turn_builder import TurnBuilder
 from rhetorica_backend.domain.chat.sql.sql_router import SqlRouter
+from rhetorica_backend.domain.documentation import DocumentationRetrievalService
 from rhetorica_backend.domain.rag.retrieval_service import RagInsightRetriever
 from rhetorica_backend.domain.results.analysis_document_builder import (
     AnalysisDocumentBuilder,
@@ -36,17 +30,29 @@ from rhetorica_backend.domain.results.analysis_document_builder import (
 from rhetorica_backend.domain.results.visualization_planner import (
     VisualizationPlanner,
 )
-from rhetorica_backend.infra.postgres.confluence_connector_repository import (
-    ConfluenceConnectorRepository,
+from rhetorica_backend.infra.postgres.airflow_connector_repository import (
+    AirflowConnectorRepository,
 )
-from rhetorica_backend.infra.postgres.jira_connector_repository import (
-    JiraConnectorRepository,
+from rhetorica_backend.infra.postgres.documentation_connector_repository import (
+    DocumentationConnectorRepository,
+)
+from rhetorica_backend.infra.postgres.gitlab_connector_repository import (
+    GitLabConnectorRepository,
+)
+from rhetorica_backend.infra.postgres.kubernetes_connector_repository import (
+    KubernetesConnectorRepository,
 )
 from rhetorica_backend.infra.postgres.llm_connector_repository import (
     LlmConnectorRepository,
 )
-from rhetorica_backend.infra.postgres.openmetadata_connector_repository import (
-    OpenMetadataConnectorRepository,
+from rhetorica_backend.infra.postgres.llm_credential_binding_repository import (
+    LlmCredentialBindingRepository,
+)
+from rhetorica_backend.infra.postgres.mcp_connector_repository import (
+    McpConnectorRepository,
+)
+from rhetorica_backend.infra.postgres.victoriametrics_connector_repository import (
+    VictoriaMetricsConnectorRepository,
 )
 from rhetorica_backend.infra.postgres.workspace_skill_repository import (
     WorkspaceSkillRepository,
@@ -62,10 +68,6 @@ class ChatRuntimeOrchestrator:
 
     visualization_planner: VisualizationPlanner
     analysis_document_builder: AnalysisDocumentBuilder
-    metadata_table_loader: MetadataTableLoader
-    metadata_catalog_search_service: MetadataCatalogSearchService
-    metadata_ranking_service: MetadataRankingService
-    metadata_semantic_grounding_service: MetadataSemanticGroundingService
     turn_builder: TurnBuilder
     session_factory: OrchestrationSessionFactory
     response_assembler: ChatResponseAssembler
@@ -78,45 +80,42 @@ class ChatRuntimeOrchestrator:
         cls,
         *,
         llm_connector_repository: LlmConnectorRepository,
-        openmetadata_connector_repository: OpenMetadataConnectorRepository,
-        metadata_fetcher: MetadataFetcher,
         sql_router: SqlRouter,
         conversation_manager: ConversationManager,
         db_connector_repository: Any,
-        rag_retriever: RagInsightRetriever | None,
-        confluence_connector_repository: ConfluenceConnectorRepository | None,
-        jira_connector_repository: JiraConnectorRepository | None,
-        workspace_skill_repository: WorkspaceSkillRepository | None,
-        visualization_planner: VisualizationPlanner | None,
-        metadata_table_loader: MetadataTableLoader | None,
-        metadata_catalog_search_service: MetadataCatalogSearchService | None,
-        metadata_ranking_service: MetadataRankingService | None,
-        metadata_semantic_grounding_service: MetadataSemanticGroundingService | None,
         tool_executor_factory,
+        rag_retriever: RagInsightRetriever | None = None,
+        documentation_connector_repository: DocumentationConnectorRepository | None = None,
+        documentation_retrieval_service: DocumentationRetrievalService | None = None,
+        gitlab_connector_repository: GitLabConnectorRepository | None = None,
+        airflow_connector_repository: AirflowConnectorRepository | None = None,
+        kubernetes_connector_repository: KubernetesConnectorRepository | None = None,
+        victoriametrics_connector_repository: VictoriaMetricsConnectorRepository | None = None,
+        mcp_connector_repository: McpConnectorRepository | None = None,
+        workspace_skill_repository: WorkspaceSkillRepository | None = None,
+        visualization_planner: VisualizationPlanner | None = None,
         capability_registry: LlmCapabilityRegistry | None = None,
+        file_tools_enabled: bool = False,
+        agent_session_factory: Callable[[str], Any] | None = None,
+        llm_credential_binding_repository: LlmCredentialBindingRepository | None = None,
     ) -> ChatRuntimeOrchestrator:
-        metadata_services = resolve_metadata_runtime_services(
-            metadata_fetcher=metadata_fetcher,
-            metadata_table_loader=metadata_table_loader,
-            metadata_catalog_search_service=metadata_catalog_search_service,
-            metadata_ranking_service=metadata_ranking_service,
-            metadata_semantic_grounding_service=metadata_semantic_grounding_service,
-        )
         resolved_visualization_planner = visualization_planner or VisualizationPlanner()
         analysis_document_builder = AnalysisDocumentBuilder(resolved_visualization_planner)
         turn_builder = TurnBuilder(
-            openmetadata_connector_repository=openmetadata_connector_repository,
-            metadata_fetcher=None,
-            metadata_table_loader=metadata_services.table_loader,
-            metadata_catalog_search_service=metadata_services.catalog_search_service,
-            metadata_ranking_service=metadata_services.ranking_service,
-            metadata_semantic_grounding_service=metadata_services.semantic_grounding_service,
             sql_router=sql_router,
             rag_retriever=rag_retriever,
-            confluence_connector_repository=confluence_connector_repository,
-            jira_connector_repository=jira_connector_repository,
+            documentation_connector_repository=documentation_connector_repository,
+            documentation_retrieval_service=documentation_retrieval_service,
+            gitlab_connector_repository=gitlab_connector_repository,
+            airflow_connector_repository=airflow_connector_repository,
+            kubernetes_connector_repository=kubernetes_connector_repository,
+            victoriametrics_connector_repository=victoriametrics_connector_repository,
+            mcp_connector_repository=mcp_connector_repository,
             workspace_skill_repository=workspace_skill_repository,
+            tool_artifact_store=conversation_manager,
+            tool_evidence_store=conversation_manager,
             tool_executor_factory=tool_executor_factory,
+            file_tools_enabled=file_tools_enabled,
         )
         session_factory = OrchestrationSessionFactory(
             llm_connector_repository=llm_connector_repository,
@@ -125,6 +124,8 @@ class ChatRuntimeOrchestrator:
             turn_builder=turn_builder,
             sql_router=sql_router,
             capability_registry=capability_registry,
+            agent_session_factory=agent_session_factory,
+            llm_credential_binding_repository=llm_credential_binding_repository,
         )
         response_assembler = ChatResponseAssembler(
             conversation_manager=conversation_manager,
@@ -138,10 +139,6 @@ class ChatRuntimeOrchestrator:
         return cls(
             visualization_planner=resolved_visualization_planner,
             analysis_document_builder=analysis_document_builder,
-            metadata_table_loader=metadata_services.table_loader,
-            metadata_catalog_search_service=metadata_services.catalog_search_service,
-            metadata_ranking_service=metadata_services.ranking_service,
-            metadata_semantic_grounding_service=metadata_services.semantic_grounding_service,
             turn_builder=turn_builder,
             session_factory=session_factory,
             response_assembler=response_assembler,

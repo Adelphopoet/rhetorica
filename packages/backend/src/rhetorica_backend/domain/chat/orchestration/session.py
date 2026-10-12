@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,9 @@ from rhetorica_backend.domain.chat.sql.sql_router import SqlRouter
 from rhetorica_backend.infra.postgres.llm_connector_repository import (
     LlmConnectorRepository,
 )
+from rhetorica_backend.infra.postgres.llm_credential_binding_repository import (
+    LlmCredentialBindingRepository,
+)
 
 if TYPE_CHECKING:
     from rhetorica_backend.infra.llm.capability_registry import (
@@ -48,7 +52,7 @@ class OrchestrationSession:
     workspace_snapshot: WorkspaceToolingSnapshot
     capability_surface: WorkspaceCapabilitySurface
     llm_capability_profile: LlmCapabilityProfile | None = None
-    conversation_history: list[dict[str, Any]] = field(default_factory=list)
+    agent_session: Any | None = None
     conversation_state: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     resolved_llm_connector_name: str | None = None
@@ -66,6 +70,8 @@ class OrchestrationSessionFactory:
         turn_builder: TurnBuilder,
         sql_router: SqlRouter,
         capability_registry: LlmCapabilityRegistry | None = None,
+        agent_session_factory: Callable[[str], Any] | None = None,
+        llm_credential_binding_repository: LlmCredentialBindingRepository | None = None,
     ) -> None:
         self._llm_connector_repository = llm_connector_repository
         self._conversation_manager = conversation_manager
@@ -73,6 +79,8 @@ class OrchestrationSessionFactory:
         self._turn_builder = turn_builder
         self._sql_router = sql_router
         self._capability_registry = capability_registry
+        self._agent_session_factory = agent_session_factory
+        self._llm_credential_binding_repository = llm_credential_binding_repository
 
     def build(
         self,
@@ -82,15 +90,33 @@ class OrchestrationSessionFactory:
     ) -> OrchestrationSession:
         """Resolve all stable inputs required to run a chat turn."""
         resolved_llm_connector_name, llm_connection = self._get_llm_connection(request)
+        if llm_connection is not None:
+            update: dict[str, Any] = {}
+            if request.agent_temperature is not None:
+                update["temperature"] = request.agent_temperature
+            if request.agent_max_tokens is not None:
+                update["max_tokens"] = request.agent_max_tokens
+            if update:
+                llm_connection = llm_connection.model_copy(update=update)
         conversation_id = request.conversation_id
         if llm_connection is not None or create_conversation_without_llm:
             conversation_id = self._ensure_conversation(request)
+
+        if llm_connection is not None and conversation_id is not None:
+            llm_connection = self._bind_llm_credential(
+                conversation_id=conversation_id,
+                connection=llm_connection,
+            )
 
         db_connectors = self._db_connector_repository.list(
             workspace_id=request.workspace_id,
             limit=500,
         )
         db_connectors = [connector for connector in db_connectors if connector.is_active]
+        db_connectors = self._filter_connectors(
+            db_connectors,
+            request.agent_allowed_database_connector_names,
+        )
         workspace_snapshot = self._turn_builder.inspect_workspace(
             request=request,
             db_connectors=db_connectors,
@@ -99,20 +125,17 @@ class OrchestrationSessionFactory:
             request=request,
             workspace_snapshot=workspace_snapshot,
         )
-        conversation_history: list[dict[str, Any]] = []
         conversation_state: dict[str, Any] = {}
         warnings: list[str] = []
         llm_capability_profile = None
+        agent_session = None
 
         if llm_connection is not None:
             conversation_state = self._load_conversation_state(
                 conversation_id=conversation_id,
             )
-            conversation_history, warnings = self._load_conversation_history(
-                conversation_id=conversation_id,
-                model_name=llm_connection.model,
-                model_context_window_tokens=self._context_window_tokens(llm_connection),
-            )
+            if conversation_id is not None and self._agent_session_factory is not None:
+                agent_session = self._agent_session_factory(conversation_id)
             # Resolve LLM capability profile
             llm_capability_profile = self._resolve_llm_capability_profile(llm_connection)
 
@@ -121,7 +144,7 @@ class OrchestrationSessionFactory:
             conversation_id=conversation_id,
             llm_connection=llm_connection,
             db_connectors=db_connectors,
-            conversation_history=conversation_history,
+            agent_session=agent_session,
             conversation_state=conversation_state,
             warnings=warnings,
             workspace_snapshot=workspace_snapshot,
@@ -139,19 +162,14 @@ class OrchestrationSessionFactory:
         policy = resolve_turn_policy(
             request=request,
             has_db_connectors=workspace_snapshot.has_db_connectors,
-            metadata_configured=workspace_snapshot.metadata_configured,
             rag_configured=workspace_snapshot.rag_configured,
-            confluence_configured=workspace_snapshot.confluence_configured,
-            jira_configured=workspace_snapshot.jira_configured,
-            sql_router=self._sql_router,
+            documentation_configured=workspace_snapshot.documentation_configured,
             requires_metadata_lookup=FinalPayloadPolicy.requires_metadata_lookup(request),
         )
         return build_workspace_capability_surface(
             has_db_connectors=workspace_snapshot.has_db_connectors,
-            metadata_configured=workspace_snapshot.metadata_configured,
             rag_configured=workspace_snapshot.rag_configured,
-            confluence_configured=workspace_snapshot.confluence_configured,
-            jira_configured=workspace_snapshot.jira_configured,
+            documentation_configured=workspace_snapshot.documentation_configured,
             policy=policy,
             run_sql_requested=request.run_sql,
         )
@@ -164,27 +182,9 @@ class OrchestrationSessionFactory:
         conversation = self._conversation_manager.create_conversation(
             workspace_id=request.workspace_id,
             title=request.question[:100] if len(request.question) > 100 else request.question,
+            agent_id=request.agent_id,
         )
         return conversation.id if conversation else None
-
-    def _load_conversation_history(
-        self,
-        *,
-        conversation_id: str | None,
-        model_name: str | None,
-        model_context_window_tokens: int | None,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        if not conversation_id:
-            return [], []
-
-        history, warnings = self._conversation_manager.format_history_for_context(
-            conversation_id=conversation_id,
-            message_limit=20,
-            model_name=model_name,
-            model_context_window_tokens=model_context_window_tokens,
-            include_warnings=True,
-        )
-        return history, warnings
 
     def _load_conversation_state(
         self,
@@ -200,15 +200,50 @@ class OrchestrationSessionFactory:
             conversation_id=conversation_id,
         )
 
-    @staticmethod
-    def _context_window_tokens(connection: LlmConnectionConfig) -> int | None:
-        raw = connection.extra_settings.get("context_window_tokens")
-        if raw is None:
-            raw = connection.extra_settings.get("context_window")
-        if isinstance(raw, int | float):
-            value = int(raw)
-            return value if value > 0 else None
-        return None
+    def _bind_llm_credential(
+        self,
+        *,
+        conversation_id: str,
+        connection: LlmConnectionConfig,
+    ) -> LlmConnectionConfig | None:
+        credentials = list(connection.api_keys or [])
+        if not credentials and connection.api_key:
+            credentials = [connection.api_key]
+        if not credentials:
+            return None
+
+        repository = self._llm_credential_binding_repository
+        connector_id = getattr(connection, "connector_id", None)
+        if repository is None or connector_id is None:
+            return connection
+        selected_index = repository.resolve(
+            conversation_id=conversation_id,
+            llm_connector_id=connector_id,
+            credential_set_version=connection.credential_set_version,
+            credential_count=len(credentials),
+        )
+
+        if connection.api_keys != credentials:
+            connection = connection.model_copy(update={"api_keys": credentials})
+            connection.configure_connector_identity(
+                connector_id=connector_id,
+                credential_set_version=connection.credential_set_version,
+            )
+
+        connection.api_key = credentials[selected_index]
+        connection.configure_credential_binding(
+            connector_id=connector_id,
+            credential_set_version=connection.credential_set_version,
+            selected_api_key_index=selected_index,
+            rebind=lambda new_index, expected_index: repository.rebind(
+                conversation_id=conversation_id,
+                llm_connector_id=connector_id,
+                expected_index=expected_index,
+                credential_set_version=connection.credential_set_version,
+                new_index=new_index,
+            ),
+        )
+        return connection
 
     def _get_llm_connection(
         self,
@@ -229,6 +264,18 @@ class OrchestrationSessionFactory:
             workspace_id=request.workspace_id,
             name=llm_connector_name,
         )
+
+    @staticmethod
+    def _filter_connectors(
+        connectors: list[ConnectorItem],
+        allowed_names: list[str] | None,
+    ) -> list[ConnectorItem]:
+        if allowed_names is None:
+            return connectors
+        allowed = {name for name in allowed_names if name}
+        if not allowed:
+            return []
+        return [connector for connector in connectors if connector.name in allowed]
 
     def _resolve_llm_capability_profile(
         self,

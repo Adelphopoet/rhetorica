@@ -2,7 +2,7 @@
 
 ## Ground rules
 
-- Start from the README and architecture docs.
+- Start from the manifests and ADRs.
 - Keep runtime shells thin and push reusable logic into shared packages.
 - Do not bypass SQL guardrails, auditability, or read-only assumptions.
 - Document structural changes in `docs/adr/` before broad rewrites.

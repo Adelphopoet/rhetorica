@@ -479,8 +479,12 @@ describe("historyApi", () => {
             uncertainty_flags: [],
             selected_connector: null,
             warnings: [],
-            feedback: null,
-            feedback_updated_at: null,
+            feedback: "wrong",
+            feedback_updated_at: "2026-04-04T10:01:00Z",
+            feedback_reason: "wrong_metric",
+            feedback_comment: "The comparison baseline is wrong.",
+            feedback_what_went_wrong: "The answer compares different time periods.",
+            feedback_expected_answer: "Compare the same period year over year.",
           },
         ],
       };
@@ -496,6 +500,13 @@ describe("historyApi", () => {
 
       expect(result.messages[1].text).toBe("Final answer");
       expect(result.messages[1].payload?.answer).toBe("Final answer");
+      expect(result.messages[1]).toMatchObject({
+        feedback: "wrong",
+        feedbackReason: "wrong_metric",
+        feedbackComment: "The comparison baseline is wrong.",
+        feedbackWhatWentWrong: "The answer compares different time periods.",
+        feedbackExpectedAnswer: "Compare the same period year over year.",
+      });
       expect(result.messages[1].thinkingBlocks).toEqual([
         {
           id: "thinking-msg-assistant-1-0",
@@ -548,7 +559,7 @@ describe("historyApi", () => {
         toolCalls: [
           {
             id: "tool-live-1",
-            tool_name: "fetch_metadata_tables",
+            tool_name: "catalog__search",
             started_at: "2026-04-04T10:00:04Z",
             sequence: 1,
           },
@@ -576,7 +587,7 @@ describe("historyApi", () => {
       expect(result.messages[0].toolCalls).toEqual([
         {
           id: "tool-live-1",
-          tool_name: "fetch_metadata_tables",
+          tool_name: "catalog__search",
           started_at: "2026-04-04T10:00:04Z",
           sequence: 1,
         },
@@ -697,6 +708,84 @@ describe("historyApi", () => {
       // Only the latest message (msg-assistant-2) should have execution data hydrated
       expect(result.messages[1].payload?.execution).toBeNull(); // msg-assistant-1
       expect(result.messages[3].payload?.execution?.execution_id).toBe("exec-2"); // msg-assistant-2
+    });
+
+    it("keeps conversation messages when execution enrichment is forbidden", async () => {
+      const conversationDetail = {
+        id: "conv-protected-exec",
+        workspace_id: "default",
+        title: "Protected execution",
+        created_at: "2026-04-04T10:00:00Z",
+        updated_at: "2026-04-04T10:00:05Z",
+        messages: [
+          {
+            id: "msg-user-1",
+            conversation_id: "conv-protected-exec",
+            role: "user",
+            content: "Question",
+            created_at: "2026-04-04T10:00:00Z",
+            generated_sql: null,
+            execution_id: null,
+            context_tables: [],
+            metadata_sources: [],
+            claims: [],
+            evidence: [],
+            claim_evidence_links: [],
+            uncertainty_flags: [],
+            selected_connector: null,
+            warnings: [],
+            feedback: null,
+            feedback_updated_at: null,
+          },
+          {
+            id: "msg-assistant-1",
+            conversation_id: "conv-protected-exec",
+            role: "assistant",
+            content: "Saved answer",
+            created_at: "2026-04-04T10:00:05Z",
+            generated_sql: "SELECT 1",
+            execution_id: "exec-protected",
+            context_tables: [],
+            metadata_sources: [],
+            claims: [],
+            evidence: [],
+            claim_evidence_links: [],
+            uncertainty_flags: [],
+            selected_connector: "warehouse",
+            warnings: [],
+            feedback: null,
+            feedback_updated_at: null,
+          },
+        ],
+      };
+      fetchMock
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify(conversationDetail), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ detail: "Access denied" }), {
+            status: 403,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+      const result = await loadConversationThread("conv-protected-exec");
+
+      expect(result.messages).toHaveLength(2);
+      expect(result.messages[1].text).toBe("Saved answer");
+      expect(result.messages[1].payload?.execution).toBeNull();
+      expect(result.assistantExecutionIds).toEqual([
+        { messageId: "msg-assistant-1", executionId: "exec-protected" },
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        "Conversation execution enrichment failed",
+        expect.any(Error)
+      );
+      warn.mockRestore();
     });
 
     it("returns empty assistantExecutionIds when no assistant messages have execution_id", async () => {

@@ -7,9 +7,15 @@
 **/.mypy_cache
 **/.ruff_cache
 **/.next
+node_modules
 **/node_modules
+**/node_modules/**
 .env
 .cache
+.pnpm-store
+.rhetorica
 .venv
 coverage
 htmlcov
+
+compose*.local.yaml

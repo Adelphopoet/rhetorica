@@ -1,0 +1,42 @@
+{{- if and .Values.infra.enabled .Values.infra.minio.initJobEnabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-minio-init
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infra
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 12
+  template:
+    metadata:
+      labels:
+        {{- include "rhetorica.labels" . | nindent 8 }}
+        app.kubernetes.io/component: infra-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: minio-init
+          image: {{ .Values.infra.minio.initImage | quote }}
+          imagePullPolicy: {{ .Values.infra.imagePullPolicy }}
+          env:
+            - name: MINIO_ROOT_USER
+              value: {{ .Values.infra.minio.rootUser | quote }}
+            - name: MINIO_ROOT_PASSWORD
+              value: {{ .Values.infra.minio.rootPassword | quote }}
+            - name: MINIO_BUCKET
+              value: {{ .Values.infra.minio.bucket | quote }}
+            - name: MINIO_ENDPOINT
+              value: "http://{{ include "rhetorica.fullname" . }}-infra:{{ .Values.infra.minio.servicePort }}"
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until mc alias set local "$MINIO_ENDPOINT" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                sleep 2
+              done
+              mc mb --ignore-existing "local/$MINIO_BUCKET"
+{{- end }}

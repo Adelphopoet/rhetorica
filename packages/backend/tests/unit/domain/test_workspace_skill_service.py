@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from rhetorica_backend.contracts.workspace_skills import (
-    UpsertWorkspaceSkillRequest,
+    UpsertGithubWorkspaceSkillRequest,
+    UpsertManualWorkspaceSkillRequest,
     WorkspaceSkillItem,
 )
 from rhetorica_backend.domain.workspace_skills.service import (
@@ -39,6 +40,12 @@ class _StaticHttpClient:
         return self._responses
 
 
+class _FailingHttpClient:
+    def get(self, url: str) -> httpx.Response:
+        _ = url
+        raise AssertionError("manual workspace skills must not use HTTP")
+
+
 def test_create_normalizes_blob_url_and_snapshots_markdown() -> None:
     repository = _FakeRepository()
     service = WorkspaceSkillService(
@@ -53,7 +60,7 @@ def test_create_normalizes_blob_url_and_snapshots_markdown() -> None:
     )
 
     skill = service.create(
-        UpsertWorkspaceSkillRequest(
+        UpsertGithubWorkspaceSkillRequest(
             name="optimizer",
             workspace_id="default",
             source_url="https://github.com/acme/playbooks/blob/main/clickhouse/optimizer.md",
@@ -90,7 +97,7 @@ def test_create_accepts_clickhouse_agent_skills_repo_url() -> None:
     )
 
     skill = service.create(
-        UpsertWorkspaceSkillRequest(
+        UpsertGithubWorkspaceSkillRequest(
             name="clickhouse-best-practices",
             workspace_id="default",
             source_url="https://github.com/ClickHouse/agent-skills",
@@ -103,6 +110,74 @@ def test_create_accepts_clickhouse_agent_skills_repo_url() -> None:
     )
     assert skill.title == "ClickHouse Best Practices"
     assert skill.summary == "Official ClickHouse skill."
+
+
+def test_create_manual_chat_skill_snapshots_markdown_without_http() -> None:
+    repository = _FakeRepository()
+    service = WorkspaceSkillService(repository, http_client=_FailingHttpClient())
+
+    skill = service.create(
+        UpsertManualWorkspaceSkillRequest(
+            name="support-tone",
+            workspace_id="default",
+            capability_family="chat_instruction",
+            engine_scope="clickhouse",
+            source_kind="manual_markdown",
+            content_markdown="# Support tone\nAnswer briefly and ask one question.\n",
+        )
+    )
+
+    assert skill.source_url is None
+    assert skill.engine_scope == "any"
+    assert skill.title == "Support tone"
+    assert skill.summary == "Answer briefly and ask one question."
+    assert skill.content_sha256 is not None
+    assert skill.content_bundle.assets[0].source_url is None
+    assert repository.create_calls[0]["engine_scope"] == "any"
+
+
+def test_create_manual_skill_uses_frontmatter_use_when_as_compact_summary() -> None:
+    service = WorkspaceSkillService(_FakeRepository(), http_client=_FailingHttpClient())
+
+    skill = service.create(
+        UpsertManualWorkspaceSkillRequest(
+            name="support-tone",
+            source_kind="manual_markdown",
+            capability_family="chat_instruction",
+            content_markdown=(
+                "---\n"
+                "title: Support tone\n"
+                "use_when: Use when drafting support-facing replies.\n"
+                "---\n\n"
+                "# Support tone\n"
+                "Full private instruction body.\n"
+            ),
+        )
+    )
+
+    assert skill.summary == "Use when drafting support-facing replies."
+
+
+def test_create_manual_skill_rejects_empty_or_binary_content() -> None:
+    service = WorkspaceSkillService(_FakeRepository(), http_client=_FailingHttpClient())
+
+    with pytest.raises(WorkspaceSkillValidationError, match="workspace_skill_empty_content"):
+        service.create(
+            UpsertManualWorkspaceSkillRequest(
+                name="empty",
+                source_kind="manual_markdown",
+                content_markdown="   ",
+            )
+        )
+
+    with pytest.raises(WorkspaceSkillValidationError, match="workspace_skill_binary_content"):
+        service.create(
+            UpsertManualWorkspaceSkillRequest(
+                name="binary",
+                source_kind="manual_markdown",
+                content_markdown="# Bad\x00",
+            )
+        )
 
 
 def test_create_accepts_trino_skill_repo_url() -> None:
@@ -126,7 +201,7 @@ def test_create_accepts_trino_skill_repo_url() -> None:
     )
 
     skill = service.create(
-        UpsertWorkspaceSkillRequest(
+        UpsertGithubWorkspaceSkillRequest(
             name="trino-best-practices",
             workspace_id="default",
             engine_scope="trino",
@@ -163,7 +238,7 @@ def test_create_accepts_greenplum_skill_repo_url() -> None:
     )
 
     skill = service.create(
-        UpsertWorkspaceSkillRequest(
+        UpsertGithubWorkspaceSkillRequest(
             name="greenplum-best-practices",
             workspace_id="default",
             engine_scope="greenplum",
@@ -192,7 +267,7 @@ def test_create_snapshots_clickhouse_skill_bundle() -> None:
     )
     compiled_url = (
         "https://raw.githubusercontent.com/ClickHouse/agent-skills/main/"
-        "skills/clickhouse-best-practices/GUIDE.md"
+        "skills/clickhouse-best-practices/AGENTS.md"
     )
     service = WorkspaceSkillService(
         repository,
@@ -220,7 +295,7 @@ def test_create_snapshots_clickhouse_skill_bundle() -> None:
                             "type": "blob",
                         },
                         {
-                            "path": "skills/clickhouse-best-practices/GUIDE.md",
+                            "path": "skills/clickhouse-best-practices/AGENTS.md",
                             "type": "blob",
                         },
                         {
@@ -260,7 +335,7 @@ def test_create_snapshots_clickhouse_skill_bundle() -> None:
     )
 
     skill = service.create(
-        UpsertWorkspaceSkillRequest(
+        UpsertGithubWorkspaceSkillRequest(
             name="clickhouse-best-practices",
             workspace_id="default",
             source_url="https://github.com/ClickHouse/agent-skills",
@@ -269,7 +344,7 @@ def test_create_snapshots_clickhouse_skill_bundle() -> None:
 
     asset_paths = [asset["path"] for asset in repository.create_calls[0]["content_bundle"]["assets"]]
     assert skill.content_bundle.assets[0].kind == "main"
-    assert "skills/clickhouse-best-practices/GUIDE.md" in asset_paths
+    assert "skills/clickhouse-best-practices/AGENTS.md" in asset_paths
     assert "skills/clickhouse-best-practices/rules/query-join-filter-before.md" in asset_paths
     rule_asset = next(
         asset for asset in skill.content_bundle.assets if asset.rule_id == "query-join-filter-before"
@@ -289,7 +364,7 @@ def test_create_rejects_non_github_urls() -> None:
 
     with pytest.raises(WorkspaceSkillValidationError, match="workspace_skill_invalid_source_url"):
         service.create(
-            UpsertWorkspaceSkillRequest(
+            UpsertGithubWorkspaceSkillRequest(
                 name="optimizer",
                 workspace_id="default",
                 source_url="https://example.com/skill.md",
@@ -312,7 +387,7 @@ def test_create_rejects_binary_payloads() -> None:
 
     with pytest.raises(WorkspaceSkillValidationError, match="workspace_skill_binary_content"):
         service.create(
-            UpsertWorkspaceSkillRequest(
+            UpsertGithubWorkspaceSkillRequest(
                 name="optimizer",
                 workspace_id="default",
                 source_url="https://raw.githubusercontent.com/acme/playbooks/main/optimizer.md",

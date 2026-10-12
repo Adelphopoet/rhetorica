@@ -35,7 +35,7 @@ async function resolveDocsRoot() {
       continue;
     }
   }
-  throw new Error("Docs root is not available from apps/web.");
+  throw new Error("Docs root is not available from apps/web");
 }
 
 function toTitleCase(value: string) {
@@ -89,6 +89,9 @@ async function buildNavigationTree(directoryPath: string, relativeDirectory = ""
     if (entry.name.startsWith(".")) {
       continue;
     }
+    if (!relativeDirectory && entry.name === "archive") {
+      continue;
+    }
 
     const absolutePath = path.join(directoryPath, entry.name);
     const relativePath = path.posix.join(relativeDirectory, entry.name);
@@ -96,7 +99,11 @@ async function buildNavigationTree(directoryPath: string, relativeDirectory = ""
     if (entry.isDirectory()) {
       const children = await buildNavigationTree(absolutePath, relativePath);
       const indexPath = path.join(absolutePath, "index.md");
-      const title = await readMarkdownTitleIfExists(indexPath, toTitleCase(entry.name));
+      const sectionIndexPath = path.join(absolutePath, "_index.md");
+      const title = await readMarkdownTitleIfExists(
+        indexPath,
+        await readMarkdownTitleIfExists(sectionIndexPath, toTitleCase(entry.name))
+      );
 
       items.push({
         title,
@@ -109,7 +116,7 @@ async function buildNavigationTree(directoryPath: string, relativeDirectory = ""
     if (!entry.isFile() || !entry.name.endsWith(".md")) {
       continue;
     }
-    if (entry.name === "index.md") {
+    if (entry.name === "index.md" || entry.name === "_index.md") {
       continue;
     }
 
@@ -157,7 +164,7 @@ export function rewriteMarkdownLinks(markdown: string, currentDocRelativePath: s
 }
 
 async function buildDirectoryListing(relativeDirectory: string, navItems: DocsNavItem[]) {
-  const title = relativeDirectory ? toTitleCase(path.basename(relativeDirectory)) : "Documentation";
+  const title = relativeDirectory ? toTitleCase(path.basename(relativeDirectory)) : "Документация";
   const listing = navItems
     .map((item) => `- [${item.title}](${item.href})`)
     .join("\n");
@@ -199,11 +206,11 @@ export async function getDocsNavigation() {
 
 export function getDocsBreadcrumbs(navItems: DocsNavItem[], href: string): DocsPagerLink[] {
   const trail = findTrail(navItems, href) ?? [];
-  return [{ title: "Documentation", href: "/docs" }, ...trail.map(({ title, href: itemHref }) => ({ title, href: itemHref }))];
+  return [{ title: "Документация", href: "/docs" }, ...trail.map(({ title, href: itemHref }) => ({ title, href: itemHref }))];
 }
 
 export function getDocsPager(navItems: DocsNavItem[], href: string) {
-  const flatItems = [{ title: "Documentation", href: "/docs" }, ...flattenNavigation(navItems)];
+  const flatItems = [{ title: "Документация", href: "/docs" }, ...flattenNavigation(navItems)];
   const index = flatItems.findIndex((item) => item.href === href);
   if (index === -1) {
     return { previous: null, next: null, parent: null } as const;
@@ -245,10 +252,21 @@ export async function getDocsPage(slug: string[] | undefined): Promise<DocsPageD
         return null;
       }
 
-      const indexPath = path.join(directoryPath, "index.md");
+      const indexPaths = [path.join(directoryPath, "index.md"), path.join(directoryPath, "_index.md")];
       try {
+        const indexPath = await (async () => {
+          for (const candidate of indexPaths) {
+            try {
+              await fs.access(candidate);
+              return candidate;
+            } catch {
+              continue;
+            }
+          }
+          throw new Error("directory_index_missing");
+        })();
         const markdown = await fs.readFile(indexPath, "utf-8");
-        const rewrittenMarkdown = rewriteMarkdownLinks(markdown, path.posix.join(relativeSlug, "index.md"));
+        const rewrittenMarkdown = rewriteMarkdownLinks(markdown, path.posix.join(relativeSlug, path.basename(indexPath)));
         return {
           title: await readMarkdownTitle(indexPath, toTitleCase(path.basename(relativeSlug || "docs"))),
           href: slugToHref(relativeSlug),

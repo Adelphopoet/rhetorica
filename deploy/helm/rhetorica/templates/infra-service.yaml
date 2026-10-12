@@ -1,0 +1,37 @@
+{{- if .Values.infra.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-infra
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infra
+spec:
+  # Clients probe their own port; one restarting container must not hide healthy peers.
+  publishNotReadyAddresses: true
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: {{ .Values.infra.serviceSelector.component | default "infra" | quote }}
+    app.kubernetes.io/instance: {{ .Values.infra.serviceSelector.instance | default .Release.Name | quote }}
+  ports:
+    {{- if .Values.infra.temporal.enabled }}
+    - name: temporal
+      port: 7233
+      targetPort: temporal
+    {{- end }}
+    - name: postgres
+      port: {{ .Values.infra.postgres.servicePort }}
+      targetPort: postgres
+    - name: redis
+      port: {{ .Values.infra.redis.servicePort }}
+      targetPort: redis
+    - name: qdrant
+      port: {{ .Values.infra.qdrant.servicePort }}
+      targetPort: qdrant
+    - name: minio
+      port: {{ .Values.infra.minio.servicePort }}
+      targetPort: minio
+    - name: minio-console
+      port: {{ .Values.infra.minio.consolePort }}
+      targetPort: minio-console
+{{- end }}

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { motion } from "framer-motion";
-import Editor from "@monaco-editor/react";
+import { ThemedEditor as Editor } from "@/app/components/themed-editor";
 import { Button, Badge, Tooltip } from "@rhetorica/ui";
 import { Copy, Check, Maximize2, Minimize2, Code2 } from "lucide-react";
 import { cn } from "@rhetorica/ui";
@@ -29,22 +29,22 @@ export function SQLEditor({ sql, engine = "SQL", className }: SQLEditorProps) {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
       className={cn(
-        "border border-[#2a3752] rounded-xl overflow-hidden bg-[#0a1221]",
+        "border border-border-strong rounded-xl overflow-hidden bg-code",
         className
       )}
     >
-      <div className="flex items-center justify-between px-3 py-2 border-b border-[#24324d] bg-[#0d1424]">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-surface">
         <div className="flex items-center gap-2">
-          <Code2 className="h-4 w-4 text-[#7484a3]" />
-          <span className="text-xs font-medium text-[#a9b8d4] uppercase tracking-wider">
-            Generated SQL
+          <Code2 className="h-4 w-4 text-muted" />
+          <span className="text-xs font-medium text-secondary uppercase tracking-wider">
+            Сформированный SQL
           </span>
           <Badge variant="info" className="ml-2">
             {engine}
           </Badge>
         </div>
         <div className="flex items-center gap-2">
-          <Tooltip content={copied ? "Copied!" : "Copy SQL"} side="top">
+          <Tooltip content={copied ? "Скопировано!" : "Копировать SQL"} side="top">
             <Button
               variant="ghost"
               size="icon"
@@ -52,13 +52,13 @@ export function SQLEditor({ sql, engine = "SQL", className }: SQLEditorProps) {
               className="h-8 w-8"
             >
               {copied ? (
-                <Check className="h-4 w-4 text-[#38c67d]" />
+                <Check className="h-4 w-4 text-success" />
               ) : (
                 <Copy className="h-4 w-4" />
               )}
             </Button>
           </Tooltip>
-          <Tooltip content={isExpanded ? "Collapse" : "Expand"} side="top">
+          <Tooltip content={isExpanded ? "Свернуть" : "Развернуть"} side="top">
             <Button
               variant="ghost"
               size="icon"
@@ -77,8 +77,8 @@ export function SQLEditor({ sql, engine = "SQL", className }: SQLEditorProps) {
       <div className={cn(isExpanded ? "h-96" : "h-48")}>
         <Editor
           language="sql"
-          value={sql || "-- No SQL generated yet"}
-          theme="vs-dark"
+          value={sql || "-- SQL-запрос ещё не сформирован"}
+
           options={{
             readOnly: true,
             minimap: { enabled: false },

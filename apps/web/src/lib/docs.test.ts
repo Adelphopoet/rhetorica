@@ -16,45 +16,45 @@ describe("docs loader", () => {
   });
 
   it("loads docs pages from the repository docs tree", async () => {
-    const page = await getDocsPage(["architecture", "architecture"]);
+    const page = await getDocsPage(["rhetorica", "dlya-polzovatelya", "quick-start"]);
 
     expect(page).not.toBeNull();
-    expect(page?.sourcePath).toMatch(/docs\/architecture\/architecture\.md$/);
-    expect(page?.markdown).toContain("](/docs/architecture/diagrams/layers)");
-    expect(page?.markdown).toContain("](/docs/architecture/diagrams/query_lifecycle)");
+    expect(page?.sourcePath).toMatch(/docs\/rhetorica\/dlya-polzovatelya\/quick-start\/index\.md$/);
+    expect(page?.markdown).toContain("## 1. Войдите в систему");
   });
 
-  it("builds synthetic directory pages when a folder has no index.md", async () => {
-    const page = await getDocsPage(["architecture", "diagrams"]);
+  it("loads Docsy section pages from _index.md", async () => {
+    const page = await getDocsPage(["rhetorica", "dlya-polzovatelya"]);
 
     expect(page).not.toBeNull();
-    expect(page?.markdown).toContain("[System Layers Diagram](/docs/architecture/diagrams/layers)");
-    expect(page?.markdown).toContain("[Query Lifecycle](/docs/architecture/diagrams/query_lifecycle)");
+    expect(page?.sourcePath).toMatch(/docs\/rhetorica\/dlya-polzovatelya\/_index\.md$/);
+    expect(page?.markdown).toContain("# Для пользователя");
   });
 
   it("extracts heading metadata for docs pages", async () => {
-    const page = await getDocsPage(["architecture", "diagrams", "layers"]);
+    const page = await getDocsPage(["rhetorica", "dlya-polzovatelya", "quick-start"]);
 
     expect(page).not.toBeNull();
     expect(page?.headings[0]).toMatchObject({
       level: 1,
-      text: "System Layers Diagram",
+      text: "Быстрый старт",
     });
   });
 
   it("builds breadcrumbs and pager context from the navigation tree", async () => {
     const navItems = await getDocsNavigation();
-    const breadcrumbs = getDocsBreadcrumbs(navItems, "/docs/architecture/diagrams/layers");
-    const pager = getDocsPager(navItems, "/docs/architecture/diagrams/layers");
+    const href = "/docs/rhetorica/dlya-polzovatelya/quick-start";
+    const breadcrumbs = getDocsBreadcrumbs(navItems, href);
+    const pager = getDocsPager(navItems, href);
 
     expect(breadcrumbs.map((item) => item.title)).toEqual([
-      "Documentation",
-      "Architecture",
-      "Diagrams",
-      "System Layers Diagram",
+      "Документация",
+      "Rhetorica",
+      "Для пользователя",
+      "Быстрый старт",
     ]);
-    expect(pager.previous?.href).toBe("/docs/architecture/diagrams/bounded_contexts");
-    expect(pager.next?.href).toBe("/docs/architecture/diagrams/query_lifecycle");
-    expect(pager.parent?.href).toBe("/docs/architecture/diagrams");
+    expect(pager.previous?.href).toBe("/docs/rhetorica/dlya-polzovatelya/api-mcp");
+    expect(pager.next?.href).toBe("/docs/rhetorica/dlya-polzovatelya/results-files");
+    expect(pager.parent?.href).toBe("/docs/rhetorica/dlya-polzovatelya");
   });
 });

@@ -9,23 +9,24 @@ from rhetorica_backend.domain.chat.orchestration.runtime_execution_core import (
 )
 
 
-def test_runtime_execution_core_run_loop_delegates_to_coordination_service() -> None:
+@pytest.mark.asyncio
+async def test_runtime_execution_core_run_loop_delegates_to_coordination_service() -> None:
     runtime = object()
     transport = object()
     coordination_calls: list[tuple[object, object]] = []
+
+    async def run_runtime(**kwargs):
+        coordination_calls.append((kwargs["runtime"], kwargs["transport"]))
+        return "loop-result"
+
     core = RuntimeExecutionCore(
         session_turn_flow_service=SimpleNamespace(),
-        runtime_loop_coordination_service=SimpleNamespace(
-            run=lambda **kwargs: coordination_calls.append(
-                (kwargs["runtime"], kwargs["transport"])
-            )
-            or "loop-result"
-        ),
+        agent_runtime=SimpleNamespace(run=run_runtime),
         transport_finalization_service=SimpleNamespace(),
         transport_finalization_input_factory=SimpleNamespace(),
     )
 
-    result = core.run_loop(runtime=runtime, transport=transport)
+    result = await core.run_loop(runtime=runtime, transport=transport)
 
     assert result == "loop-result"
     assert coordination_calls == [(runtime, transport)]
@@ -40,11 +41,9 @@ def test_runtime_execution_core_execute_session_finalizes_flow() -> None:
         session_turn_flow_service=SimpleNamespace(
             run=lambda **kwargs: session_calls.append(kwargs) or "flow"
         ),
-        runtime_loop_coordination_service=SimpleNamespace(),
+        agent_runtime=SimpleNamespace(),
         transport_finalization_service=SimpleNamespace(
-            finalize=lambda **kwargs: finalize_inputs.append(
-                kwargs["finalization_input"]
-            )
+            finalize=lambda **kwargs: finalize_inputs.append(kwargs["finalization_input"])
             or "finalized"
         ),
         transport_finalization_input_factory=SimpleNamespace(
@@ -74,7 +73,7 @@ async def test_runtime_execution_core_execute_session_async_finalizes_flow() -> 
         session_turn_flow_service=SimpleNamespace(
             run_async=lambda **_kwargs: _async_value("flow-async")
         ),
-        runtime_loop_coordination_service=SimpleNamespace(),
+        agent_runtime=SimpleNamespace(),
         transport_finalization_service=SimpleNamespace(
             finalize=lambda **kwargs: f"final:{kwargs['finalization_input']}"
         ),

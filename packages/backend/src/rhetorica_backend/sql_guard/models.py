@@ -10,7 +10,7 @@ class SqlGuardPolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    row_limit: int = Field(default=5000, ge=1, le=1_000_000)
+    row_limit: int = Field(default=5000, ge=1, le=1_048_575)
     timeout_ms: int = Field(default=DEFAULT_SQL_TIMEOUT_MS, ge=100, le=900_000)
     max_concurrency: int = Field(default=4, ge=1, le=100)
 

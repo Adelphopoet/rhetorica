@@ -6,6 +6,7 @@ import type {
   ThinkingBlockEntry,
   ToolCallEntry,
 } from "./useChatStreaming";
+import { DISPLAY_TIME_ZONE_LABEL, formatInMoscow } from "@/lib/dateTime";
 
 function formatTimestampForCopy(value?: Date | string): string | null {
   if (!value) {
@@ -17,7 +18,20 @@ function formatTimestampForCopy(value?: Date | string): string | null {
     return null;
   }
 
-  return date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+  const formatted = formatInMoscow(
+    date,
+    {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    },
+    "sv-SE"
+  );
+  return formatted ? `${formatted} ${DISPLAY_TIME_ZONE_LABEL}` : null;
 }
 
 function indentBlock(value: string, spaces = 2): string {
@@ -61,10 +75,10 @@ function serializeAnalysisBlock(block: AnalysisBlock): string | null {
     ) {
       return null;
     }
-    return [`### Caveat: ${block.title}`, block.body].join("\n\n");
+    return [`### Оговорка: ${block.title}`, block.body].join("\n\n");
   }
   if (block.kind === "metric_grid") {
-    const title = block.title ? `### ${block.title}` : "### Metrics";
+    const title = block.title ? `### ${block.title}` : "### Метрики";
     const rows = block.items.map((item) => {
       const details = [item.delta, item.context].filter(Boolean).join(" · ");
       return `- ${item.label}: ${item.value}${details ? ` (${details})` : ""}`;
@@ -73,16 +87,16 @@ function serializeAnalysisBlock(block: AnalysisBlock): string | null {
   }
   if (block.kind === "chart") {
     return [
-      `### Chart: ${block.title ?? block.visualization.title ?? "Visualization"}`,
+      `### График: ${block.title ?? block.visualization.title ?? "Визуализация"}`,
       block.description ?? block.visualization.description ?? "",
       block.insight ?? block.visualization.summary ?? "",
     ].filter(Boolean).join("\n\n");
   }
   if (block.kind === "table") {
     return [
-      `### ${block.title ?? "Drilldown rows"}`,
-      block.description ?? "Raw rows are available in the inspector.",
-      `Action: ${block.action_label ?? "Show rows"}`,
+      `### ${block.title ?? "Строки детализации"}`,
+      block.description ?? "Исходные строки доступны в инспекторе",
+      `Действие: ${block.action_label ?? "Показать строки"}`,
     ].join("\n\n");
   }
   if (block.kind === "divider") {
@@ -97,8 +111,8 @@ export function serializeAnalysisDocumentForCopy(document?: AnalysisDocument | n
   }
 
   const lines = [
-    `# ${document.title?.trim() || "Analysis report"}`,
-    document.executive_summary ? `## Executive summary\n\n${document.executive_summary}` : null,
+    `# ${document.title?.trim() || "Аналитический отчёт"}`,
+    document.executive_summary ? `## Краткое резюме\n\n${document.executive_summary}` : null,
     ...document.blocks.map(serializeAnalysisBlock),
   ].filter((item): item is string => Boolean(item && item.trim().length > 0));
 
@@ -115,12 +129,12 @@ function serializeSqlSnapshotForCopy(payload?: ChatMessageViewModel["payload"]):
 
   const blocks = [
     executedSql && executedSql !== generatedSql
-      ? `## Executed SQL\n\n\`\`\`sql\n${executedSql}\n\`\`\``
+      ? `## Выполненный SQL\n\n\`\`\`sql\n${executedSql}\n\`\`\``
       : `## SQL\n\n\`\`\`sql\n${primarySql}\n\`\`\``,
   ];
 
   if (executedSql && generatedSql && executedSql !== generatedSql) {
-    blocks.push(`## Original SQL draft\n\n\`\`\`sql\n${generatedSql}\n\`\`\``);
+    blocks.push(`## Исходный черновик SQL\n\n\`\`\`sql\n${generatedSql}\n\`\`\``);
   }
 
   return blocks.join("\n\n");
@@ -200,26 +214,26 @@ export function serializeSystemRunLog(args: {
     .map((item) => {
       if (item.kind === "thinking") {
         const timestamp = formatTimestampForCopy(item.block.timestamp);
-        const header = timestamp ? `[${timestamp}] Thinking` : "Thinking";
-        return `${header}\n${indentBlock(item.block.content || "(empty block)")}`;
+        const header = timestamp ? `[${timestamp}] Ход рассуждений` : "Ход рассуждений";
+        return `${header}\n${indentBlock(item.block.content || "(пустой блок)")}`;
       }
 
       if (item.kind === "tool") {
         const timestamp = formatTimestampForCopy(item.tool.started_at ?? item.tool.completed_at);
         const header = timestamp
-          ? `[${timestamp}] Tool call: ${item.tool.tool_name}`
-          : `Tool call: ${item.tool.tool_name}`;
+          ? `[${timestamp}] Вызов инструмента: ${item.tool.tool_name}`
+          : `Вызов инструмента: ${item.tool.tool_name}`;
         const lines = [header];
         const argumentsBlock = formatToolArguments(item.tool.arguments);
 
         if (argumentsBlock) {
-          lines.push(`Arguments:\n${indentBlock(argumentsBlock, 4)}`);
+          lines.push(`Аргументы:\n${indentBlock(argumentsBlock, 4)}`);
         }
         if (item.tool.result_summary) {
-          lines.push(`Result:\n${indentBlock(item.tool.result_summary, 4)}`);
+          lines.push(`Результат:\n${indentBlock(item.tool.result_summary, 4)}`);
         }
         if (typeof item.tool.success === "boolean") {
-          lines.push(`Success: ${item.tool.success ? "yes" : "no"}`);
+          lines.push(`Успех: ${item.tool.success ? "да" : "нет"}`);
         }
 
         return lines.join("\n");
@@ -227,12 +241,12 @@ export function serializeSystemRunLog(args: {
 
       const timestamp = formatTimestampForCopy(item.status.timestamp);
       const header = timestamp
-        ? `[${timestamp}] Execution status: ${formatExecutionStatus(item.status.status)}`
-        : `Execution status: ${formatExecutionStatus(item.status.status)}`;
+        ? `[${timestamp}] Статус выполнения: ${formatExecutionStatus(item.status.status)}`
+        : `Статус выполнения: ${formatExecutionStatus(item.status.status)}`;
       const lines = [header];
 
       if (item.status.message) {
-        lines.push(`Message:\n${indentBlock(item.status.message, 4)}`);
+        lines.push(`Сообщение:\n${indentBlock(item.status.message, 4)}`);
       }
 
       return lines.join("\n");
@@ -252,7 +266,7 @@ export function serializeChatMessageForCopy(args: {
 }): string {
   const roleLabel =
     args.role === "user"
-      ? args.userLabel?.trim() || "Analyst"
+      ? args.userLabel?.trim() || "Аналитик"
       : "Rhetorica Assistant";
   const timestamp = formatTimestampForCopy(args.timestamp);
   const header = timestamp ? `[${timestamp}] ${roleLabel}` : roleLabel;
@@ -267,7 +281,7 @@ export function serializeChatMessageForCopy(args: {
     return `${header}\n\n${messageBody}`;
   }
 
-  return `${header}\n\n${messageBody}\n\nSystem run log:\n${runLog}`;
+  return `${header}\n\n${messageBody}\n\nЖурнал выполнения:\n${runLog}`;
 }
 
 export function serializeChatMessageBodyForCopy(
@@ -280,7 +294,7 @@ export function serializeChatMessageBodyForCopy(
   if (reportText) {
     return [reportText, sqlText].filter(Boolean).join("\n\n");
   }
-  return [plainText || "(empty message)", sqlText].filter(Boolean).join("\n\n");
+  return [plainText || "(пустое сообщение)", sqlText].filter(Boolean).join("\n\n");
 }
 
 export function serializeChatHistoryForCopy(
@@ -309,7 +323,7 @@ export function serializeChatHistoryForCopy(
 
 export async function copyTextToClipboard(text: string): Promise<void> {
   if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
-    throw new Error("Clipboard API is unavailable.");
+    throw new Error("API буфера обмена недоступно");
   }
 
   await navigator.clipboard.writeText(text);

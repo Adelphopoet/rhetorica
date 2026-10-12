@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from hashlib import sha256
 from uuid import uuid4
 
 from rhetorica_backend.infra.postgres.models import UserAccountOrm
@@ -15,6 +16,7 @@ BOOTSTRAP_DISPLAY_NAME = "Bootstrap Admin"
 ADMIN_ROLE = "admin"
 ANALYST_ROLE = "analyst"
 SUPPORTED_LOCAL_USER_ROLES = (ADMIN_ROLE, ANALYST_ROLE)
+SUPPORTED_EXTERNAL_USER_ROLES = (ADMIN_ROLE, ANALYST_ROLE)
 
 
 class UserAccountItem:
@@ -32,6 +34,7 @@ class UserAccountItem:
         auth_subject: str,
         email: str | None,
         display_name: str | None,
+        api_rate_limit_per_hour: int | None,
         is_bootstrap_user: bool,
         created_at: datetime,
         updated_at: datetime,
@@ -47,6 +50,7 @@ class UserAccountItem:
         self.auth_subject = auth_subject
         self.email = email
         self.display_name = display_name
+        self.api_rate_limit_per_hour = api_rate_limit_per_hour
         self.is_bootstrap_user = is_bootstrap_user
         self.created_at = created_at
         self.updated_at = updated_at
@@ -154,6 +158,11 @@ class UserAccountRepository:
             ).scalar_one_or_none()
             return self._to_domain(row) if row is not None else None
 
+    def get_by_id(self, *, user_id: str) -> UserAccountItem | None:
+        with self._db.session() as session:
+            row = session.get(UserAccountOrm, user_id)
+            return self._to_domain(row) if row is not None else None
+
     def list_by_workspace(self, *, workspace_id: str) -> list[UserAccountItem]:
         with self._db.session() as session:
             rows = session.execute(
@@ -194,6 +203,113 @@ class UserAccountRepository:
         with self._db.session() as session:
             session.add(row)
             session.commit()
+            session.refresh(row)
+            return self._to_domain(row)
+
+    def ensure_external_user(
+        self,
+        *,
+        workspace_id: str,
+        auth_provider: str,
+        auth_subject: str,
+        login: str,
+        role: str,
+        display_name: str | None = None,
+        email: str | None = None,
+        is_active: bool = True,
+    ) -> UserAccountItem:
+        if role not in SUPPORTED_EXTERNAL_USER_ROLES:
+            raise ValueError("unsupported_external_user_role")
+        normalized_login = self.normalize_login(login)
+        now = datetime.now(tz=UTC)
+        with self._db.session() as session:
+            row = session.execute(
+                select(UserAccountOrm).where(
+                    UserAccountOrm.workspace_id == workspace_id,
+                    UserAccountOrm.auth_provider == auth_provider,
+                    UserAccountOrm.auth_subject == auth_subject,
+                )
+            ).scalar_one_or_none()
+
+            if row is None:
+                login_row = session.execute(
+                    select(UserAccountOrm).where(
+                        UserAccountOrm.workspace_id == workspace_id,
+                        UserAccountOrm.login == normalized_login,
+                    )
+                ).scalar_one_or_none()
+                if login_row is not None:
+                    subject_hash = sha256(auth_subject.encode("utf-8")).hexdigest()[:12]
+                    normalized_login = f"{auth_provider}-{subject_hash}"
+                row = UserAccountOrm(
+                    workspace_id=workspace_id,
+                    login=normalized_login,
+                    password_hash=None,
+                    role=role,
+                    is_active=is_active,
+                    auth_provider=auth_provider,
+                    auth_subject=auth_subject,
+                    email=email,
+                    display_name=display_name or normalized_login,
+                    is_bootstrap_user=False,
+                    created_at=now,
+                    updated_at=now,
+                    last_seen_at=now,
+                )
+                session.add(row)
+            else:
+                row.login = normalized_login
+                row.password_hash = None
+                row.role = role
+                row.is_active = is_active
+                row.email = email
+                row.display_name = display_name or normalized_login
+                row.is_bootstrap_user = False
+                row.last_seen_at = now
+                row.updated_at = now
+
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                subject_hash = sha256(auth_subject.encode("utf-8")).hexdigest()[:12]
+                fallback_login = f"{auth_provider}-{subject_hash}"
+                row = session.execute(
+                    select(UserAccountOrm).where(
+                        UserAccountOrm.workspace_id == workspace_id,
+                        UserAccountOrm.auth_provider == auth_provider,
+                        UserAccountOrm.auth_subject == auth_subject,
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    row = UserAccountOrm(
+                        workspace_id=workspace_id,
+                        login=fallback_login,
+                        password_hash=None,
+                        role=role,
+                        is_active=is_active,
+                        auth_provider=auth_provider,
+                        auth_subject=auth_subject,
+                        email=email,
+                        display_name=display_name or fallback_login,
+                        is_bootstrap_user=False,
+                        created_at=now,
+                        updated_at=now,
+                        last_seen_at=now,
+                    )
+                    session.add(row)
+                else:
+                    row.login = fallback_login
+                    row.password_hash = None
+                    row.role = role
+                    row.is_active = is_active
+                    row.email = email
+                    row.display_name = display_name or fallback_login
+                    row.is_bootstrap_user = False
+                    row.last_seen_at = now
+                    row.updated_at = now
+                session.commit()
+
             session.refresh(row)
             return self._to_domain(row)
 
@@ -248,6 +364,30 @@ class UserAccountRepository:
             session.refresh(row)
             return self._to_domain(row)
 
+    def update_api_rate_limit(
+        self,
+        *,
+        workspace_id: str,
+        user_id: str,
+        requests_per_hour: int | None,
+    ) -> UserAccountItem | None:
+        if requests_per_hour is not None and requests_per_hour <= 0:
+            raise ValueError("api_rate_limit_must_be_positive")
+        now = datetime.now(tz=UTC)
+        with self._db.session() as session:
+            row = session.get(UserAccountOrm, user_id)
+            if (
+                row is None
+                or row.workspace_id != workspace_id
+                or row.auth_provider != LOCAL_AUTH_PROVIDER
+            ):
+                return None
+            row.api_rate_limit_per_hour = requests_per_hour
+            row.updated_at = now
+            session.commit()
+            session.refresh(row)
+            return self._to_domain(row)
+
     def touch_last_seen(self, *, user_id: str) -> UserAccountItem | None:
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
@@ -273,6 +413,7 @@ class UserAccountRepository:
             auth_subject=row.auth_subject,
             email=row.email,
             display_name=row.display_name,
+            api_rate_limit_per_hour=row.api_rate_limit_per_hour,
             is_bootstrap_user=row.is_bootstrap_user,
             created_at=row.created_at,
             updated_at=row.updated_at,

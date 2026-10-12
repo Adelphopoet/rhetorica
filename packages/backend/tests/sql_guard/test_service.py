@@ -105,6 +105,27 @@ def test_guard_allows_show_command_introspection() -> None:
     assert decision.violations == []
 
 
+def test_guard_allows_impala_show_tables_lookup() -> None:
+    decision = service.guard(
+        SqlGuardRequest(
+            sql=(
+                "SHOW TABLES IN lnd_0075_000_prd_vd_cloud "
+                "LIKE '*v_artlot_pallet_snapshot*'"
+            ),
+            dialect="hive",
+            engine="impala",
+        )
+    )
+
+    assert decision.allowed is True
+    assert decision.normalized_sql == (
+        "SHOW TABLES IN lnd_0075_000_prd_vd_cloud "
+        "LIKE '*v_artlot_pallet_snapshot*'"
+    )
+    assert decision.applied_row_limit is None
+    assert decision.violations == []
+
+
 def test_guard_blocks_non_introspection_command() -> None:
     decision = service.guard(
         SqlGuardRequest(

@@ -7,6 +7,7 @@ import { VisualizationChart, type QueryPreview, type VisualizationSpec } from "@
 import { SQLEditor } from "./sql-editor";
 import { ResultTable } from "./result-table";
 import { StatusBadge } from "./status-badge";
+import { DISPLAY_TIME_ZONE_LABEL, formatInMoscow } from "@/lib/dateTime";
 
 type ExecuteSqlResponse = {
   execution_id: string;
@@ -28,7 +29,13 @@ type ChatAskResponse = {
   claims: Array<{ claim_id: string; text: string; status: "verified" | "unverified" }>;
   evidence: Array<{
     evidence_id: string;
-    type: "execution_result" | "metadata_entity" | "rag_insight" | "confluence_page";
+    type:
+      | "execution_result"
+      | "metadata_entity"
+      | "gitlab_file"
+      | "airflow_runtime"
+      | "rag_insight"
+      | "internal_documentation";
     reference: string;
     title?: string | null;
     snippet?: string | null;
@@ -59,19 +66,20 @@ function shortenSql(sql: string): string {
 }
 
 function formatExecutionTimestamp(timestamp: string): string {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) {
-    return timestamp;
-  }
-
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(date.getUTCDate()).padStart(2, "0");
-  const hours = String(date.getUTCHours()).padStart(2, "0");
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-  const seconds = String(date.getUTCSeconds()).padStart(2, "0");
-
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} UTC`;
+  const formatted = formatInMoscow(
+    timestamp,
+    {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    },
+    "sv-SE"
+  );
+  return formatted ? `${formatted} ${DISPLAY_TIME_ZONE_LABEL}` : timestamp;
 }
 
 export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps) {
@@ -92,23 +100,23 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
     >
       <div className="panel-header">
         <div className="flex items-center gap-2">
-          <BarChart3 className="h-4 w-4 text-[#5da8ff]" />
-          <h2 className="panel-title">Execution Result</h2>
+          <BarChart3 className="h-4 w-4 text-accent" />
+          <h2 className="panel-title">Результат выполнения</h2>
         </div>
         <Badge variant="primary" className="gap-1.5">
           <Database className="h-3 w-3" />
-          {payload?.selected_database_connector ?? "Not selected"}
+          {payload?.selected_database_connector ?? "Не выбрано"}
         </Badge>
       </div>
 
       <div className="flex flex-wrap gap-2 px-4 pt-3">
         <Badge variant="info">
-          Sources: {payload?.metadata_sources.join(", ") || "-"}
+          Источники: {payload?.metadata_sources.join(", ") || "-"}
         </Badge>
         {execution ? <StatusBadge status={execution.status} /> : null}
         <Badge variant="default">
           <TableIcon className="h-3 w-3 mr-1" />
-          Rows: {execution?.row_count ?? 0}
+          Строк: {execution?.row_count ?? 0}
         </Badge>
         {execution?.duration_ms ? (
           <Badge variant="default">{execution.duration_ms}ms</Badge>
@@ -120,23 +128,23 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
           {visualization ? (
             <div className="metric-grid !mt-0 !mx-0 !mb-0">
               <div className="metric-card">
-                <div className="metric-label">Rows</div>
+                <div className="metric-label">Строк</div>
                 <div className="metric-value">{execution?.row_count ?? 0}</div>
-                <div className="metric-change text-[#9bb0d3]">guarded execution preview</div>
+                <div className="metric-change text-secondary">превью защищённого выполнения</div>
               </div>
               <div className="metric-card">
-                <div className="metric-label">Confidence</div>
+                <div className="metric-label">Уверенность</div>
                 <div className="metric-value">
                   {Math.round(visualization.confidence_score * 100)}%
                 </div>
-                <div className="metric-change text-[#9bb0d3]">{visualization.planner_mode}</div>
+                <div className="metric-change text-secondary">{visualization.planner_mode}</div>
               </div>
               <div className="metric-card">
-                <div className="metric-label">Preview</div>
+                <div className="metric-label">Превью</div>
                 <div className="metric-value">
-                  {visualization.chart_safe_on_preview ? "safe" : "limited"}
+                  {visualization.chart_safe_on_preview ? "безопасно" : "ограничено"}
                 </div>
-                <div className="metric-change text-[#9bb0d3]">
+                <div className="metric-change text-secondary">
                   {visualization.goal}
                 </div>
               </div>
@@ -147,10 +155,10 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="p-4 rounded-lg border border-[#ff6d7c]/30 bg-[#ff6d7c]/10"
+              className="p-4 rounded-lg border border-danger/30 bg-danger/10"
             >
-              <p className="text-sm text-[#ff6d7c] font-medium">Execution Error</p>
-              <p className="text-xs text-[#ff6d7c]/80 mt-1">
+              <p className="text-sm text-danger font-medium">Ошибка выполнения</p>
+              <p className="text-xs text-danger/80 mt-1">
                 {execution.error_message}
               </p>
             </motion.div>
@@ -160,10 +168,10 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="p-4 rounded-lg border border-[#f2b14b]/30 bg-[#f2b14b]/10"
+              className="p-4 rounded-lg border border-warning/30 bg-warning/10"
             >
-              <p className="text-sm text-[#f2b14b] font-medium">Warnings</p>
-              <ul className="text-xs text-[#f2b14b]/80 mt-2 space-y-1">
+              <p className="text-sm text-warning font-medium">Предупреждения</p>
+              <ul className="text-xs text-warning/80 mt-2 space-y-1">
                 {payload.warnings.map((warning, index) => (
                   <li key={index}>• {warning}</li>
                 ))}
@@ -182,24 +190,24 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
             <TabsList className="w-full flex-wrap justify-start gap-2 bg-transparent border-0 p-0">
               <TabsTrigger
                 value="table"
-                className="data-[state=active]:bg-[#5da8ff] data-[state=active]:text-white"
+                className="data-[state=active]:bg-accent data-[state=active]:text-on-accent"
               >
                 <TableIcon className="h-4 w-4 mr-1.5" />
-                Table
+                Таблица
               </TabsTrigger>
               <TabsTrigger
                 value="sql"
-                className="data-[state=active]:bg-[#5da8ff] data-[state=active]:text-white"
+                className="data-[state=active]:bg-accent data-[state=active]:text-on-accent"
                 disabled={!payload?.generated_sql}
               >
                 SQL
               </TabsTrigger>
               <TabsTrigger
                 value="evidence"
-                className="data-[state=active]:bg-[#5da8ff] data-[state=active]:text-white"
+                className="data-[state=active]:bg-accent data-[state=active]:text-on-accent"
                 disabled={!payload?.claims?.length}
               >
-                Evidence
+                Доказательства
               </TabsTrigger>
             </TabsList>
 
@@ -228,10 +236,10 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="p-4 rounded-lg border border-[#5da8ff]/25 bg-[#5da8ff]/8"
+                  className="p-4 rounded-lg border border-accent/25 bg-accent/[0.08]"
                 >
-                  <p className="text-sm text-[#9dc7ff] font-medium">Evidence</p>
-                  <ul className="mt-2 space-y-2 text-xs text-[#d7e7ff]">
+                  <p className="text-sm text-accent font-medium">Доказательства</p>
+                  <ul className="mt-2 space-y-2 text-xs text-primary">
                     {payload.claims.slice(0, 6).map((claim) => {
                       const link = payload.claim_evidence_links.find(
                         (item) => item.claim_id === claim.claim_id
@@ -243,13 +251,13 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
                         <li key={claim.claim_id} className="space-y-1">
                           <div>
                             <span className="font-medium">
-                              [{claim.status === "verified" ? "verified" : "unverified"}]
+                              [{claim.status === "verified" ? "Подтверждено" : "Не проверено"}]
                             </span>{" "}
                             {claim.text}
                           </div>
                           {linkedEvidence.length ? (
-                            <div className="text-[#9ec1f0]">
-                              sources:{" "}
+                            <div className="text-accent">
+                              источники:{" "}
                               {linkedEvidence
                                 .map((item) => `${item.type}:${item.reference}`)
                                 .join(", ")}
@@ -260,8 +268,8 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
                     })}
                   </ul>
                   {payload.uncertainty_flags?.length ? (
-                    <div className="mt-3 text-xs text-[#f2b14b]">
-                      uncertainty: {payload.uncertainty_flags.join(", ")}
+                    <div className="mt-3 text-xs text-warning">
+                      неопределённость: {payload.uncertainty_flags.join(", ")}
                     </div>
                   ) : null}
                 </motion.div>
@@ -273,10 +281,10 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="p-4 rounded-lg border border-[#5da8ff]/25 bg-[#5da8ff]/8"
+              className="p-4 rounded-lg border border-accent/25 bg-accent/[0.08]"
             >
-              <p className="text-sm text-[#9dc7ff] font-medium">Evidence</p>
-              <ul className="mt-2 space-y-2 text-xs text-[#d7e7ff]">
+              <p className="text-sm text-accent font-medium">Доказательства</p>
+              <ul className="mt-2 space-y-2 text-xs text-primary">
                 {payload.claims.slice(0, 6).map((claim) => {
                   const link = payload.claim_evidence_links.find(
                     (item) => item.claim_id === claim.claim_id
@@ -288,13 +296,13 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
                     <li key={claim.claim_id} className="space-y-1">
                       <div>
                         <span className="font-medium">
-                          [{claim.status === "verified" ? "verified" : "unverified"}]
+                          [{claim.status === "verified" ? "Подтверждено" : "Не проверено"}]
                         </span>{" "}
                         {claim.text}
                       </div>
                       {linkedEvidence.length ? (
-                        <div className="text-[#9ec1f0]">
-                          sources:{" "}
+                        <div className="text-accent">
+                          источники:{" "}
                           {linkedEvidence
                             .map((item) => `${item.type}:${item.reference}`)
                             .join(", ")}
@@ -305,8 +313,8 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
                 })}
               </ul>
               {payload.uncertainty_flags?.length ? (
-                <div className="mt-3 text-xs text-[#f2b14b]">
-                  uncertainty: {payload.uncertainty_flags.join(", ")}
+                <div className="mt-3 text-xs text-warning">
+                  неопределённость: {payload.uncertainty_flags.join(", ")}
                 </div>
               ) : null}
             </motion.div>
@@ -315,10 +323,10 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="rounded-lg border border-[#24324d] bg-[#0d1424]/80 p-4"
+            className="rounded-lg border border-border-strong bg-surface/80 p-4"
           >
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-medium text-[#d7e7ff]">Recent Executions</p>
+              <p className="text-sm font-medium text-primary">Последние выполнения</p>
               <Badge variant="default">{recentExecutions.length}</Badge>
             </div>
 
@@ -327,27 +335,27 @@ export function ResultPanel({ payload, recentExecutions = [] }: ResultPanelProps
                 recentExecutions.map((item) => (
                   <div
                     key={item.execution_id}
-                    className="rounded-lg border border-[#1f2a3f] bg-[#09111d] px-3 py-2"
+                    className="rounded-lg border border-border bg-surface px-3 py-2"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <StatusBadge status={item.status} />
-                      <span className="text-[11px] text-[#7484a3]">
+                      <span className="text-[11px] text-muted">
                         {formatExecutionTimestamp(item.updated_at)}
                       </span>
                     </div>
-                    <p className="mt-2 text-xs text-[#edf3ff]">
+                    <p className="mt-2 text-xs text-primary">
                       {shortenSql(item.submitted_sql)}
                     </p>
-                    <div className="mt-2 flex items-center gap-3 text-[11px] text-[#9bb0d3]">
+                    <div className="mt-2 flex items-center gap-3 text-[11px] text-secondary">
                       <span>id: {item.execution_id.slice(0, 8)}</span>
-                      <span>rows: {item.row_count ?? "-"}</span>
-                      <span>time: {item.duration_ms ? `${item.duration_ms}ms` : "-"}</span>
+                      <span>строк: {item.row_count ?? "-"}</span>
+                      <span>время: {item.duration_ms ? `${item.duration_ms}ms` : "-"}</span>
                     </div>
                   </div>
                 ))
               ) : (
-                <p className="text-xs text-[#7484a3]">
-                  No executions yet. Submit one and the queue lifecycle will show up here.
+                <p className="text-xs text-muted">
+                  Выполнений пока нет. Отправьте запрос — жизненный цикл очереди отобразится здесь.
                 </p>
               )}
             </div>

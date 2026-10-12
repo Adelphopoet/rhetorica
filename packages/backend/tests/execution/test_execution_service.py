@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
 
+import pytest
 from rhetorica_backend.contracts.execution import (
     EngineConnectionConfig,
     ExecuteSqlRequest,
@@ -13,8 +16,10 @@ from rhetorica_backend.domain.execution.models import (
     EngineAdapter,
     EngineRunRequest,
     EngineRunResult,
+    ResultBlockConsumer,
 )
 from rhetorica_backend.domain.execution.service import ExecutionService
+from rhetorica_backend.domain.execution.snapshots import SqlResultSnapshot
 from rhetorica_backend.infra.postgres.execution_history_repository import ExecutionHistoryRepository
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 
@@ -55,23 +60,105 @@ class _BlockingActiveExecution(_FakeActiveExecution):
         self._cancelled.set()
 
 
+class _StreamingActiveExecution(_FakeActiveExecution):
+    def fetch_streaming(
+        self,
+        *,
+        consumer: ResultBlockConsumer | None,
+        preview_row_limit: int,
+    ) -> EngineRunResult:
+        rows = [[1], [2], [3], [4]]
+        if consumer is not None:
+            consumer.start(["value"])
+            consumer.write_rows(rows[:2])
+            consumer.write_rows(rows[2:])
+        return EngineRunResult(
+            query_id=self.query_id,
+            columns=["value"],
+            rows=rows[:preview_row_limit],
+            row_count=len(rows),
+        )
+
+
+class _SnapshotCaptureStore:
+    def __init__(self) -> None:
+        self.columns: list[str] = []
+        self.rows: list[list[object]] = []
+        self.snapshot: SqlResultSnapshot | None = None
+        self.deleted: list[SqlResultSnapshot] = []
+        self._identity: dict[str, str] = {}
+
+    def begin(self, **identity: str) -> _SnapshotCaptureStore:
+        self._identity = identity
+        return self
+
+    def start(self, columns: Iterable[str]) -> None:
+        self.columns = list(columns)
+
+    def write_rows(self, rows: Iterable[Iterable[object]]) -> None:
+        self.rows.extend([list(row) for row in rows])
+
+    def finish(self, *, possibly_truncated: bool) -> SqlResultSnapshot:
+        self.snapshot = SqlResultSnapshot(
+            execution_id=self._identity["execution_id"],
+            workspace_id=self._identity["workspace_id"],
+            owner_user_id=self._identity["owner_user_id"],
+            conversation_id=self._identity["conversation_id"],
+            storage_key="memory://snapshot",
+            columns=tuple(self.columns),
+            row_count=len(self.rows),
+            size_bytes=1,
+            sha256="a" * 64,
+            possibly_truncated=possibly_truncated,
+            created_at=datetime.now(tz=UTC),
+        )
+        return self.snapshot
+
+    def abort(self) -> None:
+        return None
+
+    def iter_rows(self, snapshot: SqlResultSnapshot) -> Iterator[list[object]]:
+        del snapshot
+        yield from self.rows
+
+    def delete(self, snapshot: SqlResultSnapshot) -> None:
+        self.deleted.append(snapshot)
+
+
 class _FakeAdapter(EngineAdapter):
     def __init__(self, active_execution: ActiveExecution | None = None) -> None:
         self._active_execution = active_execution or _FakeActiveExecution()
 
-    def start(self, connection: EngineConnectionConfig, request: EngineRunRequest) -> ActiveExecution:
+    def start(
+        self, connection: EngineConnectionConfig, request: EngineRunRequest
+    ) -> ActiveExecution:
         _ = connection, request
         return self._active_execution
+
+
+class _StartupTimeoutAdapter(EngineAdapter):
+    def start(
+        self, connection: EngineConnectionConfig, request: EngineRunRequest
+    ) -> ActiveExecution:
+        _ = connection, request
+        raise TimeoutError("Impala startup timed out after 50 ms.")
 
 
 def _service(
     tmp_path: Path,
     adapter: EngineAdapter | None = None,
+    snapshot_store: _SnapshotCaptureStore | None = None,
+    preview_row_limit: int = 500,
 ) -> ExecutionService:
     db = DatabaseRuntime(f"sqlite:///{tmp_path}/exec_history.db")
     db.create_schema()
     repo = ExecutionHistoryRepository(db)
-    return ExecutionService(history_repository=repo, adapters={"clickhouse": adapter or _FakeAdapter()})
+    return ExecutionService(
+        history_repository=repo,
+        adapters={"clickhouse": adapter or _FakeAdapter()},
+        snapshot_store=snapshot_store,
+        preview_row_limit=preview_row_limit,
+    )
 
 
 def _request(sql: str) -> ExecuteSqlRequest:
@@ -129,6 +216,34 @@ def test_execute_describe_is_allowed_and_persisted(tmp_path: Path) -> None:
     assert history[0].normalized_sql == "DESCRIBE dm.ft_order"
 
 
+def test_execute_persists_failed_status_after_impala_startup_timeout(tmp_path: Path) -> None:
+    db = DatabaseRuntime(f"sqlite:///{tmp_path}/impala_timeout.db")
+    db.create_schema()
+    service = ExecutionService(
+        history_repository=ExecutionHistoryRepository(db),
+        adapters={"impala": _StartupTimeoutAdapter()},
+    )
+    request = ExecuteSqlRequest(
+        sql="DESCRIBE base_dm_v_l2.v_strg_stock_fa_d",
+        connection=EngineConnectionConfig(
+            engine="impala",
+            host="impala.local",
+            port=21050,
+            username="analyst",
+        ),
+        workspace_id="ws-impala-timeout",
+    )
+
+    response = service.execute(request)
+
+    assert response.status == "failed"
+    assert response.error_message == "Impala startup timed out after 50 ms."
+    history = service.list_history(workspace_id="ws-impala-timeout", limit=10)
+    assert len(history) == 1
+    assert history[0].status == "failed"
+    assert history[0].error_message == "Impala startup timed out after 50 ms."
+
+
 def test_prepared_execution_transitions_from_queued_to_succeeded(tmp_path: Path) -> None:
     service = _service(tmp_path)
     request = _request("SELECT 1")
@@ -169,7 +284,9 @@ def test_cancel_running_execution_marks_it_cancelled(tmp_path: Path) -> None:
     cancelled = Event()
     service = _service(
         tmp_path,
-        adapter=_FakeAdapter(active_execution=_BlockingActiveExecution(started=started, cancelled=cancelled)),
+        adapter=_FakeAdapter(
+            active_execution=_BlockingActiveExecution(started=started, cancelled=cancelled)
+        ),
     )
     request = _request("SELECT 1")
     service.create_queued_execution("exec-running-cancel", request)
@@ -219,6 +336,99 @@ def test_service_stores_actor_id_on_direct_execute(tmp_path: Path) -> None:
     history = service.list_history(workspace_id="ws-test", limit=10)
     assert len(history) == 1
     assert history[0].actor_id == "user-456"
+
+
+def test_streaming_execution_persists_full_snapshot_but_bounds_preview(
+    tmp_path: Path,
+) -> None:
+    snapshots = _SnapshotCaptureStore()
+    service = _service(
+        tmp_path,
+        adapter=_FakeAdapter(_StreamingActiveExecution()),
+        snapshot_store=snapshots,
+        preview_row_limit=2,
+    )
+    request = _request("SELECT 1")
+    request.actor_id = "user-1"
+    request.conversation_id = "conversation-1"
+
+    response = service.execute(request)
+
+    assert response.status == "succeeded"
+    assert response.row_count == 4
+    assert response.preview.rows == [[1], [2]]
+    assert snapshots.rows == [[1], [2], [3], [4]]
+    persisted = service.get_snapshot(response.execution_id)
+    assert persisted is not None
+    assert persisted.owner_user_id == "user-1"
+    assert persisted.conversation_id == "conversation-1"
+    assert persisted.row_count == 4
+
+
+@pytest.mark.parametrize("engine", ["clickhouse", "trino", "greenplum", "impala"])
+def test_streaming_snapshot_contract_is_engine_neutral(
+    tmp_path: Path,
+    engine: str,
+) -> None:
+    snapshots = _SnapshotCaptureStore()
+    db = DatabaseRuntime(f"sqlite:///{tmp_path}/{engine}_exec_history.db")
+    db.create_schema()
+    service = ExecutionService(
+        history_repository=ExecutionHistoryRepository(db),
+        adapters={engine: _FakeAdapter(_StreamingActiveExecution())},
+        snapshot_store=snapshots,
+        preview_row_limit=2,
+    )
+    request = ExecuteSqlRequest(
+        sql="SELECT 1",
+        connection=EngineConnectionConfig(
+            engine=engine,  # type: ignore[arg-type]
+            host="localhost",
+            port=8123,
+            username="test",
+            database="default",
+        ),
+        workspace_id="ws-test",
+        actor_id="user-1",
+        conversation_id="conversation-1",
+    )
+
+    response = service.execute(request)
+
+    assert response.status == "succeeded"
+    assert response.engine == engine
+    assert response.preview.rows == [[1], [2]]
+    assert snapshots.rows == [[1], [2], [3], [4]]
+    persisted = service.get_snapshot(response.execution_id)
+    assert persisted is not None
+    assert persisted.row_count == 4
+
+
+def test_snapshot_object_is_deleted_when_metadata_commit_fails(tmp_path: Path) -> None:
+    snapshots = _SnapshotCaptureStore()
+    service = _service(
+        tmp_path,
+        adapter=_FakeAdapter(_StreamingActiveExecution()),
+        snapshot_store=snapshots,
+        preview_row_limit=2,
+    )
+    original_complete = service._history_repository.complete
+
+    def fail_snapshot_commit(**kwargs: object) -> None:
+        if kwargs.get("snapshot") is not None:
+            raise RuntimeError("metadata commit failed")
+        original_complete(**kwargs)  # type: ignore[arg-type]
+
+    service._history_repository.complete = fail_snapshot_commit  # type: ignore[method-assign]
+    request = _request("SELECT 1")
+    request.actor_id = "user-1"
+    request.conversation_id = "conversation-1"
+
+    response = service.execute(request)
+
+    assert response.status == "failed"
+    assert len(snapshots.deleted) == 1
+    assert snapshots.deleted[0].execution_id == response.execution_id
 
 
 def test_list_history_filtered_by_actor_id(tmp_path: Path) -> None:

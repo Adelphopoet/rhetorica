@@ -4,6 +4,13 @@ const apiBaseUrl = process.env.RHETORICA_API_URL ?? "http://localhost:8000";
 export const WEB_SESSION_COOKIE_NAME =
   process.env.RHETORICA_SESSION_COOKIE_NAME ?? "rhetorica_session";
 
+const FORWARDED_RATE_LIMIT_HEADERS = [
+  "Retry-After",
+  "RateLimit-Limit",
+  "RateLimit-Remaining",
+  "RateLimit-Reset",
+] as const;
+
 type SessionCookieOptions = {
   httpOnly: true;
   secure: boolean;
@@ -44,4 +51,18 @@ export async function fetchBackend(path: string, init: RequestInit = {}): Promis
     headers,
     cache: init.cache ?? "no-store",
   });
+}
+
+export function backendResponseHeaders(
+  response: Response,
+  initialHeaders?: HeadersInit,
+): Headers {
+  const headers = new Headers(initialHeaders);
+  for (const name of FORWARDED_RATE_LIMIT_HEADERS) {
+    const value = response.headers.get(name);
+    if (value !== null) {
+      headers.set(name, value);
+    }
+  }
+  return headers;
 }

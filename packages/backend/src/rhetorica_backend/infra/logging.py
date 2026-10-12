@@ -10,6 +10,7 @@ from typing import Any
 
 import orjson
 import structlog
+from opentelemetry import trace
 from pydantic import BaseModel
 
 _LOGGING_CONFIGURED = False
@@ -27,6 +28,13 @@ _SENSITIVE_KEYS = {
     "token",
     "x-api-key",
 }
+_FILE_TOOL_NAMES = frozenset({
+    "list_files",
+    "inspect_file",
+    "run_file_code",
+    "publish_files",
+    "export_sql_result",
+})
 EventLogger = structlog.stdlib.BoundLogger
 
 
@@ -52,17 +60,16 @@ def configure_logging(
     render_as_json = json_logs if json_logs is not None else not sys.stderr.isatty()
 
     _STATIC_CONTEXT.clear()
-    _STATIC_CONTEXT.update(
-        {
-            "service": service_name,
-            "environment": environment,
-        }
-    )
+    _STATIC_CONTEXT.update({
+        "service": service_name,
+        "environment": environment,
+    })
 
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         _add_static_context,
+        _add_trace_context,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.ExtraAdder(),
@@ -73,74 +80,83 @@ def configure_logging(
     ]
     if dev_mode:
         shared_processors.append(
-            structlog.processors.CallsiteParameterAdder(
-                {
-                    structlog.processors.CallsiteParameter.FILENAME,
-                    structlog.processors.CallsiteParameter.FUNC_NAME,
-                    structlog.processors.CallsiteParameter.LINENO,
-                }
-            )
+            structlog.processors.CallsiteParameterAdder({
+                structlog.processors.CallsiteParameter.FILENAME,
+                structlog.processors.CallsiteParameter.FUNC_NAME,
+                structlog.processors.CallsiteParameter.LINENO,
+            })
         )
 
     renderer_processors: list[Any] = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
     ]
     if render_as_json:
-        renderer_processors.extend(
-            [
-                structlog.processors.dict_tracebacks,
-                structlog.processors.JSONRenderer(serializer=_json_serializer),
-            ]
-        )
+        renderer_processors.extend([
+            structlog.processors.ExceptionRenderer(
+                structlog.tracebacks.ExceptionDictTransformer(show_locals=False)
+            ),
+            structlog.processors.JSONRenderer(serializer=_json_serializer),
+        ])
     else:
-        renderer_processors.extend(
-            [
-                structlog.processors.format_exc_info,
-                structlog.dev.ConsoleRenderer(colors=True),
-            ]
-        )
+        renderer_processors.extend([
+            structlog.processors.format_exc_info,
+            structlog.dev.ConsoleRenderer(colors=True),
+        ])
 
-    logging.config.dictConfig(
-        {
-            "version": 1,
-            "disable_existing_loggers": False,
-            "formatters": {
-                "default": {
-                    "()": structlog.stdlib.ProcessorFormatter,
-                    "foreign_pre_chain": shared_processors,
-                    "processors": renderer_processors,
-                }
+    logging.config.dictConfig({
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "()": structlog.stdlib.ProcessorFormatter,
+                "foreign_pre_chain": shared_processors,
+                "processors": renderer_processors,
+            }
+        },
+        "handlers": {
+            "default": {
+                "class": "logging.StreamHandler",
+                "level": level,
+                "formatter": "default",
+                "stream": "ext://sys.stdout",
+            }
+        },
+        "loggers": {
+            "": {"handlers": ["default"], "level": level},
+            "uvicorn": {"handlers": ["default"], "level": level, "propagate": False},
+            "uvicorn.error": {
+                "handlers": ["default"],
+                "level": level,
+                "propagate": False,
             },
-            "handlers": {
-                "default": {
-                    "class": "logging.StreamHandler",
-                    "level": level,
-                    "formatter": "default",
-                    "stream": "ext://sys.stdout",
-                }
+            "uvicorn.access": {
+                "handlers": ["default"],
+                "level": level,
+                "propagate": False,
             },
-            "loggers": {
-                "": {"handlers": ["default"], "level": level},
-                "uvicorn": {"handlers": ["default"], "level": level, "propagate": False},
-                "uvicorn.error": {
-                    "handlers": ["default"],
-                    "level": level,
-                    "propagate": False,
-                },
-                "uvicorn.access": {
-                    "handlers": ["default"],
-                    "level": level,
-                    "propagate": False,
-                },
-                "celery": {"handlers": ["default"], "level": level, "propagate": False},
-                "sqlalchemy.engine": {
-                    "handlers": ["default"],
-                    "level": "INFO" if dev_mode else "WARNING",
-                    "propagate": False,
-                },
+            "celery": {"handlers": ["default"], "level": level, "propagate": False},
+            "sqlalchemy": {
+                "handlers": ["default"],
+                "level": "WARNING",
+                "propagate": False,
             },
-        }
-    )
+            "sqlalchemy.engine": {
+                "handlers": ["default"],
+                "level": "WARNING",
+                "propagate": False,
+            },
+            "sqlalchemy.pool": {
+                "handlers": ["default"],
+                "level": "WARNING",
+                "propagate": False,
+            },
+            "sqlalchemy.orm": {
+                "handlers": ["default"],
+                "level": "WARNING",
+                "propagate": False,
+            },
+        },
+    })
 
     structlog.configure(
         processors=[
@@ -156,7 +172,9 @@ def configure_logging(
 
 
 def get_logger(name: str | None = None, **fields: Any) -> EventLogger:
-    logger = structlog.stdlib.get_logger(name) if name is not None else structlog.stdlib.get_logger()
+    logger = (
+        structlog.stdlib.get_logger(name) if name is not None else structlog.stdlib.get_logger()
+    )
     return bind_logger(logger, **fields)
 
 
@@ -185,6 +203,7 @@ def emit_stdout_event(event: str, **fields: Any) -> None:
         "event": event,
         **_STATIC_CONTEXT,
         **sanitize_for_logging(fields),
+        **_trace_context_fields(),
         "timestamp": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
     }
     sys.stdout.write(_json_serializer(payload) + "\n")
@@ -206,6 +225,37 @@ def sanitize_for_logging(
         depth=0,
         field_name=None,
     )
+
+
+def sanitize_tool_arguments_for_logging(
+    tool_name: str | None,
+    arguments: Mapping[str, Any] | None,
+) -> Any:
+    """Never emit executable code while retaining bounded tool diagnostics."""
+    if not isinstance(arguments, Mapping):
+        return sanitize_for_logging(arguments)
+    if tool_name not in _FILE_TOOL_NAMES:
+        return sanitize_for_logging(arguments)
+    safe_arguments = dict(arguments)
+    code = safe_arguments.pop("code", None)
+    if isinstance(code, str):
+        safe_arguments["code_chars"] = len(code)
+    return sanitize_for_logging(safe_arguments)
+
+
+def llm_payload_contains_file_tools(payload: Mapping[str, Any]) -> bool:
+    """Detect payloads whose request or response may contain private file data."""
+    tools = payload.get("tools")
+    if not isinstance(tools, Sequence) or isinstance(tools, str | bytes):
+        return False
+    for item in tools:
+        if not isinstance(item, Mapping):
+            continue
+        function = item.get("function")
+        name = function.get("name") if isinstance(function, Mapping) else item.get("name")
+        if name in _FILE_TOOL_NAMES:
+            return True
+    return False
 
 
 def llm_content_logging_enabled(
@@ -258,6 +308,7 @@ def summarize_llm_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "model": payload.get("model"),
         "temperature": payload.get("temperature"),
         "max_tokens": payload.get("max_tokens"),
+        "max_completion_tokens": payload.get("max_completion_tokens"),
         "tool_choice": payload.get("tool_choice"),
         "response_format": sanitize_for_logging(payload.get("response_format")),
         "messages": summarize_llm_messages(payload.get("messages")),
@@ -273,13 +324,11 @@ def summarize_llm_response(body: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(item, Mapping):
                 continue
             message = item.get("message")
-            choice_items.append(
-                {
-                    "finish_reason": item.get("finish_reason"),
-                    "index": item.get("index"),
-                    "message": summarize_llm_message(message),
-                }
-            )
+            choice_items.append({
+                "finish_reason": item.get("finish_reason"),
+                "index": item.get("index"),
+                "message": summarize_llm_message(message),
+            })
     return {
         "id": body.get("id"),
         "model": body.get("model"),
@@ -323,13 +372,11 @@ def summarize_llm_tools(value: Any) -> list[dict[str, Any]]:
         function = item.get("function")
         if isinstance(function, Mapping):
             arguments = function.get("arguments")
-            tools.append(
-                {
-                    "name": function.get("name"),
-                    "arguments_chars": _content_length(arguments),
-                    "arguments_sha256": _content_hash(arguments),
-                }
-            )
+            tools.append({
+                "name": function.get("name"),
+                "arguments_chars": _content_length(arguments),
+                "arguments_sha256": _content_hash(arguments),
+            })
             continue
         tools.append(sanitize_for_logging(item))
     return tools
@@ -343,6 +390,26 @@ def _add_static_context(
     for key, value in _STATIC_CONTEXT.items():
         event_dict.setdefault(key, value)
     return event_dict
+
+
+def _add_trace_context(
+    _: Any,
+    __: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    for key, value in _trace_context_fields().items():
+        event_dict.setdefault(key, value)
+    return event_dict
+
+
+def _trace_context_fields() -> dict[str, str]:
+    span_context = trace.get_current_span().get_span_context()
+    if not span_context.is_valid:
+        return {}
+    return {
+        "trace_id": format(span_context.trace_id, "032x"),
+        "span_id": format(span_context.span_id, "016x"),
+    }
 
 
 def _sanitize_event_dict(
@@ -460,4 +527,8 @@ def _content_hash(value: Any) -> str | None:
 
 
 def _json_serializer(value: Any, **_: Any) -> str:
-    return orjson.dumps(value, option=orjson.OPT_NON_STR_KEYS).decode("utf-8")
+    return orjson.dumps(
+        value,
+        default=lambda item: f"<{type(item).__name__}>",
+        option=orjson.OPT_NON_STR_KEYS,
+    ).decode("utf-8")

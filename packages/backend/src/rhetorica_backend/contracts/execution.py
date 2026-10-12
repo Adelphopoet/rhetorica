@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rhetorica_backend.sql_guard.models import SqlGuardPolicy, SqlGuardViolation
 
 EngineType = Literal["clickhouse", "trino", "greenplum", "impala"]
+EngineScalarSetting = str | int | float | bool
+EngineExtraSetting = EngineScalarSetting | dict[str, EngineScalarSetting]
+EngineExtraCredentialValue = Annotated[str, Field(min_length=1, max_length=4096)] | None
 ExecutionStatus = Literal[
     "queued",
     "running",
@@ -29,16 +32,47 @@ class EngineConnectionConfig(BaseModel):
     port: int = Field(ge=1, le=65535)
     username: str
     password: str | None = None
+    usage_description: str | None = Field(default=None, max_length=1000)
     database: str | None = None
     catalog: str | None = None
     schema_name: str | None = Field(default=None, alias="schema")
     secure: bool = False
     verify: bool = True
-    extra_settings: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    extra_settings: dict[str, EngineExtraSetting] = Field(default_factory=dict)
+    extra_credentials: dict[str, EngineExtraCredentialValue] | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+    @field_validator("extra_credentials")
+    @classmethod
+    def _normalize_extra_credentials(
+        cls,
+        value: dict[str, EngineExtraCredentialValue] | None,
+    ) -> dict[str, EngineExtraCredentialValue] | None:
+        if value is None:
+            return None
+        normalized: dict[str, EngineExtraCredentialValue] = {}
+        for raw_name, secret in value.items():
+            name = raw_name.strip()
+            if not name or len(name) > 255:
+                raise ValueError("extra_credential_name_invalid")
+            if name in normalized:
+                raise ValueError("extra_credential_name_duplicate")
+            normalized[name] = secret
+        return normalized
+
+    @model_validator(mode="after")
+    def _extra_credentials_require_trino(self) -> EngineConnectionConfig:
+        if self.engine != "trino" and self.extra_credentials:
+            raise ValueError("extra_credentials_require_trino")
+        return self
 
     def redacted_dict(self) -> dict[str, Any]:
         data = self.model_dump(mode="json", by_alias=True)
         data.pop("password", None)
+        if data.get("extra_credentials") is not None:
+            data["extra_credentials"] = dict.fromkeys(data["extra_credentials"])
         return data
 
 
@@ -62,6 +96,7 @@ class ExecuteSqlRequest(BaseModel):
     policy: SqlGuardPolicy = Field(default_factory=SqlGuardPolicy)
     workspace_id: str = Field(default="default", min_length=1)
     actor_id: str | None = None
+    conversation_id: str | None = None
 
 
 class ExternalSqlExecutionRequest(BaseModel):

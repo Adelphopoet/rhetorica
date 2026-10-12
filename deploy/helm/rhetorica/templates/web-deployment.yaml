@@ -13,6 +13,8 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "rhetorica.labels" . | nindent 8 }}
         app.kubernetes.io/component: web
@@ -21,6 +23,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "rhetorica.tolerations" (dict "root" . "component" .Values.web) | nindent 6 }}
       containers:
         - name: web
           image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"
@@ -33,12 +36,30 @@ spec:
                 name: {{ include "rhetorica.fullname" . }}-config
             - secretRef:
                 name: {{ include "rhetorica.fullname" . }}-secret
-          {{- with .Values.web.env }}
+          {{- if or .Values.web.env (and .Values.extraCa.existingConfigMap .Values.extraCa.nodeExtraCaCertsFile) }}
           env:
+            {{- with .Values.web.env }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if and .Values.extraCa.existingConfigMap .Values.extraCa.nodeExtraCaCertsFile }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ printf "%s/%s" .Values.extraCa.mountPath .Values.extraCa.nodeExtraCaCertsFile | quote }}
+            {{- end }}
           {{- end }}
           {{- with .Values.web.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if .Values.extraCa.existingConfigMap }}
+          volumeMounts:
+            - name: extra-ca-certs
+              mountPath: {{ .Values.extraCa.mountPath | quote }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.extraCa.existingConfigMap }}
+      volumes:
+        - name: extra-ca-certs
+          configMap:
+            name: {{ .Values.extraCa.existingConfigMap }}
+      {{- end }}
 {{- end }}

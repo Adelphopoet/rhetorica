@@ -29,7 +29,7 @@ install_extra_cas
 
 UV_RUN_ARGS=""
 if [ "${RHETORICA_SYNC_ON_START:-true}" = "true" ]; then
-  uv sync --all-packages --all-extras
+  uv sync --package rhetorica-worker --all-extras
 else
   UV_RUN_ARGS="--no-sync"
 fi
@@ -42,12 +42,19 @@ else
 fi
 
 # Start the worker
+if [ "${RHETORICA_WORKER_KIND:-celery}" = "scenarios" ]; then
+  exec uv run $UV_RUN_ARGS python -m rhetorica_worker.runtime.scenarios
+fi
+
 echo "Starting worker..."
 export WORKER_APP_ENV="${WORKER_APP_ENV:-dev}"
 export LOG_LEVEL="${LOG_LEVEL:-DEBUG}"
 export LOG_LLM_CONTENT="${LOG_LLM_CONTENT:-true}"
 
 CELERY_WORKER_ARGS=""
+if [ "${CELERY_BEAT_ENABLED:-true}" = "true" ]; then
+  CELERY_WORKER_ARGS="$CELERY_WORKER_ARGS --beat"
+fi
 if [ -n "${CELERY_WORKER_CONCURRENCY:-}" ]; then
   case "$CELERY_WORKER_CONCURRENCY" in
     *[!0-9]*)

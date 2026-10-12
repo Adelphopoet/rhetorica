@@ -13,6 +13,8 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "rhetorica.labels" . | nindent 8 }}
         app.kubernetes.io/component: worker
@@ -21,21 +23,69 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "rhetorica.tolerations" (dict "root" . "component" .Values.worker) | nindent 6 }}
+      {{- with .Values.worker.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: worker
           image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
           imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          {{- with .Values.worker.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "rhetorica.fullname" . }}-config
             - secretRef:
                 name: {{ include "rhetorica.fullname" . }}-secret
-          {{- with .Values.worker.env }}
-          env:
+            {{- with .Values.worker.extraEnvFrom }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.database.existingSecret .Values.worker.env }}
+          env:
+            {{- if .Values.database.existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: {{ .Values.database.urlKey | quote }}
+            {{- end }}
+            {{- with .Values.worker.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- with .Values.worker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          volumeMounts:
+            - name: worker-tmp
+              mountPath: /tmp
+          {{- if .Values.database.caConfigMap }}
+            - name: database-ca
+              mountPath: {{ .Values.database.caMountPath | quote }}
+              readOnly: true
+          {{- end }}
+          {{- if .Values.extraCa.existingConfigMap }}
+            - name: extra-ca-certs
+              mountPath: {{ .Values.extraCa.mountPath | quote }}
+              readOnly: true
+          {{- end }}
+      volumes:
+        - name: worker-tmp
+          emptyDir:
+            sizeLimit: {{ .Values.worker.tempSizeLimit | quote }}
+      {{- if .Values.database.caConfigMap }}
+        - name: database-ca
+          configMap:
+            name: {{ .Values.database.caConfigMap | quote }}
+      {{- end }}
+      {{- if .Values.extraCa.existingConfigMap }}
+        - name: extra-ca-certs
+          configMap:
+            name: {{ .Values.extraCa.existingConfigMap }}
+      {{- end }}
 {{- end }}

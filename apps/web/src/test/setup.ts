@@ -1,7 +1,9 @@
 import "@testing-library/jest-dom/vitest";
 import { createElement, type ReactNode } from "react";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
+
+configure({ asyncUtilTimeout: 5_000 });
 
 afterEach(() => {
   cleanup();
@@ -9,6 +11,7 @@ afterEach(() => {
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
 }));
 
 vi.mock("next/link", () => ({
@@ -40,6 +43,31 @@ if (typeof window !== "undefined") {
   Object.defineProperty(window, "scrollTo", {
     writable: true,
     value: () => undefined,
+  });
+}
+
+const localStorageMock = (() => {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, String(value)),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+    key: (index: number) => [...store.keys()][index] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
+})();
+
+if (typeof window !== "undefined") {
+  Object.defineProperty(window, "localStorage", {
+    writable: true,
+    value: localStorageMock,
+  });
+  Object.defineProperty(globalThis, "localStorage", {
+    writable: true,
+    value: localStorageMock,
   });
 }
 

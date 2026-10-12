@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchBackend } from "@/lib/backendAuth";
+import { backendResponseHeaders, fetchBackend } from "@/lib/backendAuth";
 
 export async function GET(request: NextRequest) {
   try {
@@ -18,21 +18,21 @@ export async function GET(request: NextRequest) {
           status: response.status,
           body: body.slice(0, 500),
         },
-        { status: response.status }
+        { status: response.status, headers: backendResponseHeaders(response) }
       );
     }
 
     return new NextResponse(body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch (error) {
     return NextResponse.json(
       {
         error: "chat_conversations_proxy_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: error instanceof Error ? error.message : "Неизвестная ошибка",
       },
       { status: 500 }
     );
@@ -57,21 +57,21 @@ export async function POST(request: Request) {
           status: response.status,
           body: body.slice(0, 500),
         },
-        { status: response.status }
+        { status: response.status, headers: backendResponseHeaders(response) }
       );
     }
 
     return new NextResponse(body, {
       status: response.status,
-      headers: {
+      headers: backendResponseHeaders(response, {
         "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      },
+      }),
     });
   } catch (error) {
     return NextResponse.json(
       {
         error: "chat_conversation_create_proxy_failed",
-        message: error instanceof Error ? error.message : "Unknown error",
+        message: error instanceof Error ? error.message : "Неизвестная ошибка",
       },
       { status: 500 }
     );

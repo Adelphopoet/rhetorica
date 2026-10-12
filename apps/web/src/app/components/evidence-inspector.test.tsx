@@ -10,12 +10,15 @@ vi.mock("lucide-react", () => ({
   Database: () => <span data-testid="database-icon">Database</span>,
   BookOpen: () => <span data-testid="book-icon">BookOpen</span>,
   ExternalLink: () => <span data-testid="external-link-icon">ExternalLink</span>,
+  Gitlab: () => <span data-testid="gitlab-icon">Gitlab</span>,
   AlertTriangle: () => <span data-testid="alert-icon">AlertTriangle</span>,
   CheckCircle: () => <span data-testid="check-icon">CheckCircle</span>,
   ChevronDown: () => <span data-testid="chevron-down">ChevronDown</span>,
   ChevronUp: () => <span data-testid="chevron-up">ChevronUp</span>,
   Copy: () => <span data-testid="copy-icon">Copy</span>,
+  Search: () => <span data-testid="search-icon">Search</span>,
   Sparkles: () => <span data-testid="sparkles-icon">Sparkles</span>,
+  Ticket: () => <span data-testid="ticket-icon">Ticket</span>,
   Info: () => <span data-testid="info-icon">Info</span>,
   AlertCircle: () => <span data-testid="alert-circle-icon">AlertCircle</span>,
   X: () => <span data-testid="close-icon">X</span>,
@@ -24,7 +27,7 @@ vi.mock("lucide-react", () => ({
 describe("EvidenceInspector", () => {
   const mockClaim: AnswerClaim = {
     claim_id: "claim-1",
-    text: "The total revenue increased by 15% in Q4 2024.",
+    text: "The total revenue increased by 15% in Q4 2024",
     status: "verified",
   };
 
@@ -64,7 +67,7 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      expect(screen.queryByText(/Evidence Inspector/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Инспектор доказательств/i)).not.toBeInTheDocument();
     });
 
     it("renders sheet when open with claim and evidence", () => {
@@ -77,7 +80,7 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      expect(screen.getByText(/Evidence Inspector/i)).toBeInTheDocument();
+      expect(screen.getByText(/Инспектор доказательств/i)).toBeInTheDocument();
       expect(screen.getByText(mockClaim.text)).toBeInTheDocument();
     });
 
@@ -91,7 +94,7 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      expect(screen.getByRole("heading", { name: /Evidence Inspector/i })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: /Инспектор доказательств/i })).toBeInTheDocument();
     });
 
     it("shows empty state when no claim is selected", () => {
@@ -104,7 +107,7 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      expect(screen.getByText(/Select a claim to view its evidence/i)).toBeInTheDocument();
+      expect(screen.getByText(/Выберите утверждение, чтобы посмотреть его доказательства/i)).toBeInTheDocument();
     });
   });
 
@@ -137,7 +140,7 @@ describe("EvidenceInspector", () => {
 
       const dbIcons = screen.getAllByTestId("database-icon");
       expect(dbIcons.length).toBeGreaterThan(0);
-      expect(screen.getByText("Metadata model")).toBeInTheDocument();
+      expect(screen.getByText("Модель метаданных")).toBeInTheDocument();
     });
 
     it("renders rag_insight type with BookOpen icon", () => {
@@ -161,15 +164,15 @@ describe("EvidenceInspector", () => {
 
       const bookIcons = screen.getAllByTestId("book-icon");
       expect(bookIcons.length).toBeGreaterThan(0);
-      expect(screen.getByText("Knowledge snippet")).toBeInTheDocument();
+      expect(screen.getByText("Фрагмент базы знаний")).toBeInTheDocument();
     });
 
-    it("renders confluence_page type with ExternalLink icon", () => {
-      const confluenceEvidence: AnswerEvidence = {
+    it("renders internal documentation with BookOpen icon", () => {
+      const documentationEvidence: AnswerEvidence = {
         evidence_id: "ev-conf",
-        type: "confluence_page",
-        reference: "https://confluence.example.com/page/123",
-        title: "Confluence Documentation",
+        type: "internal_documentation",
+        reference: "https://docs.example.com/page/123",
+        title: "Internal Documentation",
         snippet: "Documentation content",
         status: "verified",
       };
@@ -179,14 +182,37 @@ describe("EvidenceInspector", () => {
           open={true}
           onClose={mockOnClose}
           claim={mockClaim}
-          evidence={[confluenceEvidence]}
+          evidence={[documentationEvidence]}
         />
       );
 
-      // There are multiple ExternalLink icons (one for the evidence item, one for the link)
-      const linkIcons = screen.getAllByTestId("external-link-icon");
-      expect(linkIcons.length).toBeGreaterThanOrEqual(1);
-      expect(screen.getByText("Confluence")).toBeInTheDocument();
+      expect(screen.getByText("Документация")).toBeInTheDocument();
+    });
+
+    it("renders GitLab evidence with its source label", () => {
+      const sourceEvidence: AnswerEvidence[] = [
+        {
+          evidence_id: "ev-gitlab",
+          type: "gitlab_file",
+          reference: "https://gitlab.example.com/group/project/-/blob/main/file.yml",
+          title: "file.yml",
+          snippet: "users: {}",
+          status: "verified",
+        },
+      ];
+
+      render(
+        <EvidenceInspector
+          open={true}
+          onClose={mockOnClose}
+          claim={mockClaim}
+          evidence={sourceEvidence}
+        />
+      );
+
+      expect(screen.getByTestId("gitlab-icon")).toBeInTheDocument();
+      expect(screen.getByText("Файл GitLab")).toBeInTheDocument();
+      expect(screen.queryByText("Неизвестно")).not.toBeInTheDocument();
     });
   });
 
@@ -279,15 +305,15 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      expect(screen.getByText("Metadata unavailable")).toBeInTheDocument();
+      expect(screen.getByText("Метаданные недоступны")).toBeInTheDocument();
     });
 
     it("displays clickable reference link for URLs", () => {
       const evidenceWithUrl: AnswerEvidence = {
         evidence_id: "ev-url",
-        type: "confluence_page",
-        reference: "https://confluence.example.com/page/123",
-        title: "Confluence Page",
+        type: "internal_documentation",
+        reference: "https://docs.example.com/page/123",
+        title: "Documentation Page",
         status: "verified",
       };
 
@@ -301,9 +327,9 @@ describe("EvidenceInspector", () => {
       );
 
       const link = screen.getByRole("link", {
-        name: /confluence\.example\.com/i,
+        name: /docs\.example\.com/i,
       });
-      expect(link).toHaveAttribute("href", "https://confluence.example.com/page/123");
+      expect(link).toHaveAttribute("href", "https://docs.example.com/page/123");
       expect(link).toHaveAttribute("target", "_blank");
     });
 
@@ -332,9 +358,9 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      expect(screen.getByText("No evidence linked")).toBeInTheDocument();
+      expect(screen.getByText("Доказательства не привязаны")).toBeInTheDocument();
       expect(
-        screen.getByText(/This claim has no associated evidence items/i)
+        screen.getByText(/У этого утверждения нет связанных доказательств/i)
       ).toBeInTheDocument();
     });
   });
@@ -350,7 +376,7 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      const closeButton = screen.getByRole("button", { name: /close panel/i });
+      const closeButton = screen.getByRole("button", { name: /закрыть панель/i });
       fireEvent.click(closeButton);
 
       expect(mockOnClose).toHaveBeenCalledTimes(1);
@@ -369,6 +395,8 @@ describe("EvidenceInspector", () => {
       // The backdrop is a motion.div, need to find it differently
       const backdrop = document.querySelector('[class*="fixed inset-0"]');
       if (backdrop) {
+        fireEvent.pointerDown(backdrop);
+        fireEvent.pointerUp(backdrop);
         fireEvent.click(backdrop);
       }
 
@@ -388,7 +416,7 @@ describe("EvidenceInspector", () => {
       );
 
       // Should show "Expand" button
-      expect(screen.getByText("Expand")).toBeInTheDocument();
+      expect(screen.getByText("Раскрыть")).toBeInTheDocument();
     });
 
     it("expands SQL preview when expand button is clicked", () => {
@@ -401,11 +429,11 @@ describe("EvidenceInspector", () => {
         />
       );
 
-      const expandButton = screen.getByText("Expand");
+      const expandButton = screen.getByText("Раскрыть");
       fireEvent.click(expandButton);
 
       // Should now show Collapse button
-      expect(screen.getByText("Collapse")).toBeInTheDocument();
+      expect(screen.getByText("Свернуть")).toBeInTheDocument();
       // The SQL code block (pre tag) should be visible in the expandable section
       const preElements = document.querySelectorAll("pre");
       expect(preElements.length).toBeGreaterThan(0);
@@ -422,16 +450,16 @@ describe("EvidenceInspector", () => {
       );
 
       // First expand
-      fireEvent.click(screen.getByText("Expand"));
+      fireEvent.click(screen.getByText("Раскрыть"));
 
       // Then collapse
-      fireEvent.click(screen.getByText("Collapse"));
+      fireEvent.click(screen.getByText("Свернуть"));
 
       // SQL code block (pre tag) should be hidden in the expandable section
       // Note: The blockquote still shows the snippet as the evidence description
       const preElements = document.querySelectorAll("pre");
       const visiblePre = Array.from(preElements).find(
-        (pre) => pre.closest('[class*="rounded-lg border border-[#22314d]"]')
+        (pre) => pre.closest('[class*="rounded-lg border border-border-strong"]')
       );
       expect(visiblePre).toBeUndefined();
     });

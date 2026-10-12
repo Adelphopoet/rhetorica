@@ -1,0 +1,16 @@
+{{- if and .Values.namespaceControls.roleBinding.enabled .Values.namespaceControls.roleBinding.subjectName }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.namespaceControls.roleBinding.name }}
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+subjects:
+  - kind: {{ .Values.namespaceControls.roleBinding.subjectKind }}
+    name: {{ .Values.namespaceControls.roleBinding.subjectName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: {{ .Values.namespaceControls.roleBinding.roleKind }}
+  name: {{ .Values.namespaceControls.roleBinding.roleName | quote }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

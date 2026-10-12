@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { init, setPlatformAPI } from "echarts";
+import { getChartColors } from "./chartTheme";
 
 import {
   buildChartOption,
@@ -11,6 +13,9 @@ import type { QueryPreview, VisualizationKind, VisualizationSpec } from "./types
 
 type AxisLabelWithFormatter = {
   formatter?: (value: string | number) => string;
+};
+type TooltipWithFormatter = {
+  formatter?: (params: unknown) => string;
 };
 
 const preview = {
@@ -28,8 +33,8 @@ const spec: VisualizationSpec = {
   kind: "line",
   goal: "trend",
   title: "GMV over Day",
-  summary: "Peak gmv is $1,400.00 at 2026-03-02.",
-  description: "Trend view built from the execution preview.",
+  summary: "Peak gmv is $1,400.00 at 2026-03-02",
+  description: "Trend view built from the execution preview",
   planner_mode: "rule_fallback",
   confidence_score: 0.84,
   chart_safe_on_preview: true,
@@ -77,7 +82,7 @@ const spec: VisualizationSpec = {
   ],
   warnings: [],
   rationale: {
-    why_kind: "Detected time column with metric.",
+    why_kind: "Detected time column with metric",
     why_fields: ["day as x", "gmv as y"],
   },
 };
@@ -137,8 +142,8 @@ describe("buildChartOption", () => {
   });
 
   it("summarizes preview coverage and warnings for trust UX", () => {
-    expect(summarizePreviewCoverage(spec)).toBe("3 rows visualized from 3 available.");
-    expect(humanizeWarning("preview_truncated")).toContain("truncated");
+    expect(summarizePreviewCoverage(spec)).toBe("Показано строк: 3 из 3 доступных");
+    expect(humanizeWarning("preview_truncated")).toContain("Предпросмотр усечён");
   });
 
   it.each([
@@ -161,11 +166,28 @@ describe("buildChartOption", () => {
   ] satisfies Array<[VisualizationKind, QueryPreview, Partial<VisualizationSpec["encoding"]>, string]>)(
     "renders %s payloads",
     (kind, chartPreview, encoding, expectedSeriesType) => {
-      const option = buildChartOption(chartSpec(kind, encoding), chartPreview);
-
-      expect(option).not.toBeNull();
-      const series = Array.isArray(option?.series) ? option.series : [option?.series];
-      expect(series[0]).toMatchObject({ type: expectedSeriesType });
+      const originalPreview = structuredClone(chartPreview);
+      const chart = chartSpec(kind, encoding);
+      const dark = buildChartOption(chart, chartPreview, "dark");
+      const light = buildChartOption(chart, chartPreview, "light");
+      for (const option of [dark, light]) {
+        expect(option).not.toBeNull();
+        const series = Array.isArray(option?.series) ? option.series : [option?.series];
+        expect(series[0]).toMatchObject({ type: expectedSeriesType });
+      }
+      expect(light).toMatchObject({ backgroundColor: "#ffffff", darkMode: false, textStyle: { color: "#17243b" }, tooltip: { backgroundColor: "rgba(255, 255, 255, 0.97)", textStyle: { color: "#17243b" } } });
+      expect(dark).toMatchObject({ backgroundColor: "#0c1220", darkMode: true, textStyle: { color: "#edf3ff" } });
+      expect(JSON.stringify(light?.dataset)).toEqual(JSON.stringify(dark?.dataset));
+      const lightSeries = Array.isArray(light?.series) ? light.series : [light?.series];
+      const darkSeries = Array.isArray(dark?.series) ? dark.series : [dark?.series];
+      expect(lightSeries.map(series => series && "encode" in series ? series.encode : undefined)).toEqual(darkSeries.map(series => series && "encode" in series ? series.encode : undefined));
+      if (kind === "treemap") {
+        expect(lightSeries[0]).toMatchObject({ label: { color: getChartColors("light").insideLabel } });
+        expect(darkSeries[0]).toMatchObject({ label: { color: getChartColors("dark").insideLabel } });
+      }
+      expect(chartPreview).toEqual(originalPreview);
+      // Prevent a dark palette leaking into any of the supported light renderers.
+      expect(JSON.stringify(light)).not.toMatch(/#0c1220|#9bb0d3|#24324d|#0b1d33/);
     },
   );
 
@@ -186,6 +208,37 @@ describe("buildChartOption", () => {
     expect(option?.dataset).toMatchObject([{ source: [{ country: "RU", orders: 25 }, { country: "DE", orders: 7 }] }]);
   });
 
+  it("uses each combo series metric in the tooltip", () => {
+    const chartPreview = {
+      columns: ["day", "total_revenue", "orders_count"],
+      rows: [["2026-05-24", 68271.31, 29]],
+    };
+    const option = buildChartOption(
+      chartSpec("combo_line_bar", { x: "day", y: ["total_revenue", "orders_count"] }),
+      chartPreview,
+    );
+    const formatter = (option?.tooltip as TooltipWithFormatter | undefined)?.formatter;
+
+    const tooltip = formatter?.([
+      {
+        data: { day: "2026-05-24", total_revenue: 68271.31, orders_count: 29 },
+        dimensionNames: chartPreview.columns,
+        encode: { x: [0], y: [1] },
+        seriesName: "total_revenue",
+      },
+      {
+        data: { day: "2026-05-24", total_revenue: 68271.31, orders_count: 29 },
+        dimensionNames: chartPreview.columns,
+        encode: { x: [0], y: [2] },
+        seriesName: "orders_count",
+      },
+    ]);
+
+    expect(tooltip).toContain("total_revenue");
+    expect(tooltip).toContain("orders_count");
+    expect(tooltip).toContain("29");
+  });
+
   it("reports deterministic fallback reasons for debug telemetry", () => {
     const unsafe = chartSpec("line", { x: "missing", y: ["gmv"] });
 
@@ -197,4 +250,27 @@ describe("buildChartOption", () => {
       ),
     ).toContain("truncated_preview");
   });
+  it("retains real ECharts zoom and hidden series when applying the light palette", () => {
+    // SVG SSR exercises the real option merge and renderer without a browser or GPU.
+    setPlatformAPI({ measureText: text => ({ width: String(text).length * 7 }) });
+    const chart = init(null, undefined, { renderer: "svg", ssr: true, width: 800, height: 400 });
+    const payload = chartSpec("line", { x: "day", y: ["gmv"], series: "segment" }, { transform: { ...spec.transform, limit: 200 } });
+    const data: QueryPreview = { columns: ["day", "gmv", "segment"], rows: Array.from({ length: 120 }, (_, index) => [new Date(Date.UTC(2026, 0, Math.floor(index / 2) + 1)).toISOString(), index + 10, index % 2 ? "B" : "A"]) };
+    try {
+      chart.setOption(buildChartOption(payload, data, "dark")!, { notMerge: true });
+      chart.dispatchAction({ type: "dataZoom", dataZoomIndex: 0, start: 20, end: 80 });
+      chart.dispatchAction({ type: "legendUnSelect", name: "A" });
+      chart.setOption(buildChartOption(payload, data, "light")!, { notMerge: false });
+      const option = chart.getOption();
+      expect(option.dataZoom).toEqual(expect.arrayContaining([expect.objectContaining({ start: 20, end: 80 })]));
+      expect(option.legend).toEqual(expect.arrayContaining([expect.objectContaining({ selected: expect.objectContaining({ A: false }) })]));
+      const svg = chart.renderToSVGString();
+      expect(svg).toContain('fill="#ffffff"');
+      expect(svg).not.toContain('fill="#edf3ff"');
+      expect(svg).toContain("B");
+    } finally {
+      chart.dispose();
+    }
+  });
+
 });

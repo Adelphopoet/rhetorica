@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, type ChangeEvent } from "react";
-import { Badge, Button, Input, Tabs, TabsList, TabsTrigger } from "@rhetorica/ui";
+import { Badge, Button, Input, Spinner, Tabs, TabsList, TabsTrigger } from "@rhetorica/ui";
 import {
   Archive,
   BookOpenText,
@@ -19,6 +19,10 @@ type ScenarioCatalogProps = {
   scenarios: ScenarioDefinition[];
   loading: boolean;
   runningScenarioId: string | null;
+  launchingScenarioId: string | null;
+  authoringTarget: "create" | "edit" | null;
+  authoringPending: boolean;
+  runDisabled: boolean;
   saving: boolean;
   archivingScenarioId: string | null;
   onRunScenario: (
@@ -86,6 +90,7 @@ function hasMissingRequiredInputs(
   scenario: ScenarioDefinition,
   inputs: Record<string, unknown>
 ): boolean {
+  if (scenario.execution_kind === "workflow") return false;
   const required = new Set(scenario.input_schema.required ?? []);
   if (required.size === 0) {
     return false;
@@ -117,6 +122,10 @@ export function ScenarioCatalog({
   scenarios,
   loading,
   runningScenarioId,
+  launchingScenarioId,
+  authoringTarget,
+  authoringPending,
+  runDisabled,
   saving,
   archivingScenarioId,
   onRunScenario,
@@ -163,40 +172,43 @@ export function ScenarioCatalog({
   const runBlockedByMissingInputs = selectedScenario
     ? hasMissingRequiredInputs(selectedScenario, selectedInputs)
     : true;
+  const scenarioRunBusyId = launchingScenarioId ?? runningScenarioId;
+  const createPending = authoringPending && authoringTarget === "create";
+  const editPending = authoringPending && authoringTarget === "edit";
 
   return (
     <section
       className={[
-        "flex h-full min-h-0 w-full flex-col rounded-[28px] border border-[#20304b] bg-[radial-gradient(circle_at_top_left,rgba(91,168,255,0.14),transparent_26%),linear-gradient(180deg,rgba(10,18,31,0.98),rgba(8,13,24,0.98))] p-4 md:p-5",
+        "flex h-full min-h-0 w-full flex-col rounded-[28px] border border-border-strong bg-[radial-gradient(circle_at_top_left,rgb(var(--color-accent)/0.14),transparent_26%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] p-4 md:p-5",
         className ?? "",
       ].join(" ")}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-3">
-            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[#335784] bg-[#0d1a2d] text-[#9fd0ff] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-accent-border bg-elevated text-accent shadow-[inset_0_1px_0_rgb(var(--color-highlight)/0.05)]">
               <Sparkles className="h-5 w-5" />
             </span>
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#8ebcff]">
-                Scenario catalog
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent">
+                Каталог сценариев
               </p>
-              <h3 className="mt-1 text-base font-semibold text-[#eef4ff]">
-                Quick launch for repeatable asks
+              <h3 className="mt-1 text-base font-semibold text-primary">
+                Быстрый запуск повторяющихся запросов
               </h3>
             </div>
           </div>
-          <p className="mt-3 max-w-3xl text-sm leading-6 text-[#9eb1cf]">
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-secondary">
             Выбирай готовый сценарий, подставляй параметры и запускай его в основной чат без ручного
             копипаста.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="info" className="px-3 py-1">
-            {officialScenarios.length} official
+            {officialScenarios.length} официальных
           </Badge>
           <Badge variant="info" className="px-3 py-1">
-            {personalScenarios.length} personal
+            {personalScenarios.length} личных
           </Badge>
         </div>
       </div>
@@ -210,11 +222,11 @@ export function ScenarioCatalog({
           <TabsList className="justify-start">
             <TabsTrigger value="official" className="gap-2">
               <BookOpenText className="h-4 w-4" />
-              Official
+              Официальные
             </TabsTrigger>
             <TabsTrigger value="personal" className="gap-2">
               <Shapes className="h-4 w-4" />
-              My scenarios
+              Мои сценарии
             </TabsTrigger>
           </TabsList>
         </Tabs>
@@ -222,10 +234,10 @@ export function ScenarioCatalog({
         <div className="flex flex-1 flex-wrap items-center justify-end gap-2">
           <div className="min-w-[220px] flex-1 sm:max-w-[320px]">
             <Input
-              aria-label="Search scenarios"
+              aria-label="Поиск сценариев"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Search scenarios"
+              placeholder="Поиск сценариев"
               icon={<Search className="h-4 w-4" />}
             />
           </div>
@@ -237,11 +249,12 @@ export function ScenarioCatalog({
                 size="sm"
                 variant="ghost"
                 onClick={onCreateScenario}
-                disabled={saving}
-                className="gap-2 border border-[#24344f] bg-[#0b1322] text-[#d7e6ff] hover:bg-[#132033]"
+                isLoading={createPending}
+                disabled={saving || editPending}
+                className="gap-2 border border-border-strong bg-surface text-primary hover:bg-elevated"
               >
-                <Plus className="h-4 w-4" />
-                New
+                {createPending ? null : <Plus className="h-4 w-4" />}
+                {createPending ? "Открываю редактор…" : "Создать"}
               </Button>
               {selectedScenario?.scope === "personal" ? (
                 <>
@@ -250,22 +263,24 @@ export function ScenarioCatalog({
                     size="sm"
                     variant="ghost"
                     onClick={() => onEditScenario(selectedScenario)}
-                    disabled={saving}
-                    className="gap-2 border border-[#24344f] bg-[#0b1322] text-[#d7e6ff] hover:bg-[#132033]"
+                    isLoading={editPending}
+                    disabled={saving || createPending}
+                    className="gap-2 border border-border-strong bg-surface text-primary hover:bg-elevated"
                   >
-                    <Pencil className="h-4 w-4" />
-                    Edit
+                    {editPending ? null : <Pencil className="h-4 w-4" />}
+                    {editPending ? "Открываю редактор…" : "Изменить"}
                   </Button>
                   <Button
                     type="button"
                     size="sm"
                     variant="ghost"
                     onClick={() => onArchiveScenario(selectedScenario.id)}
-                    disabled={archivingScenarioId === selectedScenario.id}
-                    className="gap-2 border border-[#3a2630] bg-[#170d13] text-[#ffb2bb] hover:bg-[#24121a]"
+                    isLoading={archivingScenarioId === selectedScenario.id}
+                    disabled={createPending || editPending}
+                    className="gap-2 border border-purple-border bg-purple-subtle text-danger hover:bg-purple-subtle"
                   >
-                    <Archive className="h-4 w-4" />
-                    {archivingScenarioId === selectedScenario.id ? "Archiving..." : "Archive"}
+                    {archivingScenarioId === selectedScenario.id ? null : <Archive className="h-4 w-4" />}
+                    {archivingScenarioId === selectedScenario.id ? "Архивирование…" : "В архив"}
                   </Button>
                 </>
               ) : null}
@@ -275,18 +290,19 @@ export function ScenarioCatalog({
       </div>
 
       {loading ? (
-        <div className="mt-4 rounded-2xl border border-dashed border-[#22324d] bg-[#09111f]/75 p-4 text-sm text-[#8ea3c5]">
-          Loading scenarios...
+        <div role="status" className="mt-4 flex items-center gap-2 rounded-2xl border border-dashed border-border-strong bg-surface/75 p-4 text-sm text-secondary">
+          <Spinner size="md" className="text-secondary" />
+          Загружаю сценарии…
         </div>
       ) : null}
 
       {!loading && visibleScenarios.length === 0 ? (
-        <div className="mt-4 rounded-2xl border border-dashed border-[#22324d] bg-[#09111f]/75 p-4 text-sm text-[#8ea3c5]">
+        <div className="mt-4 rounded-2xl border border-dashed border-border-strong bg-surface/75 p-4 text-sm text-secondary">
           {searchQuery.trim()
-            ? "Nothing matched that filter."
+            ? "По фильтру ничего не найдено"
             : tab === "official"
-              ? "Official scenarios will show up here once they are published."
-              : "Create your first personal scenario to speed up recurring asks."}
+              ? "Официальные сценарии появятся здесь после публикации"
+              : "Создайте первый личный сценарий, чтобы ускорить повторяющиеся запросы"}
         </div>
       ) : null}
 
@@ -303,7 +319,9 @@ export function ScenarioCatalog({
               const cardRunPrompt = renderScenarioPrompt(scenario, scenarioInputs);
               const cardRunDisabled =
                 scenario.status === "archived" ||
-                runningScenarioId === scenario.id ||
+                (scenario.execution_kind === "workflow" && scenario.status !== "published") ||
+                scenarioRunBusyId === scenario.id ||
+                runDisabled ||
                 cardRunBlockedByMissingInputs;
 
               return (
@@ -313,6 +331,7 @@ export function ScenarioCatalog({
                   tabIndex={0}
                   onClick={() => setSelectedScenarioId(scenario.id)}
                   onKeyDown={(event) => {
+                    if (event.target !== event.currentTarget) return;
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       setSelectedScenarioId(scenario.id);
@@ -320,38 +339,37 @@ export function ScenarioCatalog({
                   }}
                   className={`w-full rounded-[22px] border p-4 text-left transition ${
                     selected
-                      ? "border-[#5da8ff] bg-[#10203a] shadow-[0_18px_48px_rgba(15,42,82,0.35)]"
-                      : "border-[#1d2b43] bg-[#0a1322] hover:border-[#355078] hover:bg-[#0f192b]"
+                      ? "border-accent bg-elevated shadow-[0_18px_48px_rgb(var(--color-shadow)/calc(0.35*var(--shadow-opacity-scale)))]"
+                      : "border-border bg-surface hover:border-border-strong hover:bg-elevated"
                   }`}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-semibold text-[#eef4ff]">{scenario.title}</p>
+                        <p className="text-sm font-semibold text-primary">{scenario.title}</p>
                         <Badge variant={statusVariant(scenario.status)}>{scenario.status}</Badge>
                       </div>
-                      <p className="mt-2 text-sm leading-6 text-[#9eb1cf]">{scenario.summary}</p>
+                      <p className="mt-2 text-sm leading-6 text-secondary">{scenario.summary}</p>
                     </div>
-                    <span className="rounded-full border border-[#22324d] px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-[#86a0c7]">
+                    <span className="rounded-full border border-border-strong px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-secondary">
                       v{scenario.version}
                     </span>
                   </div>
 
-                  <div className="mt-4 flex items-center justify-between gap-3 border-t border-[#1d2b43] pt-3">
-                    <span className="text-xs text-[#7f93b4]">
+                  <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
+                    <span className="text-xs text-secondary">
                       {(scenario.input_schema.required ?? []).length > 0
-                        ? `${(scenario.input_schema.required ?? []).length} required input${
-                            (scenario.input_schema.required ?? []).length > 1 ? "s" : ""
-                          }`
-                        : "Ready to run"}
+                        ? `Обязательные параметры: ${(scenario.input_schema.required ?? []).length}`
+                        : "Готов к запуску"}
                     </span>
                     <Button
                       type="button"
                       size="sm"
                       variant="primary"
-                      aria-label={`Run ${scenario.title}`}
+                      aria-label={scenario.execution_kind === "workflow" ? `К запуску ${scenario.title}` : `Запустить сценарий ${scenario.title}`}
+                      isLoading={scenarioRunBusyId === scenario.id}
                       disabled={cardRunDisabled}
-                      className="gap-2 rounded-xl px-4 shadow-[0_12px_30px_rgba(37,99,235,0.28)]"
+                      className="gap-2 rounded-xl px-4 shadow-[0_12px_30px_rgb(var(--color-accent)/0.28)]"
                       onClick={(event) => {
                         event.stopPropagation();
                         setSelectedScenarioId(scenario.id);
@@ -361,8 +379,8 @@ export function ScenarioCatalog({
                         onRunScenario(scenario.id, scenarioInputs, cardRunPrompt);
                       }}
                     >
-                      <Play className="h-4 w-4" />
-                      {runningScenarioId === scenario.id ? "Running..." : "Run now"}
+                      {scenarioRunBusyId === scenario.id ? null : <Play className="h-4 w-4" />}
+                      {scenarioRunBusyId === scenario.id ? "Открываю запуск…" : scenario.execution_kind === "workflow" ? "К запуску" : "Запустить"}
                     </Button>
                   </div>
                 </div>
@@ -371,31 +389,31 @@ export function ScenarioCatalog({
           </div>
 
           {selectedScenario ? (
-            <div className="min-h-0 overflow-y-auto rounded-[24px] border border-[#1d2b43] bg-[linear-gradient(180deg,rgba(11,18,32,0.98),rgba(8,13,24,0.98))] p-4 pb-6 shadow-[0_18px_56px_rgba(0,0,0,0.3)]">
+            <div className="min-h-0 overflow-y-auto rounded-[24px] border border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] p-4 pb-6 shadow-[0_18px_56px_rgb(var(--color-shadow)/calc(0.3*var(--shadow-opacity-scale)))]">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-lg font-semibold text-[#eef4ff]">{selectedScenario.title}</h3>
+                    <h3 className="text-lg font-semibold text-primary">{selectedScenario.title}</h3>
                     <Badge variant={statusVariant(selectedScenario.status)}>{selectedScenario.status}</Badge>
                   </div>
-                  <p className="mt-2 text-sm leading-6 text-[#9eb1cf]">{selectedScenario.description}</p>
+                  <p className="mt-2 text-sm leading-6 text-secondary">{selectedScenario.description}</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="info">v{selectedScenario.version}</Badge>
                   <Badge variant="info">
-                    {selectedScenario.tool_policy.allow_run_sql ? "SQL on" : "SQL off"}
+                    {selectedScenario.execution_kind === "workflow" ? "Сценарий" : selectedScenario.tool_policy.allow_run_sql ? "SQL включён" : "SQL выключен"}
                   </Badge>
                 </div>
               </div>
 
-              {schemaProperties(selectedScenario).length > 0 ? (
-                <div className="mt-4 rounded-2xl border border-[#1f2a3f] bg-[#07101d] p-3 md:p-4">
+              {selectedScenario.execution_kind !== "workflow" && schemaProperties(selectedScenario).length > 0 ? (
+                <div className="mt-4 rounded-2xl border border-border bg-surface p-3 md:p-4">
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#687d9e]">
-                      Parameters
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-muted">
+                      Параметры
                     </p>
-                    <span className="text-xs text-[#7f93b4]">
-                      {(selectedScenario.input_schema.required ?? []).length} required
+                    <span className="text-xs text-secondary">
+                      Обязательных: {(selectedScenario.input_schema.required ?? []).length}
                     </span>
                   </div>
 
@@ -411,7 +429,7 @@ export function ScenarioCatalog({
                         return (
                           <label
                             key={name}
-                            className="flex min-h-10 items-center justify-between rounded-xl border border-[#22324d] bg-[#09111f]/75 px-4 py-2 text-sm text-[#d7e6ff]"
+                            className="flex min-h-10 items-center justify-between rounded-xl border border-border-strong bg-surface/75 px-4 py-2 text-sm text-primary"
                           >
                             <span>{title}</span>
                             <input
@@ -434,7 +452,7 @@ export function ScenarioCatalog({
                       if (options) {
                         return (
                           <label key={name} className="block text-sm">
-                            <span className="mb-1.5 block font-medium text-[#a9b8d4]">
+                            <span className="mb-1.5 block font-medium text-secondary">
                               {title} {isRequired ? "*" : ""}
                             </span>
                             <select
@@ -448,9 +466,9 @@ export function ScenarioCatalog({
                                   },
                                 }))
                               }
-                              className="flex h-10 w-full rounded-lg border border-[#2e3d59] bg-[#090e1a] px-3 py-2 text-sm text-[#edf3ff] focus:outline-none focus:ring-2 focus:ring-[#5da8ff]"
+                              className="flex h-10 w-full rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-primary focus:outline-none focus:ring-2 focus:ring-accent"
                             >
-                              <option value="">Select...</option>
+                              <option value="">Выберите…</option>
                               {options.map((option) => (
                                 <option key={String(option)} value={String(option)}>
                                   {String(option)}
@@ -489,36 +507,42 @@ export function ScenarioCatalog({
                 </div>
               ) : null}
 
-              <div className="mt-4 rounded-2xl border border-[#22324d] bg-[#09111f]/75 p-4">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#86a0c7]">
-                  Rendered prompt preview
+              {selectedScenario.execution_kind === "workflow" ? <div className="mt-4 rounded-2xl border border-cyan-border/60 bg-cyan-subtle/20 p-4">
+                <p className="text-sm font-medium text-cyan">{selectedScenario.status === "published" ? "Настройте запуск" : "Сначала опубликуйте сценарий"}</p>
+                <p className="mt-2 text-sm leading-6 text-muted">{selectedScenario.status === "published" ? "На следующем экране вы выберете версию, заполните параметры и прикрепите файлы. После запуска здесь же откроются прогресс и результаты" : "Откройте редактор, проверьте шаги и опубликуйте готовую версию"}</p>
+              </div> : <div className="mt-4 rounded-2xl border border-border-strong bg-surface/75 p-4">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-secondary">
+                  Предпросмотр сформированного запроса
                 </p>
-                <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[12px] leading-6 text-[#d8e6ff]">
+                <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[12px] leading-6 text-primary">
                   {runPrompt}
                 </pre>
-              </div>
+              </div>}
 
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                <div className="text-xs text-[#7f93b4]">
-                  {runBlockedByMissingInputs
-                    ? "Fill all required fields to run this scenario."
-                    : "Scenario is ready to launch into the main chat flow."}
+                <div className="text-xs text-secondary">
+                  {selectedScenario.execution_kind === "workflow" ? "Параметры заполняются один раз — на странице запуска" : runBlockedByMissingInputs
+                    ? "Заполните все обязательные поля, чтобы запустить сценарий"
+                    : "Сценарий готов к запуску в основном чате"}
                 </div>
                 <Button
                   type="button"
                   variant="primary"
                   size="sm"
-                  aria-label="Run scenario"
+                  aria-label={selectedScenario.execution_kind === "workflow" ? "К запуску сценария" : "Запустить сценарий"}
+                  isLoading={scenarioRunBusyId === selectedScenario.id}
                   disabled={
                     selectedScenario.status === "archived" ||
-                    runningScenarioId === selectedScenario.id ||
+                    (selectedScenario.execution_kind === "workflow" && selectedScenario.status !== "published") ||
+                    scenarioRunBusyId === selectedScenario.id ||
+                    runDisabled ||
                     runBlockedByMissingInputs
                   }
                   onClick={() => onRunScenario(selectedScenario.id, selectedInputs, runPrompt)}
-                  className="gap-2 rounded-xl px-5 shadow-[0_16px_34px_rgba(37,99,235,0.34)]"
+                  className="gap-2 rounded-xl px-5 shadow-[0_16px_34px_rgb(var(--color-accent)/0.34)]"
                 >
-                  <Play className="h-4 w-4" />
-                  {runningScenarioId === selectedScenario.id ? "Running..." : "Run scenario"}
+                  {scenarioRunBusyId === selectedScenario.id ? null : <Play className="h-4 w-4" />}
+                  {scenarioRunBusyId === selectedScenario.id ? "Открываю запуск…" : selectedScenario.execution_kind === "workflow" ? "К запуску" : "Запустить сценарий"}
                 </Button>
               </div>
             </div>

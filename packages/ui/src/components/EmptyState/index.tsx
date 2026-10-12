@@ -20,18 +20,18 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        "flex flex-col items-start gap-4 rounded-[24px] border border-dashed border-[#31415f] bg-[linear-gradient(180deg,rgba(10,16,29,0.9),rgba(8,12,22,0.96))] p-6 text-left",
+        "flex flex-col items-start gap-4 rounded-[24px] border border-dashed border-border-strong bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.9),rgb(var(--color-surface)/0.96))] p-6 text-left",
         className
       )}
     >
       {icon ? (
-        <div className="inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-[#24344f] bg-[#0b1322] text-[#8fb9ff]">
+        <div className="inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-border-strong bg-surface text-accent">
           {icon}
         </div>
       ) : null}
       <div className="space-y-1.5">
-        <h3 className="text-base font-semibold text-[#eef4ff]">{title}</h3>
-        {description ? <p className="text-sm leading-6 text-[#8ea3c5]">{description}</p> : null}
+        <h3 className="text-base font-semibold text-primary">{title}</h3>
+        {description ? <p className="text-sm leading-6 text-secondary">{description}</p> : null}
       </div>
       {action ? <div>{action}</div> : null}
     </div>

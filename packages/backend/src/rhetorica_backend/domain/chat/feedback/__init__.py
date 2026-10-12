@@ -11,6 +11,11 @@ from rhetorica_backend.domain.chat.feedback.repair_turn_service import (
     RepairPromptComponents,
     RepairTurnService,
 )
+from rhetorica_backend.domain.chat.feedback.review_priority import (
+    LangfuseReviewPriority,
+    ReviewPriorityEvidence,
+    ReviewPriorityPolicy,
+)
 
 __all__ = [
     "FeedbackContext",
@@ -18,6 +23,9 @@ __all__ = [
     "FeedbackPolicy",
     "FeedbackRoutingAction",
     "FeedbackRoutingDecision",
+    "LangfuseReviewPriority",
     "RepairPromptComponents",
     "RepairTurnService",
+    "ReviewPriorityEvidence",
+    "ReviewPriorityPolicy",
 ]

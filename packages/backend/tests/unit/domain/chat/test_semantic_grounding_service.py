@@ -12,7 +12,7 @@ class TestBuildSemanticGroundingPayload:
     def _make_table(self, fqn: str, relevance_score: float = 50.0, **kwargs) -> TableContext:
         """Helper to create TableContext for tests."""
         return TableContext(
-            source="openmetadata",
+            source="mcp",
             fqn=fqn,
             columns=["col1", "col2"],
             description="Test table",
@@ -141,7 +141,7 @@ class TestIsSuspiciousTable:
     def test_suspicious_scope_in_fqn(self):
         """Table with suspicious scope token in fqn is flagged."""
         table = TableContext(
-            source="openmetadata",
+            source="mcp",
             fqn="clickhouse.analytics.sandbox.temp_sales",
             columns=["col1"],
         )
@@ -150,7 +150,7 @@ class TestIsSuspiciousTable:
     def test_clean_table_not_flagged(self):
         """Clean table without suspicious tokens is not flagged."""
         table = TableContext(
-            source="openmetadata",
+            source="mcp",
             fqn="clickhouse.analytics.dm.sales_orders",
             columns=["col1"],
         )
@@ -163,7 +163,7 @@ class TestSemanticReasonCodes:
     def test_governance_signals_recognized(self):
         """Tables with governance attributes get governance_strength reason code."""
         table = TableContext(
-            source="openmetadata",
+            source="mcp",
             fqn="svc.db.schema.governed_table",
             columns=["col1"],
             certification="Certification.Gold",
@@ -179,7 +179,7 @@ class TestSemanticReasonCodes:
     def test_business_layer_preference_recognized(self):
         """Tables matched on business_schema get business_layer_preference reason code."""
         table = TableContext(
-            source="openmetadata",
+            source="mcp",
             fqn="svc.db.schema.table",
             columns=["col1"],
             matched_on=["name_exact", "business_schema"],

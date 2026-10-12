@@ -12,21 +12,31 @@ from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import websockets
-from rhetorica_backend.contracts.admin_integrations import MattermostConnectorItem
+from rhetorica_backend.contracts.admin_integrations import (
+    LlmConnectionConfig,
+    MattermostConnectorItem,
+)
+from rhetorica_backend.contracts.chat import ChatAskRequest, ChatAskResponse
+from rhetorica_backend.domain.chat.llm import LlmClient
 from rhetorica_backend.domain.chat.mattermost import (
+    MattermostAmbientDecisionService,
     MattermostPostEvent,
     MattermostTransportService,
 )
 from rhetorica_backend.infra.logging import get_logger
 from rhetorica_backend.infra.mattermost import MattermostClient
+from rhetorica_backend.infra.postgres.agent_repository import AgentProfileRepository
 from rhetorica_backend.infra.postgres.chat_repository import ChatRepository
+from rhetorica_backend.infra.postgres.llm_connector_repository import LlmConnectorRepository
 from rhetorica_backend.infra.postgres.mattermost_connector_repository import (
     MattermostConnectorRepository,
 )
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.user_repository import UserAccountRepository
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from rhetorica_api.app.agent_runtime import resolve_agent_for_chat
 from rhetorica_api.app.chat_runtime import get_chat_service_factory
 from rhetorica_api.app.settings import settings
 
@@ -159,8 +169,11 @@ class MattermostListenerSupervisor:
         self._runtime.create_schema()
         self._repository = MattermostConnectorRepository(db=self._runtime)
         self._chat_repository = ChatRepository(db=self._runtime)
+        self._agent_repository = AgentProfileRepository(db=self._runtime)
+        self._llm_repository = LlmConnectorRepository(db=self._runtime)
+        self._user_repository = UserAccountRepository(db=self._runtime)
         self._tasks: dict[str, asyncio.Task] = {}
-        self._fingerprints: dict[str, tuple[str, str | None, str | None, bool]] = {}
+        self._fingerprints: dict[str, tuple[object, ...]] = {}
         self._stopping = asyncio.Event()
         self._sync_task: asyncio.Task | None = None
 
@@ -332,13 +345,76 @@ class MattermostListenerSupervisor:
         return MattermostTransportService(
             chat_repository=self._chat_repository,
             mattermost_repository=self._repository,
-            ask_chat=orchestrator.ask,
+            ask_chat=lambda request: self._ask_chat_with_agent_resolution(
+                request=request,
+                ask_chat=orchestrator.ask,
+            ),
             mattermost_client_factory=lambda item: MattermostClient(
                 base_url=item.connection.base_url,
                 token=item.connection.bot_token or "",
                 verify_tls=item.connection.verify_tls,
             ),
+            ambient_decision_service=self._build_ambient_decision_service(connector),
         )
+
+    def _build_ambient_decision_service(
+        self,
+        connector: MattermostConnectorItem,
+    ) -> MattermostAmbientDecisionService | None:
+        if not connector.connection.ambient_listen_enabled:
+            return None
+        connection, _agent_prompt = self._resolve_decision_llm_connection(connector)
+        if connection is None:
+            return None
+        return MattermostAmbientDecisionService(
+            llm_connection=connection,
+            llm_client_factory=LlmClient,
+        )
+
+    def _resolve_decision_llm_connection(
+        self,
+        connector: MattermostConnectorItem,
+    ) -> tuple[LlmConnectionConfig | None, str | None]:
+        llm_connector_name = None
+        agent_prompt = None
+        if connector.agent_id:
+            current_user = self._user_repository.ensure_bootstrap_user(connector.workspace_id)
+            agent = self._agent_repository.get(
+                agent_id=connector.agent_id,
+                workspace_id=connector.workspace_id,
+                current_user_id=current_user.id,
+                active_only=True,
+            )
+            if agent is not None:
+                llm_connector_name = agent.llm_connector_name
+                agent_prompt = agent.admin_prompt
+        return (
+            self._llm_repository.get_connection(
+                workspace_id=connector.workspace_id,
+                name=llm_connector_name,
+            ),
+            agent_prompt,
+        )
+
+    def _ask_chat_with_agent_resolution(
+        self,
+        *,
+        request: ChatAskRequest,
+        ask_chat: Callable[[ChatAskRequest], ChatAskResponse],
+    ) -> ChatAskResponse:
+        current_user = self._user_repository.ensure_bootstrap_user(request.workspace_id)
+        existing_conversation = None
+        if request.conversation_id is not None:
+            existing_conversation = self._chat_repository.get_conversation(
+                request.conversation_id,
+            )
+        resolved_request, _agent = resolve_agent_for_chat(
+            request=request,
+            agent_repository=self._agent_repository,
+            current_user_id=current_user.id,
+            existing_conversation=existing_conversation,
+        )
+        return ask_chat(resolved_request)
 
 
 def _websocket_url(base_url: str) -> str:
@@ -356,12 +432,17 @@ def _websocket_connect_kwargs(connector: MattermostConnectorItem) -> dict[str, A
 
 def _connector_fingerprint(
     connector: MattermostConnectorItem,
-) -> tuple[str, str | None, str | None, bool]:
+) -> tuple[object, ...]:
     return (
         connector.connection.base_url,
         connector.connection.bot_token,
         connector.connection.bot_username,
         connector.connection.verify_tls,
+        connector.connection.send_sql_enabled,
+        connector.connection.ambient_listen_enabled,
+        tuple(connector.connection.ambient_channel_ids),
+        connector.connection.ambient_decision_prompt,
+        connector.agent_id,
     )
 
 

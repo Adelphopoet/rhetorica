@@ -1,0 +1,143 @@
+{{- if .Values.infra.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-infra
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infra
+spec:
+  replicas: 1
+  # These containers share ReadWriteOnce volumes and must not overlap.
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: infra
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "rhetorica.labels" . | nindent 8 }}
+        app.kubernetes.io/component: infra
+    spec:
+      {{- include "rhetorica.tolerations" (dict "root" . "component" .Values.infra) | nindent 6 }}
+      containers:
+        {{- if .Values.infra.temporal.enabled }}
+        {{- include "rhetorica.embeddedTemporal" . | nindent 8 }}
+        {{- end }}
+        - name: postgres
+          image: {{ .Values.infra.postgres.image | quote }}
+          imagePullPolicy: {{ .Values.infra.imagePullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.infra.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.infra.postgres.username | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.infra.postgres.password | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - {{ .Values.infra.postgres.username | quote }}
+                - -d
+                - {{ .Values.infra.postgres.database | quote }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.infra.postgres.resources | nindent 12 }}
+        - name: redis
+          image: {{ .Values.infra.redis.image | quote }}
+          imagePullPolicy: {{ .Values.infra.imagePullPolicy }}
+          args:
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+          ports:
+            - name: redis
+              containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.infra.redis.resources | nindent 12 }}
+        - name: qdrant
+          image: {{ .Values.infra.qdrant.image | quote }}
+          imagePullPolicy: {{ .Values.infra.imagePullPolicy }}
+          ports:
+            - name: qdrant
+              containerPort: 6333
+          volumeMounts:
+            - name: qdrant-data
+              mountPath: /qdrant/storage
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: qdrant
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.infra.qdrant.resources | nindent 12 }}
+        - name: minio
+          image: {{ .Values.infra.minio.image | quote }}
+          imagePullPolicy: {{ .Values.infra.imagePullPolicy }}
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          ports:
+            - name: minio
+              containerPort: 9000
+            - name: minio-console
+              containerPort: 9001
+          env:
+            - name: MINIO_ROOT_USER
+              value: {{ .Values.infra.minio.rootUser | quote }}
+            - name: MINIO_ROOT_PASSWORD
+              value: {{ .Values.infra.minio.rootPassword | quote }}
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: minio
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.infra.minio.resources | nindent 12 }}
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: {{ include "rhetorica.fullname" . }}-postgres
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: {{ include "rhetorica.fullname" . }}-redis
+        - name: qdrant-data
+          persistentVolumeClaim:
+            claimName: {{ include "rhetorica.fullname" . }}-qdrant
+        - name: minio-data
+          persistentVolumeClaim:
+            claimName: {{ include "rhetorica.fullname" . }}-minio
+{{- end }}

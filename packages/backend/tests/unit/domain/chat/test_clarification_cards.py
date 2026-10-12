@@ -351,7 +351,7 @@ class TestAssembledChatTurnWithClarification:
             answer="Here is your answer.",
             generated_sql="SELECT 1",
             selected_database_connector="warehouse",
-            metadata_sources=["openmetadata"],
+            metadata_sources=["mcp"],
             context_tables=["dm.orders"],
             runtime_context={},
             claims=[],

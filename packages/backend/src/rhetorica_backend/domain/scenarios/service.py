@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from rhetorica_backend.contracts.chat import ChatAskRequest
+from rhetorica_backend.contracts.chat import ChatActorContext, ChatAskRequest
 from rhetorica_backend.contracts.scenarios import (
     CreateScenarioRequest,
     ScenarioConnectorBindings,
@@ -19,9 +19,6 @@ from rhetorica_backend.domain.chat.orchestration.factory import ChatServiceFacto
 from rhetorica_backend.infra.postgres.chat_repository import ChatRepository
 from rhetorica_backend.infra.postgres.connector_repository import ConnectorRepository
 from rhetorica_backend.infra.postgres.llm_connector_repository import LlmConnectorRepository
-from rhetorica_backend.infra.postgres.openmetadata_connector_repository import (
-    OpenMetadataConnectorRepository,
-)
 from rhetorica_backend.infra.postgres.scenario_repository import (
     ScenarioDefinitionItem as ScenarioDefinitionRecord,
 )
@@ -48,14 +45,12 @@ class ScenarioCatalogService:
         chat_factory: ChatServiceFactory,
         db_connector_repository: ConnectorRepository,
         llm_connector_repository: LlmConnectorRepository,
-        openmetadata_connector_repository: OpenMetadataConnectorRepository,
     ) -> None:
         self._scenario_repository = scenario_repository
         self._chat_repository = chat_repository
         self._chat_factory = chat_factory
         self._db_connector_repository = db_connector_repository
         self._llm_connector_repository = llm_connector_repository
-        self._openmetadata_connector_repository = openmetadata_connector_repository
 
     def list_definitions(
         self,
@@ -208,9 +203,16 @@ class ScenarioCatalogService:
                 workspace_id=request.workspace_id,
                 conversation_id=conversation_id,
                 llm_connector_name=definition.default_connector_bindings.llm_connector_name,
-                metadata_connector_name=definition.default_connector_bindings.metadata_connector_name,
                 database_connector_name=definition.default_connector_bindings.database_connector_name,
                 run_sql=allow_run_sql,
+                actor_context=ChatActorContext(
+                    source="web",
+                    login=current_user.login,
+                    display_name=current_user.display_name,
+                    role=current_user.role,
+                    auth_provider=current_user.auth_provider,
+                    workspace_id=current_user.workspace_id,
+                ),
             )
         )
 
@@ -263,7 +265,11 @@ class ScenarioCatalogService:
                         "metric_name": {"type": "string", "title": "Metric", "default": "GMV"},
                         "period_current": {"type": "string", "title": "Current period"},
                         "period_previous": {"type": "string", "title": "Previous period"},
-                        "segment": {"type": "string", "title": "Primary segment", "default": "channel"},
+                        "segment": {
+                            "type": "string",
+                            "title": "Primary segment",
+                            "default": "channel",
+                        },
                     },
                     "required": ["period_current", "period_previous"],
                 },
@@ -295,7 +301,11 @@ class ScenarioCatalogService:
                     "properties": {
                         "funnel_name": {"type": "string", "title": "Funnel"},
                         "time_window": {"type": "string", "title": "Time window"},
-                        "dimension": {"type": "string", "title": "Breakdown dimension", "default": "platform"},
+                        "dimension": {
+                            "type": "string",
+                            "title": "Breakdown dimension",
+                            "default": "platform",
+                        },
                     },
                     "required": ["funnel_name", "time_window"],
                 },
@@ -325,8 +335,16 @@ class ScenarioCatalogService:
                     "type": "object",
                     "properties": {
                         "cohort_definition": {"type": "string", "title": "Cohort definition"},
-                        "retention_window": {"type": "string", "title": "Retention window", "default": "D1, D7, D30"},
-                        "segment": {"type": "string", "title": "Segment", "default": "acquisition_channel"},
+                        "retention_window": {
+                            "type": "string",
+                            "title": "Retention window",
+                            "default": "D1, D7, D30",
+                        },
+                        "segment": {
+                            "type": "string",
+                            "title": "Segment",
+                            "default": "acquisition_channel",
+                        },
                     },
                     "required": ["cohort_definition"],
                 },
@@ -349,7 +367,10 @@ class ScenarioCatalogService:
             },
         )
         for item in defaults:
-            if self._scenario_repository.get_definition_by_slug(workspace_id, item["slug"]) is not None:
+            if (
+                self._scenario_repository.get_definition_by_slug(workspace_id, item["slug"])
+                is not None
+            ):
                 continue
             self._scenario_repository.create_definition(
                 slug=item["slug"],
@@ -404,7 +425,9 @@ class ScenarioCatalogService:
         supported_types = {"string", "number", "integer", "boolean"}
         for field_name, spec in properties.items():
             if not isinstance(spec, dict):
-                raise ScenarioValidationError(f"input_schema property '{field_name}' must be an object")
+                raise ScenarioValidationError(
+                    f"input_schema property '{field_name}' must be an object"
+                )
             field_type = spec.get("type", "string")
             if field_type not in supported_types:
                 raise ScenarioValidationError(
@@ -435,13 +458,6 @@ class ScenarioCatalogService:
             )
             if connection is None:
                 raise ScenarioValidationError("Unknown LLM connector in default bindings")
-        if bindings.metadata_connector_name:
-            connection = self._openmetadata_connector_repository.get_connection(
-                workspace_id=workspace_id,
-                name=bindings.metadata_connector_name,
-            )
-            if connection is None:
-                raise ScenarioValidationError("Unknown metadata connector in default bindings")
 
     def _ensure_unique_slug(
         self,
@@ -515,7 +531,6 @@ class ScenarioCatalogService:
         if "{{" in rendered or "}}" in rendered:
             raise ScenarioValidationError("Prompt template contains unresolved placeholders")
         return rendered.strip()
-
 
     @staticmethod
     def _to_contract(item: ScenarioDefinitionRecord) -> ScenarioDefinitionItem:

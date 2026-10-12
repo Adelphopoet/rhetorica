@@ -19,39 +19,7 @@ class ToolErrorPolicy:
             return False
         if tool_result.get("can_continue") is False:
             return True
-        if (
-            tool_result.get("error_code") == "sql_preflight_failed"
-            and state.preflight_fail >= 2
-        ):
-            return True
-        if (
-            tool_result.get("error_code") == "database_connector_unavailable_for_context_table"
-            and state.unavailable_context_connector_fail >= 2
-        ):
-            return True
-        return (
-            tool_result.get("error_code") == "sql_preflight_uncertain"
-            and state.preflight_uncertain >= 2
-        )
-
-    @staticmethod
-    def record_duplicate_tool_error(
-        *,
-        state: ToolOrchestrationState,
-        tool_result: dict[str, Any],
-    ) -> None:
-        if tool_result.get("ok") is not False:
-            return
-        error_code = tool_result.get("error_code")
-        if error_code == "sql_preflight_failed":
-            state.preflight_fail += 1
-            state.warnings.append("llm_tool_loop_duplicate_preflight_fail")
-        elif error_code == "sql_preflight_uncertain":
-            state.preflight_uncertain += 1
-            state.warnings.append("llm_tool_loop_duplicate_preflight_uncertain")
-        elif error_code == "database_connector_unavailable_for_context_table":
-            state.unavailable_context_connector_fail += 1
-            state.warnings.append("llm_tool_loop_duplicate_unavailable_context_connector")
+        return tool_result.get("error_category") == "FATAL"
 
     @staticmethod
     def tool_result_user_message(tool_result: dict[str, Any]) -> str:

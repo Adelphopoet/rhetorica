@@ -16,6 +16,7 @@ class ToolCapability(Protocol):
 
     name: str
     requires_db_connectors: bool
+    time_bound: bool
 
     def execute(
         self,
@@ -34,6 +35,7 @@ class BoundToolCapability:
     name: str
     handler: Callable[..., dict[str, Any]]
     requires_db_connectors: bool = False
+    time_bound: bool = False
 
     def execute(
         self,

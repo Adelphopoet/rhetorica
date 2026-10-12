@@ -8,6 +8,7 @@ import { Marked } from "marked";
 import { cn } from "@rhetorica/ui";
 
 import { extractMarkdownHeadings } from "@/lib/markdown";
+import { useTheme } from "@/features/theme/ThemeProvider";
 
 interface MarkdownRendererProps {
   text: string;
@@ -15,8 +16,11 @@ interface MarkdownRendererProps {
 }
 
 const MERMAID_BLOCK_PATTERN = /```mermaid[^\n]*\n([\s\S]*?)```/g;
+const VISUALIZATION_JSON_BLOCK_PATTERN = /```(?:json)?[^\n]*\n([\s\S]*?)```/gi;
 
-let mermaidInitialized = false;
+// Mermaid owns global configuration. Serialize initialization and render so a
+// concurrent diagram cannot change the theme of a render already in progress.
+let mermaidRenderQueue: Promise<unknown> = Promise.resolve();
 
 function injectMermaidPlaceholders(text: string): string {
   return text.replace(MERMAID_BLOCK_PATTERN, (_fullMatch, definition: string) => {
@@ -25,9 +29,37 @@ function injectMermaidPlaceholders(text: string): string {
   });
 }
 
+function removeVisualizationJsonBlocks(text: string): string {
+  return text.replace(VISUALIZATION_JSON_BLOCK_PATTERN, (fullMatch, body: string) =>
+    isVisualizationProtocolJson(body) ? "" : fullMatch
+  );
+}
+
+function isVisualizationProtocolJson(value: string): boolean {
+  try {
+    const payload = JSON.parse(value.trim()) as unknown;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return false;
+    }
+    const record = payload as Record<string, unknown>;
+    if (record.visualization && typeof record.visualization === "object" && !Array.isArray(record.visualization)) {
+      return true;
+    }
+    return (
+      (record.version === "v1" || record.version === "v2") &&
+      typeof record.kind === "string" &&
+      Boolean(record.data_source && typeof record.data_source === "object" && !Array.isArray(record.data_source)) &&
+      Boolean(record.encoding && typeof record.encoding === "object" && !Array.isArray(record.encoding))
+    );
+  } catch {
+    return false;
+  }
+}
+
 function renderMarkdown(text: string): string {
   try {
-    const headings = extractMarkdownHeadings(text);
+    const displayText = removeVisualizationJsonBlocks(text);
+    const headings = extractMarkdownHeadings(displayText);
     const headingIds = new Map(headings.map((heading) => [heading.text, heading.id]));
     const localHeadingCounts = new Map<string, number>();
     const markdown = new Marked({
@@ -50,7 +82,7 @@ function renderMarkdown(text: string): string {
           const matchingIds = headings.filter((heading) => heading.text === textValue).map((heading) => heading.id);
           const headingId = matchingIds[occurrence] ?? headingIds.get(textValue) ?? "section";
 
-          return `<h${depth} id="${headingId}" class="docs-heading docs-heading-${depth}"><a href="#${headingId}" class="docs-heading-anchor" aria-label="Link to ${escapeHtml(textValue)}">${this.parser.parseInline(tokens)}</a></h${depth}>`;
+          return `<h${depth} id="${headingId}" class="docs-heading docs-heading-${depth}"><a href="#${headingId}" class="docs-heading-anchor" aria-label="Ссылка на ${escapeHtml(textValue)}">${this.parser.parseInline(tokens)}</a></h${depth}>`;
         },
       },
       hooks: {
@@ -63,7 +95,7 @@ function renderMarkdown(text: string): string {
       },
     });
 
-    const rendered = markdown.parse(injectMermaidPlaceholders(text));
+    const rendered = markdown.parse(injectMermaidPlaceholders(displayText));
     return typeof rendered === "string" ? rendered : "";
   } catch {
     return DOMPurify.sanitize(text, { USE_PROFILES: { html: true } });
@@ -79,13 +111,12 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function ensureMermaidInitialized() {
-  if (!mermaidInitialized) {
+function initializeMermaid(theme: "light" | "dark") {
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
       theme: "base",
-      darkMode: true,
+      darkMode: theme === "dark",
       deterministicIds: true,
       look: "classic",
       htmlLabels: false,
@@ -96,7 +127,14 @@ function ensureMermaidInitialized() {
       sequence: {
         useMaxWidth: true,
       },
-      themeVariables: {
+      themeVariables: theme === "light" ? {
+        fontFamily: "var(--font-sans), Avenir Next, Segoe UI, sans-serif",
+        primaryColor: "#e8f0fc", primaryBorderColor: "#4776ac", primaryTextColor: "#17243b",
+        lineColor: "#526f94", secondaryColor: "#f2f6fc", secondaryBorderColor: "#758ead",
+        tertiaryColor: "#ffffff", tertiaryTextColor: "#263954", background: "#ffffff",
+        mainBkg: "#e8f0fc", secondBkg: "#f2f6fc", tertiaryBorderColor: "#879bb8",
+        clusterBkg: "#f2f6fc", clusterBorder: "#b7c9de", edgeLabelBackground: "#ffffff",
+      } : {
         fontFamily: "var(--font-sans), Avenir Next, Segoe UI, sans-serif",
         primaryColor: "#101b2d",
         primaryBorderColor: "#5f8fcb",
@@ -115,12 +153,12 @@ function ensureMermaidInitialized() {
         edgeLabelBackground: "#08111d",
       },
     });
-    mermaidInitialized = true;
-  }
 }
 
 export function MarkdownRenderer({ text, className }: MarkdownRendererProps) {
+  const { resolvedTheme } = useTheme();
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const generation = useRef(0);
   const rendererId = useId();
   const mermaidIdPrefix = rendererId.replaceAll(":", "_");
   const renderedHtml = renderMarkdown(text);
@@ -132,11 +170,11 @@ export function MarkdownRenderer({ text, className }: MarkdownRendererProps) {
     }
 
     let cancelled = false;
+    const renderGeneration = ++generation.current;
 
     const renderPlaceholders = async () => {
-      ensureMermaidInitialized();
       const placeholders = Array.from(
-        container.querySelectorAll<HTMLElement>("[data-mermaid-definition]:not([data-mermaid-rendered])")
+        container.querySelectorAll<HTMLElement>("[data-mermaid-definition]")
       );
 
       for (const [index, placeholder] of placeholders.entries()) {
@@ -146,10 +184,19 @@ export function MarkdownRenderer({ text, className }: MarkdownRendererProps) {
         }
 
         placeholder.dataset.mermaidRendered = "pending";
-        const definition = decodeURIComponent(encodedDefinition);
+        placeholder.replaceChildren();
+        let definition = encodedDefinition;
         try {
-          const renderResult = await mermaid.render(`${mermaidIdPrefix}-${index}`, definition);
-          if (cancelled) {
+          definition = decodeURIComponent(encodedDefinition);
+          const pending = mermaidRenderQueue.then(() => {
+            if (cancelled) return null;
+            initializeMermaid(resolvedTheme);
+            return mermaid.render(`${mermaidIdPrefix}-${renderGeneration}-${index}`, definition);
+          });
+          // Always release the queue after a failed definition.
+          mermaidRenderQueue = pending.catch(() => undefined);
+          const renderResult = await pending;
+          if (cancelled || !renderResult) {
             return;
           }
           placeholder.innerHTML = renderResult.svg;
@@ -163,6 +210,7 @@ export function MarkdownRenderer({ text, className }: MarkdownRendererProps) {
           renderResult.bindFunctions?.(placeholder);
           placeholder.dataset.mermaidRendered = "true";
         } catch {
+          if (cancelled) return;
           placeholder.innerHTML = DOMPurify.sanitize(
             `<pre><code class="language-mermaid">${escapeHtml(definition)}</code></pre>`,
             { USE_PROFILES: { html: true } }
@@ -173,20 +221,16 @@ export function MarkdownRenderer({ text, className }: MarkdownRendererProps) {
     };
 
     void renderPlaceholders();
-    const frameId = window.requestAnimationFrame(() => void renderPlaceholders());
-    const timeoutId = window.setTimeout(() => void renderPlaceholders(), 180);
 
     return () => {
       cancelled = true;
-      window.cancelAnimationFrame(frameId);
-      window.clearTimeout(timeoutId);
     };
-  }, [mermaidIdPrefix, renderedHtml]);
+  }, [mermaidIdPrefix, renderedHtml, resolvedTheme]);
 
   return (
     <div
       ref={containerRef}
-      className={cn("chat-markdown docs-markdown text-sm text-[#edf3ff]", className)}
+      className={cn("chat-markdown docs-markdown text-sm text-primary", className)}
       dangerouslySetInnerHTML={{ __html: renderedHtml }}
     />
   );

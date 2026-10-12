@@ -1,4 +1,5 @@
 from rhetorica_backend.domain.execution.service import ExecutionService
+from rhetorica_backend.domain.execution.snapshots import SqlResultSnapshotStore
 from rhetorica_backend.infra.engine_clickhouse.adapter import ClickHouseAdapter
 from rhetorica_backend.infra.engine_greenplum.adapter import GreenplumAdapter
 from rhetorica_backend.infra.engine_impala.adapter import ImpalaAdapter
@@ -7,7 +8,12 @@ from rhetorica_backend.infra.postgres.execution_history_repository import Execut
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 
 
-def build_execution_service(database_url: str) -> tuple[ExecutionService, DatabaseRuntime]:
+def build_execution_service(
+    database_url: str,
+    *,
+    snapshot_store: SqlResultSnapshotStore | None = None,
+    preview_row_limit: int = 500,
+) -> tuple[ExecutionService, DatabaseRuntime]:
     db_runtime = DatabaseRuntime(database_url)
     history_repository = ExecutionHistoryRepository(db=db_runtime)
     service = ExecutionService(
@@ -18,5 +24,7 @@ def build_execution_service(database_url: str) -> tuple[ExecutionService, Databa
             "impala": ImpalaAdapter(),
             "trino": TrinoAdapter(),
         },
+        snapshot_store=snapshot_store,
+        preview_row_limit=preview_row_limit,
     )
     return service, db_runtime

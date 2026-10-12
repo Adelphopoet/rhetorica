@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any, Literal
 
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -13,43 +14,32 @@ from pydantic import (
     field_validator,
 )
 from rhetorica_backend.contracts.chat import (
-    AnswerClaim,
-    AnswerEvidence,
-    ClaimEvidenceLink,
     ClarificationRequest,
 )
 from rhetorica_backend.contracts.visualization import VisualizationSpec
 
-
-class FinalTarget(BaseModel):
-    """Optional target connector mapping in model output."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    connector_name: str | None = None
-    service: str | None = None
-    database: str | None = None
-    schema_name: str | None = Field(default=None, alias="schema")
+SUBMIT_FINAL_ANSWER_TOOL_NAME = "submit_final_answer"
+_JSON_CODE_FENCE_PATTERN = re.compile(
+    r"```(?:json)?[^\n]*\n(?P<body>[\s\S]*?)```",
+    flags=re.IGNORECASE,
+)
 
 
 class ChatFinalResponseContractV1(BaseModel):
-    """Strict response payload expected from the model."""
+    """Minimal final-answer payload expected from the model."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     schema_version: Literal["v1"] = "v1"
     answer_markdown: str = Field(
         min_length=1,
-        validation_alias=AliasChoices("answer_markdown", "answer"),
+        description=(
+            "User-visible Markdown only. Do not include visualization JSON, tool "
+            "payloads, or protocol wrappers here."
+        ),
     )
-    sql: str | None
-    target: FinalTarget | None
-    claims: list[AnswerClaim]
-    evidence: list[AnswerEvidence]
-    claim_evidence_links: list[ClaimEvidenceLink]
-    uncertainty_flags: list[str]
+    uncertainty_flags: list[str] = Field(default_factory=list)
     clarification_request: ClarificationRequest | None = None
-    analysis_document: dict[str, Any] | None = None
     visualization: VisualizationSpec | None = None
 
     @field_validator("answer_markdown")
@@ -58,6 +48,11 @@ class ChatFinalResponseContractV1(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError
+        if _contains_visualization_protocol_payload(normalized):
+            raise ValueError(
+                "answer_markdown must not contain visualization JSON; put charts in "
+                "the visualization field only"
+            )
         return normalized
 
     def to_payload(self) -> dict[str, Any]:
@@ -65,20 +60,18 @@ class ChatFinalResponseContractV1(BaseModel):
         return {
             "answer": self.answer_markdown,
             "answer_markdown": self.answer_markdown,
-            "sql": self.sql,
-            "target": (self.target.model_dump(mode="json", by_alias=True) if self.target else None),
-            "claims": [item.model_dump(mode="json") for item in self.claims],
-            "evidence": [item.model_dump(mode="json") for item in self.evidence],
-            "claim_evidence_links": [
-                item.model_dump(mode="json") for item in self.claim_evidence_links
-            ],
+            "sql": None,
+            "target": None,
+            "claims": [],
+            "evidence": [],
+            "claim_evidence_links": [],
             "uncertainty_flags": list(self.uncertainty_flags),
             "clarification_request": (
                 self.clarification_request.model_dump(mode="json")
                 if self.clarification_request is not None
                 else None
             ),
-            "analysis_document": self.analysis_document,
+            "analysis_document": None,
             "visualization": (
                 self.visualization.model_dump(mode="json")
                 if self.visualization is not None
@@ -89,40 +82,41 @@ class ChatFinalResponseContractV1(BaseModel):
 
 def final_response_json_schema() -> dict[str, Any]:
     """JSON schema for strict response_format providers."""
-    return ChatFinalResponseContractV1.model_json_schema()
+    schema = ChatFinalResponseContractV1.model_json_schema()
+    clarification_choice = schema.get("$defs", {}).get("ClarificationChoice")
+    if isinstance(clarification_choice, dict):
+        properties = clarification_choice.get("properties")
+        if isinstance(properties, dict):
+            # This extensibility bag is backend-owned and cannot be represented by
+            # OpenAI strict schemas, which forbid open object properties.
+            properties.pop("metadata", None)
+    return schema
 
 
-def build_final_response_payload(
-    *,
-    answer_markdown: str,
-    sql: str | None = None,
-    target: dict[str, Any] | None = None,
-    claims: list[dict[str, Any]] | None = None,
-    evidence: list[dict[str, Any]] | None = None,
-    claim_evidence_links: list[dict[str, Any]] | None = None,
-    uncertainty_flags: list[str] | None = None,
-    clarification_request: dict[str, Any] | None = None,
-    analysis_document: dict[str, Any] | None = None,
-    visualization: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build a payload candidate matching ChatFinalResponseSchema v1."""
+def final_response_tool_schema() -> dict[str, Any]:
+    """Native Chat Completions tool used to submit the final answer contract."""
     return {
-        "schema_version": "v1",
-        "answer_markdown": answer_markdown,
-        "sql": sql,
-        "target": target,
-        "claims": list(claims or []),
-        "evidence": list(evidence or []),
-        "claim_evidence_links": list(claim_evidence_links or []),
-        "uncertainty_flags": list(uncertainty_flags or []),
-        "clarification_request": clarification_request,
-        "analysis_document": analysis_document,
-        "visualization": visualization,
+        "type": "function",
+        "function": {
+            "name": SUBMIT_FINAL_ANSWER_TOOL_NAME,
+            "description": (
+                "End the current request and submit the final user-facing answer. Call "
+                "this only when the answer is ready: never use it for a progress update, "
+                "a promise to use another tool, or a description of the next step. Respect "
+                "the user's explicit completion criteria. A supported partial answer is "
+                "valid only when its limitations are stated and the user's request allows it. "
+                "For a simple reply, put the complete answer in answer_markdown, set "
+                "schema_version to v1, uncertainty_flags to [], and both "
+                "clarification_request and visualization to null."
+            ),
+            "parameters": final_response_json_schema(),
+            "strict": True,
+        },
     }
 
 
 def validate_final_response_payload(
-    payload: dict[str, Any],
+    payload: dict,
 ) -> tuple[ChatFinalResponseContractV1 | None, list[str]]:
     """Validate final payload and return compact validation errors."""
     try:
@@ -133,3 +127,31 @@ def validate_final_response_payload(
         ]
         return None, errors
     return validated, []
+
+
+def _contains_visualization_protocol_payload(markdown: str) -> bool:
+    """Reject chart specs embedded in user-visible Markdown."""
+    if _is_visualization_protocol_json(markdown):
+        return True
+    for match in _JSON_CODE_FENCE_PATTERN.finditer(markdown):
+        if _is_visualization_protocol_json(match.group("body")):
+            return True
+    return False
+
+
+def _is_visualization_protocol_json(value: str) -> bool:
+    try:
+        payload = json.loads(value.strip())
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    visualization = payload.get("visualization")
+    if isinstance(visualization, dict):
+        return True
+    return (
+        payload.get("version") in {"v1", "v2"}
+        and isinstance(payload.get("kind"), str)
+        and isinstance(payload.get("data_source"), dict)
+        and isinstance(payload.get("encoding"), dict)
+    )

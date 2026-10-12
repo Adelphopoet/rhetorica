@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -14,9 +12,6 @@ from rhetorica_backend.domain.chat.error_contract import (
     ErrorCategory,
     build_tool_error,
 )
-from rhetorica_backend.domain.chat.orchestration.analysis_artifacts import (
-    AnalysisCheckpointLifecycle,
-)
 from rhetorica_backend.domain.chat.sql.optimization import SqlOptimizationService
 from rhetorica_backend.domain.chat.sql.semantic_preflight import (
     SemanticSqlPreflightService,
@@ -25,6 +20,7 @@ from rhetorica_backend.domain.chat.sql.semantic_preflight import (
 )
 from rhetorica_backend.domain.chat.sql.sql_router import SqlRouter
 from rhetorica_backend.domain.chat.sql_prompt_window import (
+    normalize_sql_execution_row_limit,
     normalize_sql_prompt_row_limit,
 )
 from rhetorica_backend.domain.metadata.metric_registry_service import (
@@ -162,15 +158,6 @@ class RunSqlPipelineSupport(Protocol):
         execution: Any,
     ) -> None: ...
 
-    def _record_successful_metadata_usage(
-        self,
-        *,
-        workspace_id: str | None,
-        connector_name: str | None,
-        referenced_tables: list[str],
-        state: ToolOrchestrationState,
-    ) -> None: ...
-
     def _emit_sql_optimizer_start(
         self,
         *,
@@ -234,16 +221,6 @@ class RunSqlPipeline:
                 can_continue=True,
             )
 
-        if self._sql_router.is_non_analytic_question(request.question):
-            state.add_warning("sql_execution_skipped_non_analytic")
-            return build_tool_error(
-                error_code="sql_execution_skipped_non_analytic",
-                error_category=ErrorCategory.RECOVERABLE,
-                user_message="Question is non-analytic. SQL execution was skipped.",
-                retry_recommended=False,
-                can_continue=True,
-            )
-
         sql_value = arguments.get("sql")
         sql = sql_value.strip() if isinstance(sql_value, str) else None
         if not sql:
@@ -256,11 +233,19 @@ class RunSqlPipeline:
                 can_continue=True,
             )
         prompt_row_limit = normalize_sql_prompt_row_limit(arguments.get("prompt_row_limit"))
+        execution_row_limit = normalize_sql_execution_row_limit(
+            arguments.get("execution_row_limit")
+        )
         if (
             arguments.get("prompt_row_limit") is not None
             and arguments.get("prompt_row_limit") != prompt_row_limit
         ):
             state.add_warning("sql_prompt_row_limit_clamped")
+        if (
+            arguments.get("execution_row_limit") is not None
+            and arguments.get("execution_row_limit") != execution_row_limit
+        ):
+            state.add_warning("sql_execution_row_limit_clamped")
 
         requested_connector_name = self._support._requested_connector_name(arguments)
 
@@ -604,7 +589,7 @@ class RunSqlPipeline:
                         provider_name = f"{connection.engine}_rule_advisor"
                 providers = [provider_name]
                 if optimization_trace.skills_used:
-                    providers.append("workspace_skill_prompt")
+                    providers.append("workspace_skill_advisor")
                 for provider in providers:
                     if provider not in state.capability_state.used_providers:
                         state.capability_state.used_providers.append(provider)
@@ -618,6 +603,8 @@ class RunSqlPipeline:
                 connection=connection,
                 workspace_id=request.workspace_id,
                 dialect=dialect,
+                row_limit=execution_row_limit,
+                conversation_id=state.conversation_id,
             )
         except Exception as exc:
             self._logger.exception("SQL execution failed")
@@ -641,16 +628,11 @@ class RunSqlPipeline:
             execution=execution,
             preflight_status=preflight_status,
         )
-        if execution.status == "failed":
+        execution_succeeded = execution.status == "succeeded"
+        if not execution_succeeded:
             state.add_warning("sql_execution_failed")
         else:
             self._clear_resolved_success_warnings(state)
-            self._support._record_successful_metadata_usage(
-                workspace_id=request.workspace_id,
-                connector_name=selected_connector.name,
-                referenced_tables=preflight_result.referenced_tables,
-                state=state,
-            )
         self._support._hydrate_context_from_execution(
             state=state,
             sql=sql,
@@ -671,8 +653,8 @@ class RunSqlPipeline:
             },
         )
 
-        return {
-            "ok": True,
+        result = {
+            "ok": execution_succeeded,
             "generated_sql": sql_for_execution_plan,
             "executed_sql": sql,
             "selected_database_connector": selected_connector.name,
@@ -682,7 +664,29 @@ class RunSqlPipeline:
             "optimization_trace": optimization_trace.model_dump(mode="json"),
             "execution": execution.model_dump(mode="json"),
             "prompt_row_limit": prompt_row_limit,
+            "execution_row_limit": execution_row_limit,
         }
+        if not execution_succeeded:
+            result.update({
+                "error": "sql_execution_failed",
+                "error_code": "sql_execution_failed",
+                "error_category": ErrorCategory.RECOVERABLE.value,
+                "error_message": execution.error_message,
+                "user_message": (
+                    "SQL execution failed. Inspect execution.error_message, fix the SQL "
+                    "or connector choice, and retry with changed arguments."
+                ),
+                "retry_recommended": True,
+                "can_continue": True,
+                "next_allowed_actions": [
+                    "inspect_execution_error",
+                    "fix_sql",
+                    "change_connector",
+                    "fetch_metadata",
+                    "answer_with_failure_explanation",
+                ],
+            })
+        return result
 
     def _approval_gate_payload(
         self,
@@ -692,119 +696,8 @@ class RunSqlPipeline:
         sql: str,
         selected_connector_name: str,
     ) -> dict[str, Any] | None:
-        approval_token = self._optional_str(arguments.get("approval_token"))
-        requires_approval = arguments.get("requires_approval") is True
-        expected_token = self._approval_token(
-            sql=sql,
-            selected_connector_name=selected_connector_name,
-        )
-        if approval_token is not None:
-            if approval_token != expected_token or not self._has_approved_token(
-                state=state,
-                approval_token=approval_token,
-            ):
-                state.add_warning("sql_approval_invalid")
-                return build_tool_error(
-                    error_code="sql_approval_invalid",
-                    error_category=ErrorCategory.FATAL,
-                    user_message="SQL execution approval token is missing or invalid.",
-                    retry_recommended=False,
-                    can_continue=False,
-                )
-            self._consume_approval(state=state, approval_token=approval_token)
-            return None
-        if not requires_approval:
-            return None
-
-        checkpoint = getattr(state, "checkpoint", None)
-        if checkpoint is None:
-            state.add_warning("sql_approval_requires_checkpoint")
-            return build_tool_error(
-                error_code="sql_approval_requires_checkpoint",
-                error_category=ErrorCategory.FATAL,
-                user_message="SQL approval requires an active analysis checkpoint.",
-                retry_recommended=False,
-                can_continue=False,
-            )
-        reason = self._optional_str(arguments.get("approval_reason")) or (
-            "This SQL step was marked as high cost and requires user approval before execution."
-        )
-        active_step_id = checkpoint.active_step_id or checkpoint.blocked_step_id or "sql_execution"
-        approval = {
-            "kind": "sql_execution_approval",
-            "tool_name": "run_sql",
-            "approval_token": expected_token,
-            "step_id": active_step_id,
-            "connector_name": selected_connector_name,
-            "sql": sql,
-            "reason": reason,
-        }
-        state.checkpoint = AnalysisCheckpointLifecycle().require_approval(
-            checkpoint=checkpoint,
-            step_id=active_step_id,
-            blocker="sql_approval_required",
-            approval=approval,
-        )
-        self._persist_checkpoint(state)
-        state.add_warning("sql_approval_required")
-        return {
-            "ok": False,
-            "error": "sql_approval_required",
-            "error_code": "sql_approval_required",
-            "error_category": ErrorCategory.FATAL.value,
-            "user_message": "SQL execution requires user approval before it can run.",
-            "can_continue": False,
-            "retry_recommended": False,
-            "approval": approval,
-            "generated_sql": sql,
-            "selected_database_connector": selected_connector_name,
-        }
-
-    @staticmethod
-    def _approval_token(*, sql: str, selected_connector_name: str) -> str:
-        payload = json.dumps(
-            {
-                "connector_name": selected_connector_name,
-                "sql": sql,
-                "tool_name": "run_sql",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        return "sql-approval-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-
-    @staticmethod
-    def _has_approved_token(
-        *,
-        state: ToolOrchestrationState,
-        approval_token: str,
-    ) -> bool:
-        checkpoint = getattr(state, "checkpoint", None)
-        if checkpoint is None:
-            return False
-        approved = checkpoint.budget_state.get("approved_approval_token")
-        return isinstance(approved, str) and approved == approval_token
-
-    @staticmethod
-    def _consume_approval(
-        *,
-        state: ToolOrchestrationState,
-        approval_token: str,
-    ) -> None:
-        checkpoint = getattr(state, "checkpoint", None)
-        if checkpoint is None:
-            return
-        state.checkpoint = AnalysisCheckpointLifecycle().consume_approval(
-            checkpoint=checkpoint,
-            approval_token=approval_token,
-        )
-        RunSqlPipeline._persist_checkpoint(state)
-
-    @staticmethod
-    def _persist_checkpoint(state: ToolOrchestrationState) -> None:
-        persist = getattr(state, "checkpoint_persist", None)
-        if callable(persist):
-            persist(state)
+        _ = state, arguments, sql, selected_connector_name
+        return None
 
     @staticmethod
     def _optional_str(value: Any) -> str | None:

@@ -1,4 +1,5 @@
 import type { EChartsOption } from "echarts";
+import { getChartColors, type ChartColors, type ChartTheme } from "./chartTheme";
 
 import type {
   QueryPreview,
@@ -6,17 +7,28 @@ import type {
   VisualizationSpec,
   VisualizationValueFormat,
 } from "./types";
+import { DISPLAY_TIME_ZONE } from "@/lib/dateTime";
 
 const LARGE_THRESHOLD = 2000;
 const DATA_ZOOM_THRESHOLD = 50;
 const MAX_DIMENSION_CARDINALITY = 50;
 const MAX_SERIES_CARDINALITY = 12;
-const PALETTE = ["#5da8ff", "#38c67d", "#f2b14b", "#ff8b95", "#7d8cff", "#53d7c2"];
+
 const DEFAULT_NUMBER_LOCALE = "en-US";
 const DEFAULT_CURRENCY_LOCALE = "ru-RU";
 const DEFAULT_CURRENCY_CODE = "RUB";
 
 type DatasetRow = Record<string, string | number | boolean | null>;
+type TooltipParam = {
+  data?: DatasetRow;
+  dimensionNames?: string[];
+  encode?: {
+    x?: number[];
+    y?: number[];
+    value?: number[];
+  };
+  seriesName?: unknown;
+};
 export type VisualizationFallbackReason =
   | "unsupported_kind"
   | "unsafe_encoding"
@@ -248,6 +260,7 @@ function formatValue(
       year: "numeric",
       month: "short",
       day: "2-digit",
+      timeZone: DISPLAY_TIME_ZONE,
     }).format(new Date(value));
   }
   const numeric = typeof value === "number" ? value : Number(value);
@@ -381,17 +394,17 @@ function applyTransform(rows: DatasetRow[], spec: VisualizationSpec): DatasetRow
   return nextRows.slice(0, Math.max(1, rowLimit || rows.length));
 }
 
-function annotationColor(annotation: VisualizationAnnotation): string {
+function annotationColor(annotation: VisualizationAnnotation, colors: ChartColors): string {
   if (annotation.style === "success") {
-    return "#38c67d";
+    return colors.success;
   }
   if (annotation.style === "warn") {
-    return "#f2b14b";
+    return colors.warning;
   }
-  return "#a9b8d4";
+  return colors.secondary;
 }
 
-function buildMarkLine(spec: VisualizationSpec) {
+function buildMarkLine(spec: VisualizationSpec, colors: ChartColors) {
   if (!spec.annotations.length) {
     return undefined;
   }
@@ -401,10 +414,10 @@ function buildMarkLine(spec: VisualizationSpec) {
       yAxis: annotation.value,
       label: {
         formatter: annotation.label,
-        color: annotationColor(annotation),
+        color: annotationColor(annotation, colors),
       },
       lineStyle: {
-        color: annotationColor(annotation),
+        color: annotationColor(annotation, colors),
         type: "dashed" as const,
         width: 1.2,
       },
@@ -430,6 +443,7 @@ function buildAxisLabelFormatter(
       new Intl.DateTimeFormat("en-GB", {
         day: "2-digit",
         month: "short",
+        timeZone: DISPLAY_TIME_ZONE,
       }).format(new Date(Number(value)));
   }
   if (axis === "x" && axisType !== "value") {
@@ -446,19 +460,30 @@ function buildTooltipFormatter(spec: VisualizationSpec) {
   return (params: unknown) => {
     const items = Array.isArray(params) ? params : [params];
     const lines: string[] = [];
+    const metricFields = uniqueFields([...spec.encoding.y, ...spec.encoding.secondary_y]);
+    const hasMultipleMetrics = metricFields.length > 1;
 
     for (const item of items) {
       if (!item || typeof item !== "object") {
         continue;
       }
-      const data = "data" in item ? (item as { data?: DatasetRow }).data : undefined;
-      const seriesName = "seriesName" in item ? String((item as { seriesName?: unknown }).seriesName ?? "") : "";
+      const tooltipItem = item as TooltipParam;
+      const data = tooltipItem.data;
+      const seriesName = String(tooltipItem.seriesName ?? "");
       if (!data) {
         continue;
       }
 
       const xKey = spec.encoding.x;
-      const yKey = spec.encoding.y[0];
+      const encodedYIndex = tooltipItem.encode?.y?.[0] ?? tooltipItem.encode?.value?.[0];
+      const encodedYKey =
+        encodedYIndex !== undefined ? tooltipItem.dimensionNames?.[encodedYIndex] : undefined;
+      const yKey =
+        encodedYKey && Object.prototype.hasOwnProperty.call(data, encodedYKey)
+          ? encodedYKey
+          : seriesName && Object.prototype.hasOwnProperty.call(data, seriesName)
+            ? seriesName
+            : spec.encoding.y[0];
       const seriesKey = spec.encoding.series;
 
       if (xKey && lines.length === 0) {
@@ -471,7 +496,7 @@ function buildTooltipFormatter(spec: VisualizationSpec) {
       }
       if (yKey) {
         lines.push(
-          `${spec.y_axis_label ?? yKey}: ${formatValue(
+          `${hasMultipleMetrics ? yKey : spec.y_axis_label ?? yKey}: ${formatValue(
             data[yKey],
             spec.value_format,
             spec.metric_unit,
@@ -495,6 +520,7 @@ function buildCartesianOption(
     | "combo_line_bar",
   rows: DatasetRow[],
   spec: VisualizationSpec,
+  colors: ChartColors,
 ): EChartsOption | null {
   const x = spec.encoding.x;
   const metrics = spec.encoding.y;
@@ -519,7 +545,7 @@ function buildCartesianOption(
       : spec.encoding.secondary_y;
   const enableLarge = rows.length > LARGE_THRESHOLD;
   const withZoom = rows.length > DATA_ZOOM_THRESHOLD;
-  const markLine = buildMarkLine(spec);
+  const markLine = buildMarkLine(spec, colors);
 
   const buildSeries = (
     datasetId: string,
@@ -581,14 +607,15 @@ function buildCartesianOption(
 
   const baseOption: EChartsOption = {
     aria: { enabled: true },
-    color: PALETTE,
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
+    color: colors.palette,
     animationDuration: 350,
     grid: { top: 32, left: 20, right: 20, bottom: withZoom ? 72 : 28, containLabel: true },
     tooltip: {
+      backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text },
       trigger: "axis",
-      backgroundColor: "rgba(8, 12, 22, 0.94)",
-      borderColor: "#24324d",
-      textStyle: { color: "#edf3ff" },
       formatter: buildTooltipFormatter(spec),
     },
     xAxis: {
@@ -597,13 +624,13 @@ function buildCartesianOption(
       nameLocation: "middle",
       nameGap: 28,
       axisLabel: {
-        color: "#9bb0d3",
+        color: colors.axis,
         hideOverlap: true,
         margin: 14,
         rotate: xAxisType === "time" ? 18 : 0,
         formatter: buildAxisLabelFormatter(spec, "x", xAxisType),
       },
-      axisLine: { lineStyle: { color: "#32415c" } },
+      axisLine: { lineStyle: { color: colors.axisLine } },
       splitLine: { show: false },
       splitNumber: xAxisType === "time" ? Math.min(4, rows.length) : undefined,
     },
@@ -611,22 +638,22 @@ function buildCartesianOption(
       {
         type: "value" as const,
         name: spec.y_axis_label ?? undefined,
-        nameTextStyle: { color: "#9bb0d3", padding: [0, 0, 8, 0] },
+        nameTextStyle: { color: colors.axis, padding: [0, 0, 8, 0] },
         axisLabel: {
-          color: "#9bb0d3",
+          color: colors.axis,
           formatter: buildAxisLabelFormatter(spec, "y", "value"),
         },
         axisLine: { show: false },
-        splitLine: { lineStyle: { color: "rgba(50, 65, 92, 0.45)" } },
+        splitLine: { lineStyle: { color: colors.grid } },
       },
       ...(secondaryMetrics.length
         ? [
             {
               type: "value" as const,
               name: secondaryMetrics[0] ?? undefined,
-              nameTextStyle: { color: "#9bb0d3", padding: [0, 0, 8, 0] },
+              nameTextStyle: { color: colors.axis, padding: [0, 0, 8, 0] },
               axisLabel: {
-                color: "#9bb0d3",
+                color: colors.axis,
                 formatter: (value: string | number) =>
                   formatValue(value, spec.value_format, spec.metric_unit),
               },
@@ -640,12 +667,14 @@ function buildCartesianOption(
           { type: "inside", xAxisIndex: [0] },
           {
             type: "slider",
+            textStyle: { color: colors.axis },
+            handleStyle: { color: colors.axis },
             xAxisIndex: [0],
             height: 20,
             bottom: 12,
-            borderColor: "#24324d",
-            backgroundColor: "rgba(10, 17, 29, 0.8)",
-            fillerColor: "rgba(93, 168, 255, 0.18)",
+            borderColor: colors.border,
+            backgroundColor: colors.zoom,
+            fillerColor: colors.zoomFill,
           },
         ]
       : [],
@@ -657,7 +686,7 @@ function buildCartesianOption(
         "raw",
         metric,
         metric,
-        PALETTE[index % PALETTE.length],
+        colors.palette[index % colors.palette.length],
         0,
       ),
     );
@@ -666,7 +695,7 @@ function buildCartesianOption(
         "raw",
         metric,
         metric,
-        PALETTE[(primaryMetrics.length + index) % PALETTE.length],
+        colors.palette[(primaryMetrics.length + index) % colors.palette.length],
         1,
       ),
     );
@@ -687,7 +716,11 @@ function buildCartesianOption(
     legend: {
       top: 0,
       type: "scroll",
-      textStyle: { color: "#a9b8d4" },
+      pageTextStyle: { color: colors.secondary },
+      pageIconColor: colors.axis,
+      pageIconInactiveColor: colors.border,
+      inactiveColor: colors.axis,
+      textStyle: { color: colors.secondary },
     },
     dataset: [
       { id: "raw", source: rows },
@@ -708,14 +741,14 @@ function buildCartesianOption(
         `filtered-${index}`,
         primaryMetrics[0] as string,
         String(value),
-        PALETTE[index % PALETTE.length],
+        colors.palette[index % colors.palette.length],
         0,
       ),
     ),
   };
 }
 
-function buildScatterOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOption | null {
+function buildScatterOption(rows: DatasetRow[], spec: VisualizationSpec, colors: ChartColors): EChartsOption | null {
   const x = spec.encoding.x;
   const metric = spec.encoding.y[0];
   if (!x || !metric) {
@@ -725,15 +758,16 @@ function buildScatterOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
 
   return {
     aria: { enabled: true },
-    color: PALETTE,
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
+    color: colors.palette,
     animationDuration: 350,
     grid: { top: 28, left: 20, right: 20, bottom: withZoom ? 72 : 28, containLabel: true },
     dataset: [{ id: "raw", source: rows }],
     tooltip: {
+      backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text },
       trigger: "item",
-      backgroundColor: "rgba(8, 12, 22, 0.94)",
-      borderColor: "#24324d",
-      textStyle: { color: "#edf3ff" },
       formatter: buildTooltipFormatter(spec),
     },
     xAxis: {
@@ -742,23 +776,23 @@ function buildScatterOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
       nameLocation: "middle",
       nameGap: 28,
       axisLabel: {
-        color: "#9bb0d3",
+        color: colors.axis,
         formatter: (value: string | number) => formatValue(value, "decimal"),
       },
-      splitLine: { lineStyle: { color: "rgba(50, 65, 92, 0.45)" } },
+      splitLine: { lineStyle: { color: colors.grid } },
     },
     yAxis: {
       type: "value",
       name: spec.y_axis_label ?? undefined,
-      nameTextStyle: { color: "#9bb0d3", padding: [0, 0, 8, 0] },
+      nameTextStyle: { color: colors.axis, padding: [0, 0, 8, 0] },
       axisLabel: {
-        color: "#9bb0d3",
+        color: colors.axis,
         formatter: (value: string | number) => formatValue(value, spec.value_format, spec.metric_unit),
       },
-      splitLine: { lineStyle: { color: "rgba(50, 65, 92, 0.45)" } },
+      splitLine: { lineStyle: { color: colors.grid } },
     },
     dataZoom: withZoom
-      ? [{ type: "inside", xAxisIndex: [0] }, { type: "slider", xAxisIndex: [0], height: 20, bottom: 12 }]
+      ? [{ type: "inside", xAxisIndex: [0] }, { type: "slider", xAxisIndex: [0], height: 20, bottom: 12, borderColor: colors.border, backgroundColor: colors.zoom, fillerColor: colors.zoomFill, textStyle: { color: colors.axis }, handleStyle: { color: colors.axis } }]
       : [],
     series: [
       {
@@ -783,14 +817,14 @@ function buildScatterOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
                 return Math.min(42, Math.max(12, raw));
               }
             : 12,
-        itemStyle: { color: PALETTE[0], opacity: 0.82 },
-        emphasis: { itemStyle: { borderColor: "#edf3ff", borderWidth: 1 } },
+        itemStyle: { color: colors.palette[0], opacity: 0.82 },
+        emphasis: { itemStyle: { borderColor: colors.text, borderWidth: 1 } },
       },
     ],
   };
 }
 
-function buildPieOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOption | null {
+function buildPieOption(rows: DatasetRow[], spec: VisualizationSpec, colors: ChartColors): EChartsOption | null {
   const x = spec.encoding.x;
   const metric = spec.encoding.y[0];
   if (!x || !metric) {
@@ -799,19 +833,24 @@ function buildPieOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOpt
 
   return {
     aria: { enabled: true },
-    color: PALETTE,
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
+    color: colors.palette,
     animationDuration: 350,
     tooltip: {
+      backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text },
       trigger: "item",
-      backgroundColor: "rgba(8, 12, 22, 0.94)",
-      borderColor: "#24324d",
-      textStyle: { color: "#edf3ff" },
       formatter: buildTooltipFormatter(spec),
     },
     legend: {
       type: "scroll",
+      pageTextStyle: { color: colors.secondary },
+      pageIconColor: colors.axis,
+      pageIconInactiveColor: colors.border,
+      inactiveColor: colors.axis,
       bottom: 0,
-      textStyle: { color: "#a9b8d4" },
+      textStyle: { color: colors.secondary },
     },
     dataset: [{ id: "raw", source: rows }],
     series: [
@@ -823,11 +862,11 @@ function buildPieOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOpt
         bottom: 32,
         avoidLabelOverlap: true,
         itemStyle: {
-          borderColor: "#0c1220",
+          borderColor: colors.background,
           borderWidth: 2,
         },
         label: {
-          color: "#edf3ff",
+          color: colors.text,
           formatter: "{b}\n{d}%",
         },
         encode: {
@@ -847,7 +886,7 @@ function previewDimensionIndex(row: DatasetRow | undefined, field: string | null
   return Object.keys(row).indexOf(field);
 }
 
-function buildHeatmapOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOption | null {
+function buildHeatmapOption(rows: DatasetRow[], spec: VisualizationSpec, colors: ChartColors): EChartsOption | null {
   const x = spec.encoding.x;
   const yCategory = spec.encoding.color ?? spec.encoding.series;
   const metric = spec.encoding.y[0];
@@ -856,16 +895,21 @@ function buildHeatmapOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
   }
   return {
     aria: { enabled: true },
-    color: PALETTE,
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
+    color: colors.palette,
     tooltip: {
+      backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text },
       trigger: "item",
       formatter: buildTooltipFormatter(spec),
     },
     grid: { top: 32, left: 20, right: 20, bottom: 36, containLabel: true },
     dataset: [{ id: "raw", source: rows }],
-    xAxis: { type: "category", name: spec.x_axis_label ?? undefined },
-    yAxis: { type: "category", name: yCategory },
+    xAxis: { type: "category", name: spec.x_axis_label ?? undefined, axisLabel: { color: colors.axis }, axisLine: { lineStyle: { color: colors.axisLine } } },
+    yAxis: { type: "category", name: yCategory, axisLabel: { color: colors.axis }, axisLine: { lineStyle: { color: colors.axisLine } } },
     visualMap: {
+      textStyle: { color: colors.secondary },
       min: 0,
       max: Math.max(
         ...rows.map((row) => Number(row[metric] ?? 0)).filter((value) => Number.isFinite(value)),
@@ -875,7 +919,7 @@ function buildHeatmapOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
       orient: "horizontal",
       left: "center",
       bottom: 0,
-      inRange: { color: ["#0b1d33", "#5da8ff", "#f2b14b"] },
+      inRange: { color: colors.heatmap },
     },
     series: [
       {
@@ -893,7 +937,7 @@ function buildHeatmapOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
   };
 }
 
-function buildTreemapOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOption | null {
+function buildTreemapOption(rows: DatasetRow[], spec: VisualizationSpec, colors: ChartColors): EChartsOption | null {
   const nameField = spec.encoding.x;
   const metric = spec.encoding.y[0];
   if (!nameField || !metric) {
@@ -901,10 +945,16 @@ function buildTreemapOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
   }
   return {
     aria: { enabled: true },
-    tooltip: { formatter: buildTooltipFormatter(spec) },
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
+    color: colors.palette,
+    tooltip: { formatter: buildTooltipFormatter(spec), backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text } },
     series: [
       {
         type: "treemap",
+        label: { color: colors.insideLabel },
+        itemStyle: { borderColor: colors.background },
         roam: false,
         nodeClick: false,
         breadcrumb: { show: false },
@@ -917,7 +967,7 @@ function buildTreemapOption(rows: DatasetRow[], spec: VisualizationSpec): EChart
   };
 }
 
-function buildFunnelOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOption | null {
+function buildFunnelOption(rows: DatasetRow[], spec: VisualizationSpec, colors: ChartColors): EChartsOption | null {
   const nameField = spec.encoding.x;
   const metric = spec.encoding.y[0];
   if (!nameField || !metric) {
@@ -926,10 +976,16 @@ function buildFunnelOption(rows: DatasetRow[], spec: VisualizationSpec): ECharts
   const funnelSort = spec.transform.sort === "asc" ? "ascending" : "descending";
   return {
     aria: { enabled: true },
-    tooltip: { formatter: buildTooltipFormatter(spec) },
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
+    color: colors.palette,
+    tooltip: { formatter: buildTooltipFormatter(spec), backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text } },
     series: [
       {
         type: "funnel",
+        label: { color: colors.text },
+        itemStyle: { borderColor: colors.background },
         left: "10%",
         top: 24,
         bottom: 24,
@@ -944,7 +1000,7 @@ function buildFunnelOption(rows: DatasetRow[], spec: VisualizationSpec): ECharts
   };
 }
 
-function buildHistogramOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOption | null {
+function buildHistogramOption(rows: DatasetRow[], spec: VisualizationSpec, colors: ChartColors): EChartsOption | null {
   const x = spec.encoding.x;
   const metric = spec.encoding.y[0];
   if (!x || !metric) {
@@ -954,15 +1010,16 @@ function buildHistogramOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
 
   return {
     aria: { enabled: true },
-    color: [PALETTE[0]],
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
+    color: [colors.palette[0]],
     animationDuration: 350,
     grid: { top: 28, left: 20, right: 20, bottom: withZoom ? 72 : 40, containLabel: true },
     dataset: [{ id: "raw", source: rows }],
     tooltip: {
+      backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text },
       trigger: "axis",
-      backgroundColor: "rgba(8, 12, 22, 0.94)",
-      borderColor: "#24324d",
-      textStyle: { color: "#edf3ff" },
       formatter: buildTooltipFormatter(spec),
     },
     xAxis: {
@@ -971,35 +1028,37 @@ function buildHistogramOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
       nameLocation: "middle",
       nameGap: 30,
       axisLabel: {
-        color: "#9bb0d3",
+        color: colors.axis,
         hideOverlap: true,
         margin: 14,
         rotate: rows.length > 16 ? 20 : 0,
         formatter: buildAxisLabelFormatter(spec, "x", "category"),
       },
-      axisLine: { lineStyle: { color: "#32415c" } },
+      axisLine: { lineStyle: { color: colors.axisLine } },
     },
     yAxis: {
       type: "value",
       name: spec.y_axis_label ?? metric,
-      nameTextStyle: { color: "#9bb0d3", padding: [0, 0, 8, 0] },
+      nameTextStyle: { color: colors.axis, padding: [0, 0, 8, 0] },
       axisLabel: {
-        color: "#9bb0d3",
+        color: colors.axis,
         formatter: buildAxisLabelFormatter(spec, "y", "value"),
       },
-      splitLine: { lineStyle: { color: "rgba(50, 65, 92, 0.45)" } },
+      splitLine: { lineStyle: { color: colors.grid } },
     },
     dataZoom: withZoom
       ? [
           { type: "inside", xAxisIndex: [0] },
           {
             type: "slider",
+            textStyle: { color: colors.axis },
+            handleStyle: { color: colors.axis },
             xAxisIndex: [0],
             height: 20,
             bottom: 12,
-            borderColor: "#24324d",
-            backgroundColor: "rgba(10, 17, 29, 0.8)",
-            fillerColor: "rgba(93, 168, 255, 0.18)",
+            borderColor: colors.border,
+            backgroundColor: colors.zoom,
+            fillerColor: colors.zoomFill,
           },
         ]
       : [],
@@ -1011,7 +1070,7 @@ function buildHistogramOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
         encode: { x, y: metric, tooltip: [x, metric] },
         barCategoryGap: "4%",
         itemStyle: {
-          color: PALETTE[0],
+          color: colors.palette[0],
           borderRadius: [4, 4, 0, 0],
         },
         emphasis: { focus: "series" as const },
@@ -1020,7 +1079,7 @@ function buildHistogramOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
   };
 }
 
-function buildWaterfallOption(rows: DatasetRow[], spec: VisualizationSpec): EChartsOption | null {
+function buildWaterfallOption(rows: DatasetRow[], spec: VisualizationSpec, colors: ChartColors): EChartsOption | null {
   const x = spec.encoding.x;
   const metric = spec.encoding.y[0];
   if (!x || !metric) {
@@ -1050,13 +1109,14 @@ function buildWaterfallOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
 
   return {
     aria: { enabled: true },
+    backgroundColor: colors.background,
+    textStyle: { color: colors.text },
+    darkMode: colors.background !== "#ffffff",
     animationDuration: 350,
     grid: { top: 28, left: 20, right: 20, bottom: 46, containLabel: true },
     tooltip: {
+      backgroundColor: colors.tooltip, borderColor: colors.border, textStyle: { color: colors.text },
       trigger: "axis",
-      backgroundColor: "rgba(8, 12, 22, 0.94)",
-      borderColor: "#24324d",
-      textStyle: { color: "#edf3ff" },
       formatter: (params: unknown) => {
         const items = Array.isArray(params) ? params : [params];
         const first = items.find(
@@ -1081,24 +1141,24 @@ function buildWaterfallOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
       nameLocation: "middle",
       nameGap: 30,
       axisLabel: {
-        color: "#9bb0d3",
+        color: colors.axis,
         hideOverlap: true,
         margin: 14,
         rotate: points.length > 12 ? 18 : 0,
       },
-      axisLine: { lineStyle: { color: "#32415c" } },
+      axisLine: { lineStyle: { color: colors.axisLine } },
     },
     yAxis: {
       type: "value",
       min: axisMin,
       max: axisMax,
       name: spec.y_axis_label ?? metric,
-      nameTextStyle: { color: "#9bb0d3", padding: [0, 0, 8, 0] },
+      nameTextStyle: { color: colors.axis, padding: [0, 0, 8, 0] },
       axisLabel: {
-        color: "#9bb0d3",
+        color: colors.axis,
         formatter: buildAxisLabelFormatter(spec, "y", "value"),
       },
-      splitLine: { lineStyle: { color: "rgba(50, 65, 92, 0.45)" } },
+      splitLine: { lineStyle: { color: colors.grid } },
     },
     series: [
       {
@@ -1116,11 +1176,11 @@ function buildWaterfallOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
         stack: "waterfall",
         data: points.map((point) => ({
           value: point.amount,
-          itemStyle: { color: point.delta >= 0 ? PALETTE[1] : PALETTE[3] },
+          itemStyle: { color: point.delta >= 0 ? colors.palette[1] : colors.palette[3] },
           label: {
             show: true,
             position: point.delta >= 0 ? "top" : "bottom",
-            color: "#edf3ff",
+            color: colors.text,
             formatter: () =>
               `${point.delta >= 0 ? "+" : ""}${formatValue(
                 point.delta,
@@ -1139,7 +1199,9 @@ function buildWaterfallOption(rows: DatasetRow[], spec: VisualizationSpec): ECha
 export function buildChartOption(
   spec: VisualizationSpec | null | undefined,
   preview: QueryPreview | null | undefined,
+  theme: ChartTheme = "dark",
 ): EChartsOption | null {
+  const colors = getChartColors(theme);
   if (!spec || !preview) {
     return null;
   }
@@ -1166,28 +1228,28 @@ export function buildChartOption(
     normalizedSpec.kind === "bar_stacked" ||
     normalizedSpec.kind === "combo_line_bar"
   ) {
-    return buildCartesianOption(normalizedSpec.kind, transformedRows, normalizedSpec);
+    return buildCartesianOption(normalizedSpec.kind, transformedRows, normalizedSpec, colors);
   }
   if (normalizedSpec.kind === "scatter" || normalizedSpec.kind === "bubble") {
-    return buildScatterOption(transformedRows, normalizedSpec);
+    return buildScatterOption(transformedRows, normalizedSpec, colors);
   }
   if (normalizedSpec.kind === "pie" || normalizedSpec.kind === "donut") {
-    return buildPieOption(transformedRows, normalizedSpec);
+    return buildPieOption(transformedRows, normalizedSpec, colors);
   }
   if (normalizedSpec.kind === "heatmap") {
-    return buildHeatmapOption(transformedRows, normalizedSpec);
+    return buildHeatmapOption(transformedRows, normalizedSpec, colors);
   }
   if (normalizedSpec.kind === "treemap") {
-    return buildTreemapOption(transformedRows, normalizedSpec);
+    return buildTreemapOption(transformedRows, normalizedSpec, colors);
   }
   if (normalizedSpec.kind === "funnel") {
-    return buildFunnelOption(transformedRows, normalizedSpec);
+    return buildFunnelOption(transformedRows, normalizedSpec, colors);
   }
   if (normalizedSpec.kind === "histogram") {
-    return buildHistogramOption(transformedRows, normalizedSpec);
+    return buildHistogramOption(transformedRows, normalizedSpec, colors);
   }
   if (normalizedSpec.kind === "waterfall") {
-    return buildWaterfallOption(transformedRows, normalizedSpec);
+    return buildWaterfallOption(transformedRows, normalizedSpec, colors);
   }
   return null;
 }
@@ -1267,45 +1329,45 @@ export function collectVisualizationDebugWarnings(
 export function summarizePreviewCoverage(spec: VisualizationSpec): string {
   const shown = Math.min(spec.transform.top_n ?? spec.transform.limit, spec.data_source.row_count);
   if (spec.data_source.is_truncated) {
-    return `${shown} rows shown from a truncated preview of ${spec.data_source.row_count}.`;
+    return `Показано строк: ${shown} из усечённого предпросмотра (${spec.data_source.row_count})`;
   }
-  return `${shown} rows visualized from ${spec.data_source.row_count} available.`;
+  return `Показано строк: ${shown} из ${spec.data_source.row_count} доступных`;
 }
 
 export function describePlannerMode(spec: VisualizationSpec): string {
   if (spec.planner_mode === "llm_validated") {
-    return "LLM validated";
+    return "Проверено LLM";
   }
   if (spec.planner_mode === "table_fallback") {
-    return "Table fallback";
+    return "Запасной вариант — таблица";
   }
-  return "Rule fallback";
+  return "Запасной вариант — правила";
 }
 
 export function humanizeWarning(warning: string): string {
   if (warning === "preview_truncated") {
-    return "Preview is truncated. Use the chart for direction, not exact coverage."
+    return "Предпросмотр усечён. Используйте график для оценки тенденции, а не точного охвата";
   }
   if (warning === "truncated_preview") {
-    return "Debug: truncated preview."
+    return "Отладка: усечённый предпросмотр";
   }
   if (warning === "unsupported_kind") {
-    return "Debug: unsupported visualization kind."
+    return "Отладка: неподдерживаемый вид графика";
   }
   if (warning === "unsafe_encoding") {
-    return "Debug: unsafe chart encoding."
+    return "Отладка: небезопасное кодирование графика";
   }
   if (warning === "high_cardinality") {
-    return "Debug: high-cardinality chart payload."
+    return "Отладка: график с большим количеством уникальных значений";
   }
   if (warning === "empty_preview") {
-    return "Debug: empty execution preview."
+    return "Отладка: пустой предпросмотр выполнения";
   }
   if (warning === "visualization_llm_parse_failed") {
-    return "Planner fell back to a safe chart because model output was malformed."
+    return "Планировщик использовал безопасный график, поскольку ответ модели оказался некорректным";
   }
   if (warning === "visualization_llm_validation_failed") {
-    return "Planner rejected an unsafe chart proposal and used the governed fallback."
+    return "Планировщик отклонил небезопасное предложение графика и использовал заданный запасной вариант";
   }
   return warning.replace(/_/g, " ");
 }

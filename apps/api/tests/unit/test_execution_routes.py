@@ -4,11 +4,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from rhetorica_api.app.main import create_app
-from rhetorica_api.app.routes import confluence_connectors as confluence_connector_routes
 from rhetorica_api.app.routes import connectors as connector_routes
 from rhetorica_api.app.routes import execution as execution_routes
 from rhetorica_api.app.routes import llm_connectors as llm_connector_routes
-from rhetorica_api.app.routes import openmetadata_connectors as openmetadata_connector_routes
 from rhetorica_api.app.settings import settings
 
 
@@ -53,8 +51,6 @@ def _client(tmp_path: Path, fake_celery: _FakeCeleryApp) -> TestClient:
         clear_celery_cache()
     connector_routes._repository.cache_clear()
     llm_connector_routes._repository.cache_clear()
-    confluence_connector_routes._repository.cache_clear()
-    openmetadata_connector_routes._repository.cache_clear()
     execution_routes._celery_app = lambda: fake_celery  # type: ignore[assignment]
     _, runtime = execution_routes._runtime()
     runtime.create_schema()
@@ -177,19 +173,17 @@ def test_execution_detail_returns_history_and_result_payload(tmp_path: Path) -> 
     )
     execution_routes._services()[0].execute_prepared(
         execution_id,
-        execution_routes.ExecuteSqlRequest.model_validate(
-            {
-                "sql": "INSERT INTO t SELECT 1",
-                "connection": {
-                    "engine": "clickhouse",
-                    "host": "localhost",
-                    "port": 8123,
-                    "username": "default",
-                    "database": "default",
-                },
-                "workspace_id": "ws-api",
-            }
-        ),
+        execution_routes.ExecuteSqlRequest.model_validate({
+            "sql": "INSERT INTO t SELECT 1",
+            "connection": {
+                "engine": "clickhouse",
+                "host": "localhost",
+                "port": 8123,
+                "username": "default",
+                "database": "default",
+            },
+            "workspace_id": "ws-api",
+        }),
     )
 
     detail = client.get(f"/v1/sql/executions/{execution_id}")

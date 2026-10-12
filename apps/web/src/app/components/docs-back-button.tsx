@@ -20,10 +20,10 @@ export function DocsBackButton({ fallbackHref }: DocsBackButtonProps) {
         }
         router.push(fallbackHref);
       }}
-      className="inline-flex items-center gap-2 rounded-2xl border border-[#22324d] bg-[#0b1525] px-3 py-2 text-sm font-medium text-[#dbe8ff] transition hover:border-[#3f659a] hover:bg-[#10203a] hover:text-white"
+      className="inline-flex items-center gap-2 rounded-2xl border border-border-strong bg-surface px-3 py-2 text-sm font-medium text-primary transition hover:border-accent-border hover:bg-elevated hover:text-primary"
     >
       <ArrowLeft className="h-4 w-4" />
-      Back
+      Назад
     </button>
   );
 }

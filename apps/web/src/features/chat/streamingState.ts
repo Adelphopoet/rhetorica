@@ -75,9 +75,6 @@ export function createInitialStreamingMessage(generateMessageId: () => string): 
     thinkingBlocks: [],
     toolCalls: [],
     executionStatuses: [],
-    analysisPlan: null,
-    checkpointDigest: null,
-    workerResults: [],
     timestamp: new Date(),
     isStreaming: true,
     isComplete: false,
@@ -118,7 +115,7 @@ export function createStreamErrorEvent(error: unknown): ErrorEvent {
   return {
     type: "error",
     code: "stream_error",
-    message: error instanceof Error ? error.message : "Unknown error",
+    message: error instanceof Error ? error.message : "Неизвестная ошибка",
     timestamp: new Date().toISOString(),
   };
 }
@@ -129,7 +126,7 @@ export function createCancelledMessage(current: StreamingMessage): StreamingMess
     isStreaming: false,
     isComplete: false,
     isError: false,
-    text: current.text || "Generation cancelled",
+    text: current.text || "Создание ответа отменено",
   };
 }
 
@@ -176,7 +173,26 @@ export function applyStreamEvent(
 
   switch (event.type) {
     case "thinking": {
-      pushThinkingBlock(event.content, event.timestamp);
+      if (event.delta && event.content) {
+        const last = steps.thinkingBlocks[steps.thinkingBlocks.length - 1];
+        const latestSequence =
+          steps.thinkingBlocks.length +
+          steps.toolCalls.length +
+          steps.executionStatuses.length -
+          1;
+        if (last && last.sequence === latestSequence) {
+          const merged = { ...last, content: last.content + event.content };
+          steps.thinkingBlocks = [...steps.thinkingBlocks.slice(0, -1), merged];
+          updated = {
+            ...updated,
+            thinkingBlocks: [...updated.thinkingBlocks.slice(0, -1), merged],
+          };
+        } else {
+          pushThinkingBlock(event.content, event.timestamp);
+        }
+      } else {
+        pushThinkingBlock(event.content, event.timestamp);
+      }
       break;
     }
 
@@ -226,16 +242,6 @@ export function applyStreamEvent(
       break;
     }
 
-    case "runtime_state": {
-      updated = {
-        ...updated,
-        analysisPlan: event.analysis_plan ?? updated.analysisPlan ?? null,
-        checkpointDigest: event.checkpoint_digest ?? updated.checkpointDigest ?? null,
-        workerResults: event.worker_results ?? updated.workerResults ?? [],
-      };
-      break;
-    }
-
     case "chunk": {
       const parsedChunk = parseAssistantContent(event.content);
       for (const block of parsedChunk.thinkingBlocks) {
@@ -258,9 +264,6 @@ export function applyStreamEvent(
       updated = {
         ...updated,
         payload: event,
-        analysisPlan: event.analysis_plan ?? updated.analysisPlan ?? null,
-        checkpointDigest: event.checkpoint_digest ?? updated.checkpointDigest ?? null,
-        workerResults: event.worker_results ?? updated.workerResults ?? [],
         text: parsedDone.answer || updated.text || event.answer,
         isStreaming: false,
         isComplete: true,
@@ -275,7 +278,7 @@ export function applyStreamEvent(
         isStreaming: false,
         isComplete: false,
         isError: true,
-        text: updated.text || `Error: ${event.message}`,
+        text: updated.text || `Ошибка: ${event.message}`,
       };
       break;
     }

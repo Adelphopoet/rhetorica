@@ -11,7 +11,7 @@ import {
   type CSSProperties,
 } from "react";
 import { motion, useReducedMotion } from "framer-motion";
-import { Alert, Badge, Button, ScrollArea, Skeleton, Tabs, TabsContent, TabsList, TabsTrigger, useToast } from "@rhetorica/ui";
+import { Alert, Badge, Button, ScrollArea, Skeleton, Spinner, Tabs, TabsContent, TabsList, TabsTrigger, useToast } from "@rhetorica/ui";
 import {
   ChevronDown,
   ChevronUp,
@@ -33,6 +33,7 @@ import {
   type ChatAskResponse,
   type ExecutionHistoryItem,
 } from "@/features/chat/chatViewModel";
+import { DISPLAY_TIME_ZONE_LABEL } from "@/lib/dateTime";
 import type {
   AnalysisBlock,
   AnalysisMetricGridBlock,
@@ -57,6 +58,7 @@ interface ResultSurfaceProps {
   payload?: ChatAskResponse;
   recentExecutions: ExecutionHistoryItem[];
   isOpen: boolean;
+  executionLoading?: boolean;
   onClose: () => void;
 }
 
@@ -99,7 +101,7 @@ function resolveDesktopLayoutBounds(panel: HTMLElement | null): { width: number;
 
 function SurfaceSectionSkeleton({ className }: { className?: string }) {
   return (
-    <div className={cn("rounded-2xl border border-[#1b2740] bg-[#09111e]/80 p-4", className)}>
+    <div className={cn("rounded-2xl border border-border bg-surface/80 p-4", className)}>
       <Skeleton className="h-4 w-40" />
       <Skeleton className="mt-4 h-48 w-full" />
     </div>
@@ -108,26 +110,26 @@ function SurfaceSectionSkeleton({ className }: { className?: string }) {
 
 function ReportMetricGrid({ block }: { block: AnalysisMetricGridBlock }) {
   return (
-    <section className="rounded-[24px] border border-[#1b2740] bg-[#09111e]/84 p-4">
-      {block.title ? <h3 className="text-sm font-semibold text-[#edf3ff]">{block.title}</h3> : null}
+    <section className="rounded-[24px] border border-border bg-surface/[0.84] p-4">
+      {block.title ? <h3 className="text-sm font-semibold text-primary">{block.title}</h3> : null}
       {block.description ? (
-        <p className="mt-1 text-xs leading-6 text-[#7f93b4]">{block.description}</p>
+        <p className="mt-1 text-xs leading-6 text-secondary">{block.description}</p>
       ) : null}
       <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {block.items.map((item) => (
           <div
             key={`${item.label}-${item.value}`}
-            className="rounded-2xl border border-[#21314d] bg-[#0b1423]/90 px-4 py-3"
+            className="rounded-2xl border border-border-strong bg-surface/90 px-4 py-3"
           >
-            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#6f84a6]">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
               {item.label}
             </p>
-            <p className="mt-2 text-base font-semibold text-[#edf3ff]">{item.value}</p>
+            <p className="mt-2 text-base font-semibold text-primary">{item.value}</p>
             {item.delta ? (
-              <p className="mt-1 text-xs text-[#9ec6ff]">{item.delta}</p>
+              <p className="mt-1 text-xs text-accent">{item.delta}</p>
             ) : null}
             {item.context ? (
-              <p className="mt-2 text-xs text-[#7f93b4]">{item.context}</p>
+              <p className="mt-2 text-xs text-secondary">{item.context}</p>
             ) : null}
           </div>
         ))}
@@ -150,14 +152,14 @@ function ReportTextBlock({
       className={cn(
         "rounded-[24px] border p-4",
         tone === "critical"
-          ? "border-[#5b2630] bg-[#170b11]"
+          ? "border-danger-border bg-purple-subtle"
           : tone === "warning"
-            ? "border-[#5c4a22] bg-[#17120b]"
-            : "border-[#1b2740] bg-[#09111e]/84"
+            ? "border-warning-border bg-warning-subtle"
+            : "border-border bg-surface/[0.84]"
       )}
     >
-      <h3 className="text-sm font-semibold text-[#edf3ff]">{title}</h3>
-      <div className="mt-3 text-sm leading-7 text-[#d5e2fb]">
+      <h3 className="text-sm font-semibold text-primary">{title}</h3>
+      <div className="mt-3 text-sm leading-7 text-primary">
         <MarkdownMessage text={body} />
       </div>
     </section>
@@ -193,6 +195,7 @@ export function ResultSurface({
   payload,
   recentExecutions,
   isOpen,
+  executionLoading = false,
   onClose,
 }: ResultSurfaceProps) {
   const { addToast } = useToast();
@@ -322,12 +325,12 @@ export function ResultSurface({
   }, [isResizing]);
 
   const summaryCards = [
-    { label: "Rows", value: String(resultViewModel.rowCount), tone: "text-[#edf3ff]" },
-    { label: "Latency", value: resultViewModel.durationLabel, tone: "text-[#edf3ff]" },
+    { label: "Строк", value: String(resultViewModel.rowCount), tone: "text-primary" },
+    { label: "Задержка", value: resultViewModel.durationLabel, tone: "text-primary" },
     {
-      label: "Connector",
+      label: "Подключение",
       value: resultViewModel.connectorLabel,
-      tone: "text-[#9ec6ff]",
+      tone: "text-accent",
     },
   ];
   const panelVisible = Boolean(payload) && isOpen;
@@ -383,7 +386,7 @@ export function ResultSurface({
       return (
         <ReportTextBlock
           key={`note-${index}`}
-          title={block.title ?? "Analyst note"}
+          title={block.title ?? "Заметка аналитика"}
           body={block.markdown}
         />
       );
@@ -401,17 +404,17 @@ export function ResultSurface({
     if (block.kind === "section_header") {
       return (
         <section key={`header-${index}`} className="pt-1">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#7f93b4]">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-secondary">
             {block.title}
           </p>
           {block.description ? (
-            <p className="mt-1 text-sm leading-6 text-[#a8bbd8]">{block.description}</p>
+            <p className="mt-1 text-sm leading-6 text-secondary">{block.description}</p>
           ) : null}
         </section>
       );
     }
     if (block.kind === "divider") {
-      return <div key={`divider-${index}`} className="h-px bg-[#1b2740]" />;
+      return <div key={`divider-${index}`} className="h-px bg-hover" />;
     }
     if (block.kind === "table") {
       const blockKey = `table-${index}`;
@@ -420,25 +423,26 @@ export function ResultSurface({
       return (
         <section
           key={blockKey}
-          className="rounded-[24px] border border-[#1b2740] bg-[#09111e]/84 p-4"
+          className="rounded-[24px] border border-border bg-surface/[0.84] p-4"
         >
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-semibold text-[#edf3ff]">
-                {block.title ?? "Drilldown rows"}
+              <h3 className="text-sm font-semibold text-primary">
+                {block.title ?? "Строки детализации"}
               </h3>
-              <p className="mt-1 text-xs leading-6 text-[#7f93b4]">
-                {block.description ?? "Raw rows stay secondary until you explicitly ask for them."}
+              <p className="mt-1 text-xs leading-6 text-secondary">
+                {block.description ??
+                  "Исходные строки остаются второстепенными, пока вы не запросите их явно"}
               </p>
             </div>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="rounded-full border border-[#23324e] bg-[#0d1729]/85"
+              className="rounded-full border border-border-strong bg-surface/85"
               onClick={() => toggleTableBlock(blockKey)}
             >
-              {visible ? "Hide rows" : block.action_label ?? "Show rows"}
+              {visible ? "Скрыть строки" : block.action_label ?? "Показать строки"}
             </Button>
           </div>
           {visible ? (
@@ -447,7 +451,7 @@ export function ResultSurface({
                 <LazyResultTable
                   columns={block.preview?.columns ?? block.columns ?? resultViewModel.execution?.preview.columns ?? []}
                   rows={block.preview?.rows ?? resultViewModel.execution?.preview.rows ?? []}
-                  emptyMessage="Execution results will appear here once a guarded query finishes."
+                  emptyMessage="Результаты выполнения появятся здесь после завершения защищённого запроса"
                 />
               </Suspense>
             </div>
@@ -462,8 +466,8 @@ export function ResultSurface({
     if (!exportConversationId || !exportMessageId) {
       addToast({
         type: "error",
-        title: "Export unavailable",
-        description: "This answer does not have a persisted snapshot yet.",
+        title: "Экспорт недоступен",
+        description: "У этого ответа ещё нет сохранённого снимка",
       });
       return;
     }
@@ -478,14 +482,14 @@ export function ResultSurface({
       });
       addToast({
         type: "success",
-        title: "Export ready",
-        description: `${format.toUpperCase()} snapshot downloaded.`,
+        title: "Экспорт готов",
+        description: `Снимок ${format.toUpperCase()} скачан`,
       });
     } catch (error) {
       addToast({
         type: "error",
-        title: "Export failed",
-        description: error instanceof Error ? error.message : "Unknown export failure.",
+        title: "Не удалось выполнить экспорт",
+        description: error instanceof Error ? error.message : "Неизвестная ошибка экспорта",
       });
     } finally {
       setExportingFormat(null);
@@ -500,10 +504,10 @@ export function ResultSurface({
     <>
       <button
         type="button"
-        aria-label="Close result panel"
+        aria-label="Закрыть панель результатов"
         onClick={onClose}
         className={cn(
-          "fixed inset-0 z-30 bg-[#02050c]/72 backdrop-blur-sm transition xl:hidden",
+          "fixed inset-0 z-30 bg-overlay/[0.72] backdrop-blur-sm transition xl:hidden",
           panelVisible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
         )}
       />
@@ -523,7 +527,7 @@ export function ResultSurface({
         data-panel-state={panelVisible ? "open" : "closed"}
         data-panel-width={desktopWidth}
         className={cn(
-          "fixed inset-y-3 right-3 z-40 flex w-full max-w-[min(100vw-24px,560px)] flex-col rounded-[28px] border border-[#172235] bg-[linear-gradient(180deg,rgba(7,11,19,0.98),rgba(8,13,23,0.98))] shadow-[-24px_0_80px_rgba(0,0,0,0.45)] duration-200 ease-out xl:relative xl:inset-auto xl:right-auto xl:z-0 xl:h-full xl:max-w-none xl:shrink-0 xl:overflow-hidden xl:rounded-none xl:rounded-r-[32px] xl:border-y-0 xl:border-r-0 xl:shadow-none",
+          "fixed inset-y-3 right-3 z-40 flex w-full max-w-[min(100vw-24px,560px)] flex-col rounded-[28px] border border-border bg-[linear-gradient(180deg,rgb(var(--color-page)/0.98),rgb(var(--color-surface)/0.98))] shadow-[-24px_0_80px_rgb(var(--color-shadow)/calc(0.45*var(--shadow-opacity-scale)))] duration-200 ease-out xl:relative xl:inset-auto xl:right-auto xl:z-0 xl:h-full xl:max-w-none xl:shrink-0 xl:overflow-hidden xl:rounded-none xl:rounded-r-[32px] xl:border-y-0 xl:border-r-0 xl:shadow-none",
           isResizing ? "transition-none" : "transition-[width,opacity,transform,border-color]",
           panelVisible
             ? "translate-x-0 xl:w-[var(--result-surface-width)] xl:min-w-[var(--result-surface-width)]"
@@ -532,7 +536,7 @@ export function ResultSurface({
       >
         <button
           type="button"
-          aria-label="Resize result surface"
+          aria-label="Изменить размер панели результатов"
           role="separator"
           aria-orientation="vertical"
           onPointerDown={(event) => {
@@ -541,11 +545,11 @@ export function ResultSurface({
             beginResize(event.clientX);
           }}
           className={cn(
-            "absolute left-1 top-0 z-20 hidden h-full w-6 cursor-col-resize items-center justify-start border-0 bg-transparent pl-1 text-[#5d7497] transition hover:text-[#9ec6ff] xl:flex",
+            "absolute left-1 top-0 z-20 hidden h-full w-6 cursor-col-resize items-center justify-start border-0 bg-transparent pl-1 text-muted transition hover:text-accent xl:flex",
             (!panelVisible || !payload) && "xl:hidden"
           )}
         >
-          <span className="flex h-16 w-2 items-center justify-center rounded-full border border-[#22314d] bg-[#09111e]/94 shadow-[0_0_0_1px_rgba(8,13,23,0.9)]">
+          <span className="flex h-16 w-2 items-center justify-center rounded-full border border-border-strong bg-surface/[0.94] shadow-[0_0_0_1px_rgb(var(--color-shadow)/calc(0.9*var(--shadow-opacity-scale)))]">
             <GripVertical className="h-4 w-4" />
           </span>
         </button>
@@ -558,10 +562,21 @@ export function ResultSurface({
               : "translate-x-3 opacity-0 delay-0"
           )}
         >
-          <div className="flex items-center justify-between gap-4 border-b border-[#16233a] px-4 py-3 sm:px-5 xl:px-6">
-            <h2 className="text-base font-semibold tracking-[-0.03em] text-[#eef4ff]">
-              Analyst inspection rail
-            </h2>
+          <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-3 sm:px-5 xl:px-6">
+            <div className="flex min-w-0 flex-wrap items-center gap-3">
+              <h2 className="text-base font-semibold tracking-[-0.03em] text-primary">
+                Панель проверки аналитика
+              </h2>
+              {panelVisible && executionLoading ? (
+                <span
+                  role="status"
+                  className="flex items-center gap-2 rounded-full border border-border-strong bg-elevated px-3 py-1 text-xs text-secondary"
+                >
+                  <Spinner size="xs" />
+                  Загрузка результата выполнения…
+                </span>
+              ) : null}
+            </div>
 
             <Button
               type="button"
@@ -571,13 +586,13 @@ export function ResultSurface({
               className="gap-2"
             >
               <PanelRightClose className="h-4 w-4" />
-              <span className="hidden xl:inline">Hide</span>
+              <span className="hidden xl:inline">Скрыть</span>
             </Button>
           </div>
 
           <ScrollArea className="flex-1">
             <div className="space-y-5 px-4 py-4 sm:px-5 xl:px-6">
-            <section className="rounded-[24px] border border-[#1b2740] bg-[radial-gradient(circle_at_top_right,rgba(93,168,255,0.14),transparent_26%),linear-gradient(180deg,rgba(9,14,24,0.96),rgba(10,16,28,0.98))] p-4">
+            <section className="rounded-[24px] border border-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-accent)/0.14),transparent_26%),linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))] p-4">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="primary" className="gap-1.5 px-3 py-1">
                   <Database className="h-3.5 w-3.5" />
@@ -585,7 +600,7 @@ export function ResultSurface({
                 </Badge>
                 <StatusBadge status={resultViewModel.resultStatus} />
                 <Badge variant="info" className="px-3 py-1">
-                  Sources: {resultViewModel.sourcesLabel}
+                  Источники: {resultViewModel.sourcesLabel}
                 </Badge>
               </div>
 
@@ -593,9 +608,9 @@ export function ResultSurface({
                 {summaryCards.map((card) => (
                   <div
                     key={card.label}
-                    className="rounded-2xl border border-[#21314d] bg-[#0b1423]/90 px-4 py-3"
+                    className="rounded-2xl border border-border-strong bg-surface/90 px-4 py-3"
                   >
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#6f84a6]">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
                       {card.label}
                     </p>
                     <p className={cn("mt-2 text-base font-semibold", card.tone)}>{card.value}</p>
@@ -606,7 +621,7 @@ export function ResultSurface({
               {resultViewModel.warnings.length ? (
                 <Alert
                   variant="warning"
-                  title="Execution warnings"
+                  title="Предупреждения выполнения"
                   description={
                     <ul className="space-y-1">
                       {resultViewModel.warnings.map((warning, index) => (
@@ -621,7 +636,7 @@ export function ResultSurface({
               {resultViewModel.execution?.error_message ? (
                 <Alert
                   variant="danger"
-                  title="Execution error"
+                  title="Ошибка выполнения"
                   description={resultViewModel.execution.error_message}
                   className="mt-4"
                 />
@@ -633,7 +648,7 @@ export function ResultSurface({
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="gap-2 rounded-full border border-[#23324e] bg-[#0d1729]/85"
+                    className="gap-2 rounded-full border border-border-strong bg-surface/85"
                     onClick={() => {
                       setIsExportMenuOpen((current) => !current);
                     }}
@@ -642,21 +657,21 @@ export function ResultSurface({
                     disabled={exportingFormat !== null}
                   >
                     <Download className="h-4 w-4" />
-                    {exportingFormat ? `Exporting ${exportingFormat.toUpperCase()}...` : "Export"}
+                    {exportingFormat ? `Экспорт ${exportingFormat.toUpperCase()}…` : "Экспорт"}
                     <ChevronDown className="h-4 w-4" />
                   </Button>
                   {isExportMenuOpen ? (
                     <div
                       role="menu"
-                      aria-label="Export report"
-                      className="absolute left-0 top-full z-20 mt-2 min-w-36 overflow-hidden rounded-2xl border border-[#23324e] bg-[#0b1423] p-1 shadow-2xl shadow-black/35"
+                      aria-label="Экспорт отчёта"
+                      className="absolute left-0 top-full z-20 mt-2 min-w-36 overflow-hidden rounded-2xl border border-border-strong bg-surface p-1 shadow-2xl shadow-shadow/35"
                     >
                       {(["html", "pdf", "ipynb"] as AnalysisExportFormat[]).map((format) => (
                         <button
                           key={format}
                           type="button"
                           role="menuitem"
-                          className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-semibold uppercase text-[#d5e2fb] transition hover:bg-[#162238] hover:text-[#edf3ff]"
+                          className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-semibold uppercase text-primary transition hover:bg-elevated hover:text-primary"
                           onClick={() => {
                             void handleExport(format);
                           }}
@@ -671,20 +686,20 @@ export function ResultSurface({
               ) : null}
             </section>
 
-            <section className="rounded-[24px] border border-[#1b2740] bg-[#09111e]/84 p-4">
+            <section className="rounded-[24px] border border-border bg-surface/[0.84] p-4">
               <Tabs key={tabsResetKey} defaultValue={resultViewModel.defaultTab}>
                 <TabsList className="w-full justify-start gap-2 overflow-auto border-0 bg-transparent p-0">
                   <TabsTrigger
                     value="result"
-                    className="rounded-full border border-[#23324e] bg-[#0d1729]/85 px-3 py-2 data-[state=active]:border-[#5da8ff] data-[state=active]:bg-[#5da8ff] data-[state=active]:text-white"
+                    className="rounded-full border border-border-strong bg-surface/85 px-3 py-2 data-[state=active]:border-accent data-[state=active]:bg-accent data-[state=active]:text-on-accent"
                   >
                     <Rows3 className="mr-1.5 h-4 w-4" />
-                    Result
+                    Результат
                   </TabsTrigger>
                   <TabsTrigger
                     value="sql"
                     disabled={!resultViewModel.generatedSql}
-                    className="rounded-full border border-[#23324e] bg-[#0d1729]/85 px-3 py-2 data-[state=active]:border-[#5da8ff] data-[state=active]:bg-[#5da8ff] data-[state=active]:text-white"
+                    className="rounded-full border border-border-strong bg-surface/85 px-3 py-2 data-[state=active]:border-accent data-[state=active]:bg-accent data-[state=active]:text-on-accent"
                   >
                     <FileCode2 className="mr-1.5 h-4 w-4" />
                     SQL
@@ -692,28 +707,28 @@ export function ResultSurface({
                   <TabsTrigger
                     value="evidence"
                     disabled={!resultViewModel.hasEvidence}
-                    className="rounded-full border border-[#23324e] bg-[#0d1729]/85 px-3 py-2 data-[state=active]:border-[#5da8ff] data-[state=active]:bg-[#5da8ff] data-[state=active]:text-white"
+                    className="rounded-full border border-border-strong bg-surface/85 px-3 py-2 data-[state=active]:border-accent data-[state=active]:bg-accent data-[state=active]:text-on-accent"
                   >
                     <ShieldAlert className="mr-1.5 h-4 w-4" />
-                    Evidence
+                    Доказательства
                   </TabsTrigger>
                   <TabsTrigger
                     value="optimizer"
                     disabled={!resultViewModel.hasOptimization}
-                    className="rounded-full border border-[#23324e] bg-[#0d1729]/85 px-3 py-2 data-[state=active]:border-[#5da8ff] data-[state=active]:bg-[#5da8ff] data-[state=active]:text-white"
+                    className="rounded-full border border-border-strong bg-surface/85 px-3 py-2 data-[state=active]:border-accent data-[state=active]:bg-accent data-[state=active]:text-on-accent"
                   >
                     <Lightbulb className="mr-1.5 h-4 w-4" />
-                    Optimizer
+                    Оптимизатор
                   </TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="result" className="mt-4 space-y-4">
                   {executiveSummary ? (
-                    <section className="rounded-[24px] border border-[#1b2740] bg-[radial-gradient(circle_at_top_right,rgba(93,168,255,0.14),transparent_26%),linear-gradient(180deg,rgba(9,14,24,0.96),rgba(10,16,28,0.98))] p-4">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#89b7ff]">
-                        Executive summary
+                    <section className="rounded-[24px] border border-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-accent)/0.14),transparent_26%),linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))] p-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent">
+                        Краткое резюме
                       </p>
-                      <div className="mt-3 text-sm leading-7 text-[#e6efff]">
+                      <div className="mt-3 text-sm leading-7 text-primary">
                         <MarkdownMessage text={executiveSummary} />
                       </div>
                     </section>
@@ -729,22 +744,22 @@ export function ResultSurface({
                           preview={resultViewModel.execution?.preview}
                         />
                       </Suspense>
-                      <section className="rounded-[24px] border border-[#1b2740] bg-[#09111e]/84 p-4">
+                      <section className="rounded-[24px] border border-border bg-surface/[0.84] p-4">
                         <div className="flex items-center justify-between gap-3">
                           <div>
-                            <p className="text-sm font-semibold text-[#edf3ff]">Drilldown rows</p>
-                            <p className="mt-1 text-xs text-[#7f93b4]">
-                              Table stays collapsed until you ask for row-level detail.
+                            <p className="text-sm font-semibold text-primary">Строки детализации</p>
+                            <p className="mt-1 text-xs text-secondary">
+                              Таблица свёрнута, пока вы не запросите детализацию по строкам.
                             </p>
                           </div>
                           <Button
                             type="button"
                             variant="ghost"
                             size="sm"
-                            className="rounded-full border border-[#23324e] bg-[#0d1729]/85"
+                            className="rounded-full border border-border-strong bg-surface/85"
                             onClick={() => toggleTableBlock("legacy-table")}
                           >
-                            {expandedTableBlocks["legacy-table"] ? "Hide rows" : "Show rows"}
+                            {expandedTableBlocks["legacy-table"] ? "Скрыть строки" : "Показать строки"}
                           </Button>
                         </div>
                         {expandedTableBlocks["legacy-table"] ? (
@@ -753,7 +768,7 @@ export function ResultSurface({
                               <LazyResultTable
                                 columns={resultViewModel.execution?.preview.columns ?? []}
                                 rows={resultViewModel.execution?.preview.rows ?? []}
-                                emptyMessage="Execution results will appear here once a guarded query finishes."
+                                emptyMessage="Результаты выполнения появятся здесь после завершения защищённого запроса"
                               />
                             </Suspense>
                           </div>
@@ -765,7 +780,7 @@ export function ResultSurface({
                       <LazyResultTable
                         columns={resultViewModel.execution?.preview.columns ?? []}
                         rows={resultViewModel.execution?.preview.rows ?? []}
-                        emptyMessage="Execution results will appear here once a guarded query finishes."
+                        emptyMessage="Результаты выполнения появятся здесь после завершения защищённого запроса"
                       />
                     </Suspense>
                   )}
@@ -774,10 +789,10 @@ export function ResultSurface({
                 <TabsContent value="sql" className="mt-4">
                   <div className="space-y-4">
                     {resultViewModel.generatedSql ? (
-                      <div className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 p-4">
+                      <div className="rounded-2xl border border-border-strong bg-surface/[0.88] p-4">
                         <div className="mb-3 flex items-center justify-between gap-3">
-                          <p className="text-sm font-semibold text-[#edf3ff]">Original SQL draft</p>
-                          <Badge variant="info">LLM output</Badge>
+                          <p className="text-sm font-semibold text-primary">Черновик SQL</p>
+                          <Badge variant="info">Вывод LLM</Badge>
                         </div>
                         <Suspense fallback={<SurfaceSectionSkeleton className="min-h-[240px]" />}>
                           <LazySQLEditor
@@ -787,17 +802,17 @@ export function ResultSurface({
                         </Suspense>
                       </div>
                     ) : (
-                      <div className="rounded-2xl border border-dashed border-[#26334d] bg-[#0c1525]/80 px-4 py-8 text-sm text-[#7f93b4]">
-                        SQL has not been generated for this answer yet.
+                      <div className="rounded-2xl border border-dashed border-border-strong bg-surface/80 px-4 py-8 text-sm text-secondary">
+                        SQL для этого ответа ещё не сформирован.
                       </div>
                     )}
 
                     {resultViewModel.executedSql &&
                     resultViewModel.executedSql !== resultViewModel.generatedSql ? (
-                      <div className="rounded-2xl border border-[#1f3552] bg-[#09111e] p-4">
+                      <div className="rounded-2xl border border-border-strong bg-surface p-4">
                         <div className="mb-3 flex items-center justify-between gap-3">
-                          <p className="text-sm font-semibold text-[#edf3ff]">Executed SQL</p>
-                          <Badge variant="success">Optimizer-applied</Badge>
+                          <p className="text-sm font-semibold text-primary">Выполненный SQL</p>
+                          <Badge variant="success">С оптимизацией</Badge>
                         </div>
                         <Suspense fallback={<SurfaceSectionSkeleton className="min-h-[240px]" />}>
                           <LazySQLEditor
@@ -813,20 +828,20 @@ export function ResultSurface({
                 <TabsContent value="optimizer" className="mt-4">
                   {resultViewModel.optimizationTrace?.optimizer_used ? (
                     <div className="space-y-4">
-                      <div className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 p-4">
+                      <div className="rounded-2xl border border-border-strong bg-surface/[0.88] p-4">
                         <div className="flex flex-wrap items-center gap-2">
                           <Badge variant={resultViewModel.optimizationTrace.applied ? "success" : "warning"}>
-                            {resultViewModel.optimizationTrace.applied ? "Applied" : "Advisory"}
+                            {resultViewModel.optimizationTrace.applied ? "Применено" : "Рекомендация"}
                           </Badge>
                           <Badge variant="info">
-                            Risk: {resultViewModel.optimizationTrace.risk_level ?? "unknown"}
+                            Риск: {resultViewModel.optimizationTrace.risk_level ?? "неизвестно"}
                           </Badge>
                           <Badge variant="default">
-                            Provider: {resultViewModel.optimizationTrace.optimizer_provider ?? "n/a"}
+                            Провайдер: {resultViewModel.optimizationTrace.optimizer_provider ?? "н/д"}
                           </Badge>
                           {typeof resultViewModel.optimizationTrace.confidence === "number" ? (
                             <Badge variant="default">
-                              Confidence: {Math.round(resultViewModel.optimizationTrace.confidence * 100)}%
+                              Уверенность: {Math.round(resultViewModel.optimizationTrace.confidence * 100)}%
                             </Badge>
                           ) : null}
                         </div>
@@ -834,27 +849,27 @@ export function ResultSurface({
                         {resultViewModel.optimizationTrace.warnings.length ? (
                           <Alert
                             variant="warning"
-                            title="Optimizer warnings"
+                            title="Предупреждения оптимизатора"
                             description={resultViewModel.optimizationTrace.warnings.join(", ")}
                             className="mt-4"
                           />
                         ) : null}
 
                         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                          <div className="rounded-2xl border border-[#1c2941] bg-[#09111e] p-4">
-                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7f93b4]">
-                              Original SQL
+                          <div className="rounded-2xl border border-border bg-surface p-4">
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-secondary">
+                              Исходный SQL
                             </p>
-                            <p className="mt-2 whitespace-pre-wrap break-all font-mono text-xs leading-6 text-[#dbe8ff]">
-                              {resultViewModel.optimizationTrace.input_sql ?? resultViewModel.generatedSql ?? "n/a"}
+                            <p className="mt-2 whitespace-pre-wrap break-all font-mono text-xs leading-6 text-primary">
+                              {resultViewModel.optimizationTrace.input_sql ?? resultViewModel.generatedSql ?? "н/д"}
                             </p>
                           </div>
-                          <div className="rounded-2xl border border-[#1c2941] bg-[#09111e] p-4">
-                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7f93b4]">
-                              Executed SQL
+                          <div className="rounded-2xl border border-border bg-surface p-4">
+                            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-secondary">
+                              Выполненный SQL
                             </p>
-                            <p className="mt-2 whitespace-pre-wrap break-all font-mono text-xs leading-6 text-[#dbe8ff]">
-                              {resultViewModel.executedSql ?? resultViewModel.optimizationTrace.optimized_sql_draft ?? "n/a"}
+                            <p className="mt-2 whitespace-pre-wrap break-all font-mono text-xs leading-6 text-primary">
+                              {resultViewModel.executedSql ?? resultViewModel.optimizationTrace.optimized_sql_draft ?? "н/д"}
                             </p>
                           </div>
                         </div>
@@ -865,18 +880,18 @@ export function ResultSurface({
                           {resultViewModel.optimizationTrace.findings.map((finding) => (
                             <div
                               key={finding.rule_id}
-                              className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 p-4"
+                              className="rounded-2xl border border-border-strong bg-surface/[0.88] p-4"
                             >
                               <div className="flex flex-wrap items-center gap-2">
                                 <Badge variant={finding.severity === "warning" ? "warning" : "info"}>
                                   {finding.rule_id}
                                 </Badge>
-                                <p className="text-sm font-semibold text-[#edf3ff]">{finding.title}</p>
+                                <p className="text-sm font-semibold text-primary">{finding.title}</p>
                               </div>
-                              <p className="mt-2 text-sm leading-6 text-[#a8bbd8]">{finding.summary}</p>
+                              <p className="mt-2 text-sm leading-6 text-secondary">{finding.summary}</p>
                               {finding.applies_to.length ? (
-                                <p className="mt-2 text-xs text-[#7f93b4]">
-                                  Applies to: {finding.applies_to.join(", ")}
+                                <p className="mt-2 text-xs text-secondary">
+                                  Применимо к: {finding.applies_to.join(", ")}
                                 </p>
                               ) : null}
                             </div>
@@ -889,48 +904,48 @@ export function ResultSurface({
                           {resultViewModel.optimizationTrace.recommended_actions.map((action) => (
                             <div
                               key={action.action_id}
-                              className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 p-4"
+                              className="rounded-2xl border border-border-strong bg-surface/[0.88] p-4"
                             >
                               <div className="flex flex-wrap items-center gap-2">
                                 <Badge variant={action.applied ? "success" : "info"}>
-                                  {action.applied ? "Applied" : "Suggested"}
+                                  {action.applied ? "Применено" : "Предложено"}
                                 </Badge>
-                                <p className="text-sm font-semibold text-[#edf3ff]">{action.title}</p>
+                                <p className="text-sm font-semibold text-primary">{action.title}</p>
                               </div>
-                              <p className="mt-2 text-sm leading-6 text-[#a8bbd8]">{action.summary}</p>
+                              <p className="mt-2 text-sm leading-6 text-secondary">{action.summary}</p>
                             </div>
                           ))}
                         </div>
                       ) : null}
 
                       <div className="grid gap-3 lg:grid-cols-2">
-                        <div className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 p-4">
-                          <p className="text-sm font-semibold text-[#edf3ff]">Evidence used</p>
-                          <p className="mt-2 text-xs leading-6 text-[#a8bbd8]">
-                            {resultViewModel.optimizationTrace.evidence_used.join(", ") || "n/a"}
+                        <div className="rounded-2xl border border-border-strong bg-surface/[0.88] p-4">
+                          <p className="text-sm font-semibold text-primary">Использованные доказательства</p>
+                          <p className="mt-2 text-xs leading-6 text-secondary">
+                            {resultViewModel.optimizationTrace.evidence_used.join(", ") || "н/д"}
                           </p>
                         </div>
-                        <div className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 p-4">
-                          <p className="text-sm font-semibold text-[#edf3ff]">Citations</p>
-                          <div className="mt-2 space-y-2 text-xs leading-6 text-[#a8bbd8]">
+                        <div className="rounded-2xl border border-border-strong bg-surface/[0.88] p-4">
+                          <p className="text-sm font-semibold text-primary">Ссылки</p>
+                          <div className="mt-2 space-y-2 text-xs leading-6 text-secondary">
                             {resultViewModel.optimizationTrace.citations.length ? (
                               resultViewModel.optimizationTrace.citations.map((citation, index) => (
                                 <div key={`${citation.reference}-${index}`}>
-                                  <span className="font-semibold text-[#dbe8ff]">{citation.label}</span>
+                                  <span className="font-semibold text-primary">{citation.label}</span>
                                   {" · "}
                                   <span>{citation.reference}</span>
                                 </div>
                               ))
                             ) : (
-                              <span>n/a</span>
+                              <span>н/д</span>
                             )}
                           </div>
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="rounded-2xl border border-dashed border-[#26334d] bg-[#0c1525]/80 px-4 py-8 text-sm text-[#7f93b4]">
-                      Optimizer trace appears only for supported pre-execution advisory runs.
+                    <div className="rounded-2xl border border-dashed border-border-strong bg-surface/80 px-4 py-8 text-sm text-secondary">
+                      Трассировка оптимизатора отображается только для поддерживаемых запусков с рекомендациями до выполнения.
                     </div>
                   )}
                 </TabsContent>
@@ -955,13 +970,13 @@ export function ResultSurface({
                         return (
                           <div
                             key={`${claim.claim_id}:${claimIndex}`}
-                            className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 p-4"
+                            className="rounded-2xl border border-border-strong bg-surface/[0.88] p-4"
                           >
                             <div className="flex flex-wrap items-center gap-2">
                               <Badge variant={claim.status === "verified" ? "success" : "warning"}>
                                 {claim.status}
                               </Badge>
-                              <p className="text-sm font-medium leading-6 text-[#eaf2ff]">
+                              <p className="text-sm font-medium leading-6 text-primary">
                                 {claim.text}
                               </p>
                             </div>
@@ -971,9 +986,9 @@ export function ResultSurface({
                                 {linkedEvidence.map((item) => (
                                   <div
                                     key={item.evidence_id}
-                                    className="rounded-xl border border-[#1c2941] bg-[#09111e] px-3 py-2 text-xs leading-6 text-[#97accf]"
+                                    className="rounded-xl border border-border bg-surface px-3 py-2 text-xs leading-6 text-secondary"
                                   >
-                                    <span className="font-semibold text-[#d8e7ff]">
+                                    <span className="font-semibold text-primary">
                                       {item.type}
                                     </span>{" "}
                                     {item.reference}
@@ -989,30 +1004,30 @@ export function ResultSurface({
                       {resultViewModel.uncertaintyFlags.length ? (
                         <Alert
                           variant="warning"
-                          title="Uncertainty flags"
+                          title="Флаги неопределённости"
                           description={resultViewModel.uncertaintyFlags.join(", ")}
                         />
                       ) : null}
                     </div>
                   ) : (
-                    <div className="rounded-2xl border border-dashed border-[#26334d] bg-[#0c1525]/80 px-4 py-8 text-sm text-[#7f93b4]">
-                      Evidence cards appear when the answer includes claims and linked sources.
+                    <div className="rounded-2xl border border-dashed border-border-strong bg-surface/80 px-4 py-8 text-sm text-secondary">
+                      Карточки доказательств появляются, когда ответ содержит утверждения и связанные источники.
                     </div>
                   )}
                 </TabsContent>
               </Tabs>
             </section>
 
-            <section className="rounded-[24px] border border-[#1b2740] bg-[#09111e]/84 p-4">
+            <section className="rounded-[24px] border border-border bg-surface/[0.84] p-4">
               <button
                 type="button"
                 onClick={() => setHistoryExpanded((value) => !value)}
                 className="flex w-full items-center justify-between gap-3"
               >
                 <div>
-                  <p className="text-sm font-semibold text-[#edf3ff]">Recent executions</p>
-                  <p className="mt-1 text-xs text-[#7f93b4]">
-                    Keep operational history nearby, not in the way.
+                  <p className="text-sm font-semibold text-primary">Последние выполнения</p>
+                  <p className="mt-1 text-xs text-secondary">
+                    История выполнений под рукой, но не мешает.
                   </p>
                 </div>
                 <Badge variant="default" className="gap-2">
@@ -1031,27 +1046,27 @@ export function ResultSurface({
                     recentExecutions.map((item) => (
                       <div
                         key={item.execution_id}
-                        className="rounded-2xl border border-[#22314d] bg-[#0c1525]/88 px-4 py-3"
+                        className="rounded-2xl border border-border-strong bg-surface/[0.88] px-4 py-3"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <StatusBadge status={item.status} />
-                          <span className="text-xs text-[#7f93b4]">
-                            {formatExecutionTimestamp(item.updated_at)} UTC
+                          <span className="text-xs text-secondary">
+                            {formatExecutionTimestamp(item.updated_at)} {DISPLAY_TIME_ZONE_LABEL}
                           </span>
                         </div>
-                        <p className="mt-3 text-sm leading-6 text-[#e2ecff]">
+                        <p className="mt-3 text-sm leading-6 text-primary">
                           {shortenSql(item.submitted_sql)}
                         </p>
-                        <div className="mt-2 flex flex-wrap gap-3 text-xs text-[#7f93b4]">
+                        <div className="mt-2 flex flex-wrap gap-3 text-xs text-secondary">
                           <span>ID {item.execution_id.slice(0, 8)}</span>
-                          <span>Rows {item.row_count ?? "-"}</span>
-                          <span>Time {item.duration_ms ? `${item.duration_ms} ms` : "-"}</span>
+                          <span>Строк {item.row_count ?? "-"}</span>
+                          <span>Время {item.duration_ms ? `${item.duration_ms} ms` : "-"}</span>
                         </div>
                       </div>
                     ))
                   ) : (
-                    <p className="rounded-2xl border border-dashed border-[#26334d] bg-[#0c1525]/80 px-4 py-6 text-sm text-[#7f93b4]">
-                      No executions yet. Ask a question and the guarded execution history will land here.
+                    <p className="rounded-2xl border border-dashed border-border-strong bg-surface/80 px-4 py-6 text-sm text-secondary">
+                      Выполнений пока нет. Задайте вопрос — история защищённых выполнений появится здесь.
                     </p>
                   )}
                 </div>
