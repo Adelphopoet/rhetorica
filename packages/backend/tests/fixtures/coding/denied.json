@@ -1,0 +1,46 @@
+{
+  "id": "run-denied",
+  "workspace_id": "analytics",
+  "owner_user_id": "user-1",
+  "source": "web_chat",
+  "conversation_id": "conversation-1",
+  "scenario_id": null,
+  "root_agent_id": "manager",
+  "developer_agent_id": "developer",
+  "qa_agent_id": "qa",
+  "idempotency_key": "request-1",
+  "input_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "phase": "completed",
+  "status": "rejected",
+  "reason_code": "publication_not_authorized",
+  "repository": {
+    "gitlab_connector_id": "gitlab-1",
+    "project_id": "analytics/dbt",
+    "target_branch": "main",
+    "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "data_warehouse": {
+    "connector_id": "trino-1",
+    "catalog": "iceberg",
+    "schema_name": "analytics"
+  },
+  "environment_profile_id": "dbt",
+  "environment_profile_revision": 1,
+  "policy_revision": 3,
+  "candidate": {
+    "artifact_id": "candidate-1",
+    "workspace_id": "analytics",
+    "owner_user_id": "user-1",
+    "run_id": "run-denied",
+    "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "changed_paths": ["models/fct_orders.sql"],
+    "size_bytes": 412,
+    "created_at": "2026-09-22T09:00:00Z"
+  },
+  "validation_report_id": "report-1",
+  "publication_receipt_id": null,
+  "partial_result": null,
+  "created_at": "2026-09-22T08:00:00Z",
+  "deadline": "2026-09-22T08:20:00Z"
+}

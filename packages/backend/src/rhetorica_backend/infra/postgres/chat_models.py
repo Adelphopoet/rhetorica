@@ -165,6 +165,8 @@ class ChatMessageOrm(Base):
     source_provider: Mapped[str | None] = mapped_column(String(32))
     source_message_id: Mapped[str | None] = mapped_column(String(128))
 
+    journal_events: Mapped[list[dict[str, object]] | None] = mapped_column(JSON)
+
     # Execution metadata (optional, for assistant messages)
     generated_sql: Mapped[str | None] = mapped_column(Text)
     execution_id: Mapped[str | None] = mapped_column(String(36))
@@ -211,13 +213,20 @@ class ChatAnswerTraceOrm(Base):
         String(36), ForeignKey("chat_message.id", ondelete="CASCADE"), primary_key=True
     )
     conversation_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("chat_conversation.id", ondelete="CASCADE"), nullable=False, index=True
+        String(36),
+        ForeignKey("chat_conversation.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     trace_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     # Snapshot of the actual backend ledger for this assistant turn.  It must
     # not be reconstructed from conversation-wide, de-duplicated evidence.
-    tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
-    tool_error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tool_call_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    tool_error_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -226,7 +235,9 @@ class LangfuseReviewOutboxOrm(Base):
 
     __tablename__ = "langfuse_review_outbox"
     __table_args__ = (
-        UniqueConstraint("assistant_message_id", "event_type", name="uq_langfuse_review_outbox_event"),
+        UniqueConstraint(
+            "assistant_message_id", "event_type", name="uq_langfuse_review_outbox_event"
+        ),
         Index("ix_langfuse_review_outbox_delivery", "delivery_state", "created_at"),
     )
 
@@ -317,62 +328,3 @@ class ChatToolArtifactOrm(Base):
         "ChatConversationOrm",
         back_populates="tool_artifacts",
     )
-
-
-class ChatAgentSessionOrm(Base):
-    """Persistent OpenAI Agents SDK session for one chat conversation."""
-
-    __tablename__ = "chat_agent_session"
-    __table_args__ = (
-        CheckConstraint(
-            "next_sequence >= 0",
-            name="ck_chat_agent_session_next_sequence_non_negative",
-        ),
-    )
-
-    conversation_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("chat_conversation.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    next_sequence: Mapped[int] = mapped_column(
-        BigInteger,
-        nullable=False,
-        default=0,
-        server_default="0",
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class ChatAgentSessionItemOrm(Base):
-    """Ordered JSON item persisted by the OpenAI Agents SDK Session protocol."""
-
-    __tablename__ = "chat_agent_session_item"
-    __table_args__ = (
-        UniqueConstraint(
-            "conversation_id",
-            "sequence",
-            name="uq_chat_agent_session_item_sequence",
-        ),
-        CheckConstraint(
-            "sequence >= 0",
-            name="ck_chat_agent_session_item_sequence_non_negative",
-        ),
-        Index(
-            "ix_chat_agent_session_item_conversation_sequence",
-            "conversation_id",
-            "sequence",
-        ),
-    )
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    conversation_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("chat_agent_session.conversation_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    item_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    item_data: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

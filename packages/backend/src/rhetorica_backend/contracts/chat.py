@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from rhetorica_backend.contracts.analysis_document import AnalysisDocument
+from rhetorica_backend.contracts.coding import CodingResourceSelection
 from rhetorica_backend.contracts.execution import ExecuteSqlResponse
 from rhetorica_backend.contracts.files import FileArtifactRef
 from rhetorica_backend.contracts.visualization import VisualizationSpec
@@ -405,7 +406,7 @@ class DoneEvent(StreamEventBase):
     claim_evidence_links: list[ClaimEvidenceLink] = Field(default_factory=list)
     uncertainty_flags: list[str] = Field(default_factory=list)
     capability_trace: CapabilityTrace = Field(default_factory=CapabilityTrace)
-    optimization_trace: OptimizationTrace = Field(default_factory=OptimizationTrace)
+    optimization_trace: OptimizationTrace | None = None
     warnings: list[str] = Field(default_factory=list)
     cancelled: bool = False
     assistant_message_id: str | None = None
@@ -488,6 +489,8 @@ class ChatAskRequest(BaseModel):
     llm_connector_name: str | None = Field(default=None, min_length=1, max_length=128)
     database_connector_name: str | None = Field(default=None, min_length=1, max_length=128)
     run_sql: bool = True
+    coding_mode: bool = False
+    coding_resources: CodingResourceSelection | None = None
     selected_clarification_id: str | None = Field(default=None, max_length=64)
     selected_clarification_value: str | None = Field(default=None, max_length=256)
     ambient_context_markdown: str | None = Field(default=None, max_length=16_000)
@@ -513,6 +516,8 @@ class AnalystChatAskRequest(BaseModel):
     conversation_id: str | None = Field(default=None, min_length=1, max_length=36)
     agent_id: str | None = Field(default=None, min_length=1, max_length=36)
     run_sql: bool = True
+    coding_mode: bool = False
+    coding_resources: CodingResourceSelection | None = None
     selected_clarification_id: str | None = Field(default=None, max_length=64)
     selected_clarification_value: str | None = Field(default=None, max_length=256)
 
@@ -537,7 +542,7 @@ class ChatAskResponse(BaseModel):
     claim_evidence_links: list[ClaimEvidenceLink] = Field(default_factory=list)
     uncertainty_flags: list[str] = Field(default_factory=list)
     capability_trace: CapabilityTrace = Field(default_factory=CapabilityTrace)
-    optimization_trace: OptimizationTrace = Field(default_factory=OptimizationTrace)
+    optimization_trace: OptimizationTrace | None = None
     execution: ExecuteSqlResponse | None = None
     analysis_document: AnalysisDocument | None = None
     visualization: VisualizationSpec | None = None
@@ -659,6 +664,8 @@ class ConversationDetailItem(BaseModel):
 class MessageItem(BaseModel):
     """Single message within a conversation."""
 
+    journal_events: list[dict[str, Any]] | None = None
+
     id: str
     conversation_id: str
     role: str
@@ -674,7 +681,7 @@ class MessageItem(BaseModel):
     claim_evidence_links: list[ClaimEvidenceLink] = Field(default_factory=list)
     uncertainty_flags: list[str] = Field(default_factory=list)
     capability_trace: CapabilityTrace = Field(default_factory=CapabilityTrace)
-    optimization_trace: OptimizationTrace = Field(default_factory=OptimizationTrace)
+    optimization_trace: OptimizationTrace | None = None
     selected_connector: str | None = None
     analysis_document: AnalysisDocument | None = None
     visualization: VisualizationSpec | None = None

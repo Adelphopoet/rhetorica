@@ -2,6 +2,8 @@ export type LlmExtraSettings = Record<string, string | number | boolean>;
 
 const dedicatedKeys = new Set([
   "context_window_tokens", "context_window", "require_explicit_final_answer", "verify_tls",
+  "native_compaction_enabled", "native_compaction_threshold_tokens",
+  "store",
 ]);
 
 export function additionalLlmSettings(settings: LlmExtraSettings = {}): LlmExtraSettings {
@@ -40,6 +42,12 @@ export function buildLlmExtraSettings(
     }
   }
   const settings = parsed as LlmExtraSettings;
+  const store = String(formData.get("store") ?? "");
+  if (store === "true" || store === "false") {
+    settings.store = store === "true";
+  } else if (store !== "") {
+    throw new Error("Выберите режим хранения ответов у провайдера");
+  }
   if (formData.get("require_explicit_final_answer") !== null) {
     settings.require_explicit_final_answer = true;
   } else if (base.require_explicit_final_answer !== undefined) {
@@ -55,6 +63,22 @@ export function buildLlmExtraSettings(
     } else {
       settings.context_window_tokens = Number(contextWindow);
     }
+  }
+  const nativeCompactionEnabled = formData.get("native_compaction_enabled") !== null;
+  const nativeThreshold = String(formData.get("native_compaction_threshold_tokens") ?? "").trim();
+  if (nativeCompactionEnabled) {
+    const endpoint = String(formData.get("endpoint_path") ?? "").trim().replace(/\/$/, "");
+    if (!endpoint.endsWith("/responses")) {
+      throw new Error("Native compaction requires a Responses API endpoint");
+    }
+    const threshold = Number(nativeThreshold);
+    if (!nativeThreshold || !Number.isSafeInteger(threshold) || threshold < 1) {
+      throw new Error("Native compaction threshold must be a positive integer");
+    }
+    settings.native_compaction_enabled = true;
+    settings.native_compaction_threshold_tokens = threshold;
+  } else if (base.native_compaction_enabled !== undefined) {
+    settings.native_compaction_enabled = false;
   }
   return settings;
 }

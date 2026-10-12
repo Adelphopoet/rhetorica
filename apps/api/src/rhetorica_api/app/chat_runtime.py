@@ -58,8 +58,8 @@ def get_chat_service_factory() -> ChatServiceFactory:
         return ToolFileCapabilityService(
             artifact_service=get_artifact_service(),
             sandbox_gateway=HttpSandboxGateway(
-                base_url=settings.sandbox_url,
-                internal_token=settings.sandbox_internal_token,
+                base_url=settings.execution_runtime_url,
+                internal_token=settings.execution_runtime_internal_token,
             ),
             sql_export_service=SqlResultExportService(
                 execution_reader=execution_service,

@@ -24,11 +24,16 @@ python tools/sync_openspec_docsy.py --check
 - `docs/rhetorica` - product documentation.
 - `tests` - cross-app fixtures, e2e, performance scenarios.
 
-## Local development stance
+## Local development
 
-- Local development is Docker-first.
-- Infrastructure runs in containers from day one: PostgreSQL, Redis, MinIO.
-- App containers are part of the same topology, but runtime entrypoints stay placeholders until implementation starts.
+Local development is Docker-first. The launch steps live in [Локальный запуск](docs/rhetorica/dlya-razrabotchika/local-development/index.md).
+
+```bash
+make bootstrap
+make dev-up
+```
+
+- Infrastructure and app containers come from `compose.yaml`: PostgreSQL, Redis, Qdrant, MinIO, Temporal, API, worker, web.
 - Python packages are managed through a `uv` workspace.
 - Frontend packages are managed through a `pnpm` workspace.
 

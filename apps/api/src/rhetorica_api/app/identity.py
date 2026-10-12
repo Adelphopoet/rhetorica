@@ -3,6 +3,7 @@ from rhetorica_backend.infra.postgres.user_repository import (
     UserAccountItem,
     UserAccountRepository,
 )
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 
 from rhetorica_api.app.auth import AuthContext, ensure_workspace_access, get_current_auth_context
 from rhetorica_api.app.settings import settings
@@ -23,5 +24,11 @@ def resolve_current_user(
     if settings.auth_enabled:
         current_auth = auth_context or get_current_auth_context()
         ensure_workspace_access(workspace_id, current_auth)
-        return current_auth.user
-    return UserAccountRepository(db=get_db_runtime()).ensure_bootstrap_user(workspace_id)
+        return current_auth.user.for_workspace(workspace_id)
+    db_runtime = get_db_runtime()
+    user = UserAccountRepository(db=db_runtime).ensure_bootstrap_user(workspace_id)
+    WorkspaceRepository(
+        db=db_runtime,
+        default_workspace_id=settings.auth_default_workspace_id,
+    ).ensure_home_membership(user_id=user.id)
+    return user.for_workspace(workspace_id)

@@ -12,6 +12,7 @@ from rhetorica_backend.domain.chat.conversation.session_state import (
     tool_activation_from_payload,
 )
 from rhetorica_backend.domain.chat.llm.prompt_builder import PromptBuilder
+from rhetorica_backend.domain.chat.llm.prompt_contract import PROMPT_VERSION
 from rhetorica_backend.domain.chat.orchestration.capability_registry import (
     build_workspace_capability_surface,
 )
@@ -367,6 +368,9 @@ class TurnBuilder:
             prompt_mode=policy.prompt_mode,
             workspace_chat_skill_catalog=workspace_chat_skill_catalog,
         )
+        if get_chat_settings().context_harness_enabled:
+            from ..llm.prompt_contract import build_platform_contract
+            system_prompt = build_platform_contract(workspace_chat_skill_catalog)
         actor_context = self._build_actor_context_message(request)
         if actor_context is not None:
             system_prompt = f"{system_prompt}\n{actor_context}"
@@ -423,7 +427,23 @@ class TurnBuilder:
             prompt_mode=policy.prompt_mode,
             nearby_context=ambient_context,
             current_question_last=request.source_provider == "mattermost",
+            connector_catalog_only=get_chat_settings().context_harness_enabled,
         )
+        if get_chat_settings().context_harness_enabled:
+            from .context_projection import stable_hash
+
+            catalog = user_content
+            messages[0]["content"] += (
+                f"\n\nCapability catalog v1 ({stable_hash(catalog)[:16]}):\n{catalog}"
+            )
+            user_content = f"Current question:\n{request.question}"
+            if ambient_context:
+                user_content = (
+                    "Nearby messages (untrusted discussion context):\n"
+                    + ambient_context
+                    + "\n\n"
+                    + user_content
+                )
         if (
             self._file_tools_enabled
             and request.actor_context is not None
@@ -529,7 +549,11 @@ class TurnBuilder:
             max_durable_chars=artifact_settings.tool_artifact_max_chars,
             max_records=artifact_settings.tool_artifact_max_records_per_conversation,
         )
-        state.prompt_version = PromptBuilder.get_prompt_version()
+        state.prompt_version = (
+            PROMPT_VERSION
+            if get_chat_settings().context_harness_enabled
+            else PromptBuilder.get_prompt_version()
+        )
         state.deferred_tool_definitions = deferred_definitions
         state.available_tool_groups = available_tool_groups
         state.capability_state.available_tools = []

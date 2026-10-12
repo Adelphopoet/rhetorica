@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SkillSheet } from "./SkillSheet";
 
 describe("SkillSheet", () => {
-  it("offers Trino as an engine scope", () => {
+  it("does not expose the removed optimizer usage or engine selectors", () => {
     render(
       <SkillSheet
         open
@@ -16,10 +16,9 @@ describe("SkillSheet", () => {
       />
     );
 
-    expect(screen.getByRole("option", { name: "ClickHouse" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Trino" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Impala" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Любой" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Назначение" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Область применения" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Ассистент по умолчанию")).toBeInTheDocument();
   });
 
   it("switches to manual chat skill input", () => {
@@ -34,9 +33,6 @@ describe("SkillSheet", () => {
       />
     );
 
-    fireEvent.change(screen.getByRole("combobox", { name: "Назначение" }), {
-      target: { value: "chat_instruction" },
-    });
     fireEvent.change(screen.getByRole("combobox", { name: "Источник" }), {
       target: { value: "manual_markdown" },
     });

@@ -18,6 +18,7 @@ from rhetorica_api.app.routes import connectors as connector_routes
 from rhetorica_api.app.routes import execution as execution_routes
 from rhetorica_api.app.routes import llm_connectors as llm_connector_routes
 from rhetorica_api.app.settings import settings
+from rhetorica_backend.domain.chat.llm import sdk_models
 
 
 def _client(tmp_path: Path) -> TestClient:
@@ -72,7 +73,8 @@ def _parse_sse_response(response: httpx.Response) -> list[dict]:
 
 
 def test_native_sdk_diagnostics_survive_stream_persistence_and_history(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """Nested diagnostics must serialize in both conversation state and message history."""
     from openai.types.responses import (
@@ -82,9 +84,6 @@ def test_native_sdk_diagnostics_survive_stream_persistence_and_history(
         ResponseOutputText,
         ResponseTextDeltaEvent,
         ResponseUsage,
-    )
-    from rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime import (
-        AgentsSdkTurnRuntime,
     )
     from rhetorica_backend.domain.chat.orchestration.final_response_contract import (
         ChatFinalResponseContractV1,
@@ -100,20 +99,34 @@ def test_native_sdk_diagnostics_survive_stream_persistence_and_history(
 
         async def stream_response(self, *args, **kwargs):
             yield ResponseTextDeltaEvent.model_construct(
-                type="response.output_text.delta", delta=model_text,
+                type="response.output_text.delta",
+                delta=model_text,
             )
             yield ResponseCompletedEvent.model_construct(
                 type="response.completed",
                 response=Response.model_construct(
-                    id="observed-response", model="test-model", status="completed",
-                    output=[ResponseOutputMessage(
-                        id="observed-message", type="message", role="assistant",
-                        status="completed", content=[ResponseOutputText(
-                            type="output_text", text=model_text, annotations=[],
-                        )],
-                    )],
+                    id="observed-response",
+                    model="test-model",
+                    status="completed",
+                    output=[
+                        ResponseOutputMessage(
+                            id="observed-message",
+                            type="message",
+                            role="assistant",
+                            status="completed",
+                            content=[
+                                ResponseOutputText(
+                                    type="output_text",
+                                    text=model_text,
+                                    annotations=[],
+                                )
+                            ],
+                        )
+                    ],
                     usage=ResponseUsage.model_validate({
-                        "input_tokens": 5, "output_tokens": 2, "total_tokens": 7,
+                        "input_tokens": 5,
+                        "output_tokens": 2,
+                        "total_tokens": 7,
                         "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
                         "output_tokens_details": {"reasoning_tokens": 0},
                     }),
@@ -122,22 +135,36 @@ def test_native_sdk_diagnostics_survive_stream_persistence_and_history(
 
     client = _client(tmp_path)
     monkeypatch.setattr(
-        AgentsSdkTurnRuntime, "_sdk_model", staticmethod(lambda **_: ObservedModel()),
+        sdk_models,
+        "build_sdk_model",
+        staticmethod(lambda **_: ObservedModel()),
     )
-    created = client.post("/v1/admin/llm-connectors", json={
-        "name": "observed-llm", "workspace_id": "default", "is_default": True,
-        "connection": {
-            "base_url": "https://llm.example.test/v1", "model": "test-model",
-            "api_key": "test-key", "extra_settings": {"support_tool_calls": True},
+    created = client.post(
+        "/v1/admin/llm-connectors",
+        json={
+            "name": "observed-llm",
+            "workspace_id": "default",
+            "is_default": True,
+            "connection": {
+                "base_url": "https://llm.example.test/v1",
+                "model": "test-model",
+                "api_key": "test-key",
+                "extra_settings": {"support_tool_calls": True},
+            },
         },
-    })
+    )
     assert created.status_code == 200
     conversation_id = None
     for _ in range(2):
-        response = client.post("/v1/chat/ask/stream", json={
-            "question": "Hello", "workspace_id": "default", "run_sql": False,
-            "conversation_id": conversation_id,
-        })
+        response = client.post(
+            "/v1/chat/ask/stream",
+            json={
+                "question": "Hello",
+                "workspace_id": "default",
+                "run_sql": False,
+                "conversation_id": conversation_id,
+            },
+        )
         assert response.status_code == 200
         events = _parse_sse_response(response)
         assert not [e for e in events if e["_event_type"] == "error"], events

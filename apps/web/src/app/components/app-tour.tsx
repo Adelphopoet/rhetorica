@@ -125,18 +125,6 @@ function buildSteps(): DriveStep[] {
   });
 
   steps.push({
-    element: '[data-tour="tour-guides-panel"]',
-    popover: {
-      popoverClass: "rhetorica-tour-popover",
-      title: `${SPARKLES_HTML}Полезные инструкции`,
-      description:
-        "Здесь вы найдёте полезные инструкции, рекомендации и материалы на разные случаи",
-      side: "top",
-      align: "center",
-    },
-  });
-
-  steps.push({
     popover: {
       popoverClass: "rhetorica-tour-popover rhetorica-tour-popover-wide",
       title: `${SPARKLES_HTML}Тур по Rhetorica завершён!`,

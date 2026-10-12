@@ -1,3 +1,7 @@
-from rhetorica_backend.domain.chat.gitlab.service import GitLabRequestError, GitLabService
+from rhetorica_backend.domain.chat.gitlab.service import (
+    WRITE_TOKEN_SCOPES,
+    GitLabRequestError,
+    GitLabService,
+)
 
-__all__ = ["GitLabRequestError", "GitLabService"]
+__all__ = ["WRITE_TOKEN_SCOPES", "GitLabRequestError", "GitLabService"]

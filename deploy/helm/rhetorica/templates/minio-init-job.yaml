@@ -1,4 +1,4 @@
-{{- if and .Values.infra.enabled .Values.infra.minio.initJobEnabled }}
+{{- if .Values.infra.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -254,3 +254,32 @@ def test_message_feedback_rejects_user_message(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Feedback is allowed only for assistant messages"
+
+
+def test_history_search_pages_and_persisted_journal(tmp_path: Path) -> None:
+    client, repository = _client(tmp_path)
+    ids = []
+    for index in range(29):
+        response = client.post("/v1/chat/conversation", json={"title": f"History {index}"})
+        assert response.status_code == 200
+        ids.append(response.json()["id"])
+    owner = repository.get_conversation(ids[0]).owner_user_id
+    events = [
+        {"type": "tool_call_start", "timestamp": "2026-10-06T08:00:00Z", "tool_name": "repository_read", "tool_call_id": "read", "arguments": {"path": "models/net_revenue.sql"}},
+        {"type": "tool_call_end", "timestamp": "2026-10-06T08:00:01Z", "tool_name": "repository_read", "tool_call_id": "read", "success": True, "result_summary": "Read file"},
+    ]
+    saved = repository.save_message(ids[0], "assistant", "needle_100% net_revenue", journal_events=events)
+    first = client.get("/v1/chat/conversations", params={"limit": 24}).json()
+    second = client.get("/v1/chat/conversations", params={"limit": 24, "offset": 24}).json()
+    assert len(first) == 24 and len(second) == 5
+    assert {item["id"] for item in first}.isdisjoint(item["id"] for item in second)
+    assert {item["id"] for item in first + second} == set(ids)
+    assert [item["id"] for item in client.get("/v1/chat/conversations", params={"search": "NEEDLE_100%"}).json()] == [ids[0]]
+    assert client.get("/v1/chat/conversations", params={"search": "needleX100"}).json() == []
+    assert repository.list_conversations("default", owner_user_id="someone-else", search="net_revenue") == []
+    detail = client.get(f"/v1/chat/conversation/{ids[0]}").json()
+    assert next(item for item in detail["messages"] if item["id"] == saved.id)["journal_events"] == events
+    repository.delete_conversation(ids[0], owner_user_id=owner)
+    assert client.get("/v1/chat/conversations", params={"search": "net_revenue"}).json() == []
+    assert client.get("/v1/chat/conversations", params={"offset": -1}).status_code == 422
+    assert client.get("/v1/chat/conversations", params={"limit": 101}).status_code == 422

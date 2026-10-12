@@ -1,3 +1,4 @@
+import type { CodingTeamDetail } from "@/features/coding/codingApi";
 import type { ScenarioDefinition } from "@/features/scenarios/scenariosApi";
 import type { AgentProfile } from "@/features/agents/agentsApi";
 
@@ -37,7 +38,7 @@ export type LlmConnectorItem = {
   name: string;
   workspace_id: string;
   is_active: boolean;
-  is_default?: boolean;
+  is_default: boolean;
   capability_profile?: Record<string, unknown> | null;
   has_api_key: boolean;
   api_key_count: number;
@@ -114,10 +115,52 @@ export type GitLabConnectorItem = {
     default_group_paths: string[];
     search_limit: number;
     read_max_tokens: number;
+    coding_archive_max_files: number;
     extra_settings?: Record<string, string | number | boolean>;
   };
   created_at: string;
   updated_at: string;
+};
+
+export type GitLabWriteScope = {
+  connector_id: string;
+  project_id: string;
+  target_branches: string[];
+  allowed_paths: string[];
+};
+
+export type AgentDelegationGrant = {
+  subagent_id: string;
+  gitlab_write_scopes: GitLabWriteScope[];
+};
+
+export type GovernedAgentPolicy = {
+  workspace_id: string;
+  agent_id?: string;
+  revision: number;
+  gitlab_write_scopes: GitLabWriteScope[];
+  allowed_subagent_ids: string[];
+  delegation_grants: AgentDelegationGrant[];
+  max_iterations: number;
+  max_runtime_seconds: number;
+};
+
+export type CodingEnvironmentProfile = {
+  id: string;
+  revision: number;
+  image_digest: string;
+  runtime_class_name: string;
+  tool_versions: Record<string, string>;
+  max_runtime_seconds: number;
+  cpu_limit: string;
+  memory_limit: string;
+  disk_limit_bytes: number;
+  pid_limit: number;
+  output_limit_bytes: number;
+  software_manifest_digest: string;
+  dependency_sources: string[];
+  pip_dependencies?: string[];
+  created_at: string;
 };
 
 export type McpConnectorItem = {
@@ -289,10 +332,10 @@ export type WorkspaceSkillItem = {
   id: string;
   workspace_id: string;
   name: string;
-  capability_family: "sql_optimization_advisor" | "chat_instruction";
+  capability_family: "chat_instruction";
   engine_scope: "clickhouse" | "trino" | "greenplum" | "impala" | "any";
   priority: number;
-  source_kind: "github_markdown_url" | "manual_markdown";
+  source_kind: "github_markdown_url" | "gitlab_bundle" | "manual_markdown";
   source_url: string | null;
   status: "active" | "inactive";
   validation_status: "valid" | "invalid" | "pending";
@@ -316,6 +359,7 @@ export type WorkspaceSkillItem = {
     }>;
   };
   content_sha256: string | null;
+  version_digest?: string | null;
   last_validated_at: string | null;
   created_at: string;
   updated_at: string;
@@ -333,6 +377,71 @@ export type LocalUserItem = {
   api_rate_limit_per_hour: number | null;
   created_at: string;
   updated_at: string;
+};
+
+export type WorkspaceAccessItem = {
+  workspace: {
+    id: string;
+    name: string;
+    is_active: boolean;
+    metadata: Record<string, string>;
+    created_at: string;
+    updated_at: string;
+  };
+  membership: WorkspaceMembershipItem;
+  is_default?: boolean;
+};
+
+export type WorkspaceMembershipItem = {
+  workspace_id: string;
+  user_id: string;
+  user_login?: string | null;
+  user_display_name?: string | null;
+  role: "owner" | "analyst" | "viewer";
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkspaceResourceGrantItem = {
+  id: string;
+  resource_kind: WorkspaceResourceKind;
+  resource_id: string;
+  owner_workspace_id: string;
+  recipient_workspace_id: string;
+  alias: string;
+  is_active: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkspaceResourceKind =
+  | "database_connector"
+  | "gitlab_connector"
+  | "llm_connector"
+  | "rag_connector"
+  | "documentation_connector"
+  | "mcp_connector"
+  | "airflow_connector"
+  | "kubernetes_connector"
+  | "victoriametrics_connector"
+  | "mattermost_connector"
+  | "workspace_skill";
+
+export type WorkspaceResourceOption = {
+  id: string;
+  name: string;
+  kind: WorkspaceResourceKind;
+};
+
+export type WorkspaceUserItem = {
+  id: string;
+  home_workspace_id: string;
+  login: string;
+  display_name: string | null;
+  system_role: string;
+  is_active: boolean;
 };
 
 export type ConnectorType =
@@ -360,6 +469,7 @@ export type AnyConnectorItem =
 export type AdminSectionId = "overview" | "setup" | "governance" | "access" | "review";
 
 export type AdminPageData = {
+  isSystemAdmin?: boolean;
   databaseConnectors: DatabaseConnectorItem[];
   llmConnectors: LlmConnectorItem[];
   documentationConnectors: DocumentationConnectorItem[];
@@ -373,7 +483,14 @@ export type AdminPageData = {
   scenarios: ScenarioDefinition[];
   workspaceSkills: WorkspaceSkillItem[];
   agents?: AgentProfile[];
+  codingEnvironments?: CodingEnvironmentProfile[];
+  codingTeams?: CodingTeamDetail[];
   localUsers: LocalUserItem[];
   currentUserId: string;
   workspaceId: string;
+  workspaces: WorkspaceAccessItem[];
+  workspaceMemberships: WorkspaceMembershipItem[];
+  workspaceResourceGrants: WorkspaceResourceGrantItem[];
+  workspaceUsers: WorkspaceUserItem[];
+  workspaceResourceOptions: WorkspaceResourceOption[];
 };

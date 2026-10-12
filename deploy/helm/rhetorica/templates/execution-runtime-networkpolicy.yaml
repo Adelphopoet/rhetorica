@@ -1,0 +1,41 @@
+{{- if .Values.executionRuntime.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-file-runtime-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rhetorica-execution-runner
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      rhetorica.io/workload: file
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: execution-controller
+      ports:
+        - protocol: TCP
+          port: 8091
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.executionRuntime.networkPolicy.objectStoragePodSelector | nindent 14 }}
+      ports:
+        {{- range .Values.executionRuntime.networkPolicy.objectStoragePorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.executionRuntime.networkPolicy.dnsNamespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.executionRuntime.networkPolicy.dnsPodSelector | nindent 14 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+{{- end }}

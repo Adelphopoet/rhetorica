@@ -232,10 +232,29 @@ class ApiSettings(BaseSettings):
         default=10 * 1024 * 1024 * 1024,
         validation_alias="FILE_WORKSPACE_QUOTA_BYTES",
     )
-    sandbox_url: str = Field(default="http://sandbox:8090", validation_alias="SANDBOX_URL")
-    sandbox_internal_token: str = Field(
-        default="change-me-sandbox-internal-token",
-        validation_alias="SANDBOX_INTERNAL_TOKEN",
+    execution_runtime_url: str = Field(
+        default="http://execution-runtime:8091",
+        validation_alias="EXECUTION_RUNTIME_URL",
+    )
+    execution_runtime_internal_token: str = Field(
+        default="change-me-execution-runtime-internal-token",
+        validation_alias="EXECUTION_RUNTIME_INTERNAL_TOKEN",
+    )
+    coding_enabled: bool = Field(
+        default=False,
+        validation_alias="CODING_ENABLED",
+        description="Admit new governed coding runs; existing runs may still be drained",
+    )
+    coding_runner_image_digest: str = Field(
+        default="rhetorica-coding-runner@sha256:" + "0" * 64,
+        validation_alias="CODING_RUNNER_IMAGE_DIGEST",
+    )
+    coding_runner_runtime_class_name: str = Field(
+        default="runsc", validation_alias="CODING_RUNNER_RUNTIME_CLASS_NAME"
+    )
+    coding_runner_software_manifest_digest: str = Field(
+        default="0" * 64,
+        validation_alias="CODING_RUNNER_SOFTWARE_MANIFEST_DIGEST",
     )
     mcp_enabled: bool = Field(
         default=True,

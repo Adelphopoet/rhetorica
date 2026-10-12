@@ -57,9 +57,9 @@ def test_workspace_skill_crud(tmp_path: Path, monkeypatch) -> None:
     create_response = client.post(
         "/v1/admin/skills",
         json={
-            "name": "join-optimizer",
+            "name": "join-guide",
             "workspace_id": "default",
-            "capability_family": "sql_optimization_advisor",
+            "capability_family": "chat_instruction",
             "engine_scope": "clickhouse",
             "priority": 250,
             "source_kind": "github_markdown_url",
@@ -84,9 +84,9 @@ def test_workspace_skill_crud(tmp_path: Path, monkeypatch) -> None:
         f"/v1/admin/skills/{skill_id}",
         params={"workspace_id": "default"},
         json={
-            "name": "join-optimizer-v2",
+        "name": "join-guide-v2",
             "workspace_id": "default",
-            "capability_family": "sql_optimization_advisor",
+            "capability_family": "chat_instruction",
             "engine_scope": "any",
             "priority": 300,
             "source_kind": "github_markdown_url",
@@ -96,7 +96,7 @@ def test_workspace_skill_crud(tmp_path: Path, monkeypatch) -> None:
     )
     assert update_response.status_code == 200
     updated = update_response.json()
-    assert updated["name"] == "join-optimizer-v2"
+    assert updated["name"] == "join-guide-v2"
     assert updated["engine_scope"] == "any"
     assert updated["status"] == "inactive"
 
@@ -130,7 +130,7 @@ def test_workspace_skill_accepts_trino_engine_scope(tmp_path: Path, monkeypatch)
         json={
             "name": "trino-best-practices",
             "workspace_id": "default",
-            "capability_family": "sql_optimization_advisor",
+            "capability_family": "chat_instruction",
             "engine_scope": "trino",
             "priority": 180,
             "source_kind": "github_markdown_url",
@@ -141,7 +141,7 @@ def test_workspace_skill_accepts_trino_engine_scope(tmp_path: Path, monkeypatch)
 
     assert response.status_code == 200
     created = response.json()
-    assert created["engine_scope"] == "trino"
+    assert created["engine_scope"] == "any"
     assert created["source_url"] == raw_source
 
 
@@ -242,7 +242,7 @@ def test_workspace_skill_accepts_greenplum_engine_scope(tmp_path: Path, monkeypa
         json={
             "name": "greenplum-best-practices",
             "workspace_id": "default",
-            "capability_family": "sql_optimization_advisor",
+            "capability_family": "chat_instruction",
             "engine_scope": "greenplum",
             "priority": 170,
             "source_kind": "github_markdown_url",
@@ -253,7 +253,7 @@ def test_workspace_skill_accepts_greenplum_engine_scope(tmp_path: Path, monkeypa
 
     assert response.status_code == 200
     created = response.json()
-    assert created["engine_scope"] == "greenplum"
+    assert created["engine_scope"] == "any"
     assert created["source_url"] == raw_source
 
 
@@ -265,7 +265,7 @@ def test_workspace_skill_rejects_invalid_source_url(tmp_path: Path, monkeypatch)
         json={
             "name": "bad-skill",
             "workspace_id": "default",
-            "capability_family": "sql_optimization_advisor",
+            "capability_family": "chat_instruction",
             "engine_scope": "clickhouse",
             "priority": 100,
             "source_kind": "github_markdown_url",
@@ -297,7 +297,7 @@ def test_workspace_skill_rejects_binary_payload(tmp_path: Path, monkeypatch) -> 
         json={
             "name": "bad-binary",
             "workspace_id": "default",
-            "capability_family": "sql_optimization_advisor",
+            "capability_family": "chat_instruction",
             "engine_scope": "clickhouse",
             "priority": 100,
             "source_kind": "github_markdown_url",
@@ -308,3 +308,21 @@ def test_workspace_skill_rejects_binary_payload(tmp_path: Path, monkeypatch) -> 
 
     assert response.status_code == 400
     assert response.json()["detail"] == "workspace_skill_binary_content"
+
+
+def test_workspace_skill_rejects_removed_optimizer_family(tmp_path: Path, monkeypatch) -> None:
+    client = _client(tmp_path, _HttpClientStub({}), monkeypatch)
+
+    response = client.post(
+        "/v1/admin/skills",
+        json={
+            "name": "legacy-optimizer",
+            "workspace_id": "default",
+            "capability_family": "sql_optimization_advisor",
+            "source_kind": "manual_markdown",
+            "content_markdown": "# Legacy optimizer\n",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "workspace_skill_legacy_capability_family" in str(response.json())

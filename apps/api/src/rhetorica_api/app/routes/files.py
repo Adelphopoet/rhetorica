@@ -34,6 +34,12 @@ def _current_user_id(workspace_id: str | None = None) -> str:
     return resolve_current_user(workspace_id or settings.auth_default_workspace_id).id
 
 
+def _active_workspace_id() -> str:
+    if settings.auth_enabled:
+        return get_current_auth_context().workspace_id
+    return settings.auth_default_workspace_id
+
+
 def _storage_unavailable(exc: Exception) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -59,7 +65,9 @@ def upload_file(
         )
         return get_artifact_service().to_detail(artifact)
     except ArtifactRejectedError as exc:
-        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+        raise HTTPException(
+            status_code=422, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Conversation not found") from exc
     except (BotoCoreError, ClientError, OSError) as exc:
@@ -72,7 +80,9 @@ def upload_file(
 def get_file(artifact_id: str) -> FileArtifactDetail:
     try:
         artifact = get_artifact_service().get_owned(
-            artifact_id=artifact_id, owner_user_id=_current_user_id()
+            artifact_id=artifact_id,
+            owner_user_id=_current_user_id(),
+            workspace_id=_active_workspace_id(),
         )
         return get_artifact_service().to_detail(artifact)
     except ArtifactNotFoundError as exc:
@@ -83,7 +93,9 @@ def get_file(artifact_id: str) -> FileArtifactDetail:
 def download_file(artifact_id: str) -> StreamingResponse:
     try:
         artifact, stored = get_artifact_service().open_content(
-            artifact_id=artifact_id, owner_user_id=_current_user_id()
+            artifact_id=artifact_id,
+            owner_user_id=_current_user_id(),
+            workspace_id=_active_workspace_id(),
         )
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=404, detail="File not found") from exc
@@ -127,7 +139,9 @@ def download_file(artifact_id: str) -> StreamingResponse:
 def delete_file(artifact_id: str) -> None:
     try:
         get_artifact_service().delete_staged(
-            artifact_id=artifact_id, owner_user_id=_current_user_id()
+            artifact_id=artifact_id,
+            owner_user_id=_current_user_id(),
+            workspace_id=_active_workspace_id(),
         )
     except ArtifactConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

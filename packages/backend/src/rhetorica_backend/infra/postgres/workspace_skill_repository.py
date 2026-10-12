@@ -3,9 +3,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from rhetorica_backend.contracts.workspace_skills import WorkspaceSkillItem
-from rhetorica_backend.infra.postgres.models import WorkspaceSkillOrm
+from rhetorica_backend.contracts.workspace_skills import (
+    WorkspaceSkillItem,
+    WorkspaceSkillVersionSnapshot,
+)
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
+from rhetorica_backend.infra.postgres.models import WorkspaceSkillOrm, WorkspaceSkillVersionOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_resource_access import (
+    AccessibleResource,
+    WorkspaceResourceAccess,
+    present_resource,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -15,6 +24,12 @@ class WorkspaceSkillRepository:
 
     def __init__(self, db: DatabaseRuntime):
         self._db = db
+        self._resources = WorkspaceResourceAccess(
+            db,
+            kind=WorkspaceResourceKind.WORKSPACE_SKILL,
+            model=WorkspaceSkillOrm,
+            is_active=lambda row: row.status == "active",
+        )
 
     def create(
         self,
@@ -34,6 +49,7 @@ class WorkspaceSkillRepository:
         content_markdown: str,
         content_bundle: dict[str, object],
         content_sha256: str | None,
+        version_digest: str,
         last_validated_at: datetime | None,
     ) -> WorkspaceSkillItem:
         now = datetime.now(tz=UTC)
@@ -55,11 +71,23 @@ class WorkspaceSkillRepository:
                 content_markdown=content_markdown,
                 content_bundle=content_bundle,
                 content_sha256=content_sha256,
+                current_version_digest=version_digest,
                 last_validated_at=last_validated_at,
                 created_at=now,
                 updated_at=now,
             )
             session.add(row)
+            session.add(
+                WorkspaceSkillVersionOrm(
+                    skill_id=row.id,
+                    workspace_id=workspace_id,
+                    version_digest=version_digest,
+                    source_url=source_url,
+                    content_markdown=content_markdown,
+                    content_bundle=content_bundle,
+                    created_at=now,
+                )
+            )
             try:
                 session.commit()
             except IntegrityError:
@@ -87,6 +115,7 @@ class WorkspaceSkillRepository:
         content_markdown: str,
         content_bundle: dict[str, object],
         content_sha256: str | None,
+        version_digest: str,
         last_validated_at: datetime | None,
     ) -> WorkspaceSkillItem | None:
         now = datetime.now(tz=UTC)
@@ -108,8 +137,27 @@ class WorkspaceSkillRepository:
             row.content_markdown = content_markdown
             row.content_bundle = content_bundle
             row.content_sha256 = content_sha256
+            row.current_version_digest = version_digest
             row.last_validated_at = last_validated_at
             row.updated_at = now
+            existing_version = session.scalar(
+                select(WorkspaceSkillVersionOrm.id).where(
+                    WorkspaceSkillVersionOrm.skill_id == skill_id,
+                    WorkspaceSkillVersionOrm.version_digest == version_digest,
+                )
+            )
+            if existing_version is None:
+                session.add(
+                    WorkspaceSkillVersionOrm(
+                        skill_id=skill_id,
+                        workspace_id=workspace_id,
+                        version_digest=version_digest,
+                        source_url=source_url,
+                        content_markdown=content_markdown,
+                        content_bundle=content_bundle,
+                        created_at=now,
+                    )
+                )
             try:
                 session.commit()
             except IntegrityError:
@@ -119,19 +167,10 @@ class WorkspaceSkillRepository:
             return self._to_contract(row)
 
     def list(self, workspace_id: str, limit: int) -> list[WorkspaceSkillItem]:
-        with self._db.session() as session:
-            stmt = (
-                select(WorkspaceSkillOrm)
-                .where(WorkspaceSkillOrm.workspace_id == workspace_id)
-                .order_by(
-                    WorkspaceSkillOrm.priority.desc(),
-                    WorkspaceSkillOrm.updated_at.desc(),
-                    WorkspaceSkillOrm.name.asc(),
-                )
-                .limit(limit)
-            )
-            rows = session.execute(stmt).scalars().all()
-        return [self._to_contract(row) for row in rows]
+        return [
+            present_resource(self._to_contract(resource.row), resource)
+            for resource in self._sorted_resources(workspace_id=workspace_id)[:limit]
+        ]
 
     def list_active_for_capability(
         self,
@@ -141,25 +180,15 @@ class WorkspaceSkillRepository:
         engine_scope: str,
         limit: int = 20,
     ) -> list[WorkspaceSkillItem]:
-        with self._db.session() as session:
-            stmt = (
-                select(WorkspaceSkillOrm)
-                .where(
-                    WorkspaceSkillOrm.workspace_id == workspace_id,
-                    WorkspaceSkillOrm.capability_family == capability_family,
-                    WorkspaceSkillOrm.status == "active",
-                    WorkspaceSkillOrm.validation_status == "valid",
-                    WorkspaceSkillOrm.engine_scope.in_([engine_scope, "any"]),
-                )
-                .order_by(
-                    WorkspaceSkillOrm.priority.desc(),
-                    WorkspaceSkillOrm.updated_at.desc(),
-                    WorkspaceSkillOrm.name.asc(),
-                )
-                .limit(limit)
-            )
-            rows = session.execute(stmt).scalars().all()
-        return [self._to_contract(row) for row in rows]
+        resources = [
+            item
+            for item in self._sorted_resources(workspace_id=workspace_id)
+            if item.row.capability_family == capability_family
+            and item.row.status == "active"
+            and item.row.validation_status == "valid"
+            and item.row.engine_scope in {engine_scope, "any"}
+        ][:limit]
+        return [present_resource(self._to_contract(item.row), item) for item in resources]
 
     def list_active_chat_instructions(
         self,
@@ -172,31 +201,19 @@ class WorkspaceSkillRepository:
         normalized_ids = self._normalize_skill_ids(skill_ids)
         if skill_ids is not None and not normalized_ids:
             return []
-        with self._db.session() as session:
-            conditions = [
-                WorkspaceSkillOrm.workspace_id == workspace_id,
-                WorkspaceSkillOrm.capability_family == "chat_instruction",
-                WorkspaceSkillOrm.status == "active",
-                WorkspaceSkillOrm.validation_status == "valid",
-            ]
-            if visible_to_default_assistant is not None:
-                conditions.append(
-                    WorkspaceSkillOrm.visible_to_default_assistant.is_(visible_to_default_assistant)
-                )
-            if normalized_ids is not None:
-                conditions.append(WorkspaceSkillOrm.id.in_(normalized_ids))
-            stmt = (
-                select(WorkspaceSkillOrm)
-                .where(*conditions)
-                .order_by(
-                    WorkspaceSkillOrm.priority.desc(),
-                    WorkspaceSkillOrm.updated_at.desc(),
-                    WorkspaceSkillOrm.name.asc(),
-                )
-                .limit(limit)
+        resources = [
+            item
+            for item in self._sorted_resources(workspace_id=workspace_id)
+            if item.row.capability_family == "chat_instruction"
+            and item.row.status == "active"
+            and item.row.validation_status == "valid"
+            and (
+                visible_to_default_assistant is None
+                or item.row.visible_to_default_assistant is visible_to_default_assistant
             )
-            rows = session.execute(stmt).scalars().all()
-        return [self._to_contract(row) for row in rows]
+            and (normalized_ids is None or item.row.id in normalized_ids)
+        ][:limit]
+        return [present_resource(self._to_contract(item.row), item) for item in resources]
 
     def get_active_chat_instruction(
         self,
@@ -215,26 +232,41 @@ class WorkspaceSkillRepository:
         if skill_ids is not None and not normalized_ids:
             return None
 
-        with self._db.session() as session:
-            conditions = [
-                WorkspaceSkillOrm.workspace_id == workspace_id,
-                WorkspaceSkillOrm.capability_family == "chat_instruction",
-                WorkspaceSkillOrm.status == "active",
-                WorkspaceSkillOrm.validation_status == "valid",
-            ]
-            if visible_to_default_assistant is not None:
-                conditions.append(
-                    WorkspaceSkillOrm.visible_to_default_assistant.is_(visible_to_default_assistant)
+        resource = next(
+            (
+                item
+                for item in self._sorted_resources(workspace_id=workspace_id)
+                if item.row.capability_family == "chat_instruction"
+                and item.row.status == "active"
+                and item.row.validation_status == "valid"
+                and (
+                    visible_to_default_assistant is None
+                    or item.row.visible_to_default_assistant is visible_to_default_assistant
                 )
-            if normalized_ids is not None:
-                conditions.append(WorkspaceSkillOrm.id.in_(normalized_ids))
-            if normalized_id:
-                conditions.append(WorkspaceSkillOrm.id == normalized_id)
-            else:
-                conditions.append(WorkspaceSkillOrm.name == normalized_name)
-            stmt = select(WorkspaceSkillOrm).where(*conditions).limit(1)
-            row = session.execute(stmt).scalar_one_or_none()
-        return self._to_contract(row) if row is not None else None
+                and (normalized_ids is None or item.row.id in normalized_ids)
+                and (
+                    item.row.id == normalized_id if normalized_id else item.alias == normalized_name
+                )
+            ),
+            None,
+        )
+        if resource is None:
+            return None
+        return present_resource(self._to_contract(resource.row), resource)
+
+    def _sorted_resources(
+        self,
+        *,
+        workspace_id: str,
+    ) -> list[AccessibleResource[WorkspaceSkillOrm]]:
+        return sorted(
+            self._resources.list(workspace_id=workspace_id, limit=None),
+            key=lambda item: (
+                -item.row.priority,
+                -item.row.updated_at.timestamp(),
+                item.alias,
+            ),
+        )
 
     def delete(self, skill_id: str, workspace_id: str) -> bool:
         with self._db.session() as session:
@@ -244,6 +276,33 @@ class WorkspaceSkillRepository:
             session.delete(row)
             session.commit()
             return True
+
+    def get_version(
+        self,
+        *,
+        skill_id: str,
+        workspace_id: str,
+        version_digest: str,
+    ) -> WorkspaceSkillVersionSnapshot | None:
+        """Return a retained immutable version after caller has checked live access."""
+        with self._db.session() as session:
+            row = session.scalar(
+                select(WorkspaceSkillVersionOrm).where(
+                    WorkspaceSkillVersionOrm.skill_id == skill_id,
+                    WorkspaceSkillVersionOrm.workspace_id == workspace_id,
+                    WorkspaceSkillVersionOrm.version_digest == version_digest,
+                )
+            )
+            if row is None:
+                return None
+            return WorkspaceSkillVersionSnapshot(
+                skill_id=row.skill_id,
+                workspace_id=row.workspace_id,
+                version_digest=row.version_digest,
+                source_url=row.source_url,
+                content_markdown=row.content_markdown,
+                content_bundle=row.content_bundle or {},
+            )
 
     @staticmethod
     def _to_contract(row: WorkspaceSkillOrm) -> WorkspaceSkillItem:
@@ -264,6 +323,7 @@ class WorkspaceSkillRepository:
             content_markdown=row.content_markdown,
             content_bundle=row.content_bundle or {},
             content_sha256=row.content_sha256,
+            version_digest=getattr(row, "current_version_digest", None),
             last_validated_at=row.last_validated_at,
             created_at=row.created_at,
             updated_at=row.updated_at,

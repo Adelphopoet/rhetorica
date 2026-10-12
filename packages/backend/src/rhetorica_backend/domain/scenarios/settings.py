@@ -91,8 +91,11 @@ class ScenarioSettings(BaseSettings):
         default=10 * 1024 * 1024 * 1024,
         validation_alias="FILE_WORKSPACE_QUOTA_BYTES",
     )
-    sandbox_url: str = Field(default="http://sandbox:8090", validation_alias="SANDBOX_URL")
-    sandbox_internal_token: str = Field(
-        default="change-me-sandbox-internal-token",
-        validation_alias="SANDBOX_INTERNAL_TOKEN",
+    execution_runtime_url: str = Field(
+        default="http://execution-runtime:8091",
+        validation_alias="EXECUTION_RUNTIME_URL",
+    )
+    execution_runtime_internal_token: str = Field(
+        default="change-me-execution-runtime-internal-token",
+        validation_alias="EXECUTION_RUNTIME_INTERNAL_TOKEN",
     )

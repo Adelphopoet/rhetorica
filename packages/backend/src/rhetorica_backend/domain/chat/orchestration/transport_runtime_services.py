@@ -315,52 +315,11 @@ class StreamingRuntimeLoopService:
         state = runtime.state
         streamed_text = False
         streamed_reasoning = False
-        internal_optimizer_tool_call_count = 0
-        active_internal_optimizer_calls: list[str] = []
-
         def record_event(event: StreamEvent) -> None:
             if on_event is None:
                 events.append(event)
             if on_event is not None:
                 on_event(event)
-
-        def emit_internal_optimizer_start(arguments: dict[str, Any]) -> None:
-            nonlocal internal_optimizer_tool_call_count
-            internal_optimizer_tool_call_count += 1
-            tool_call_id = f"internal_sql_optimizer_{internal_optimizer_tool_call_count}"
-            active_internal_optimizer_calls.append(tool_call_id)
-            record_event(
-                ToolCallStartEvent(
-                    tool_name="sql_optimization_advisor",
-                    tool_call_id=tool_call_id,
-                    arguments=arguments,
-                )
-            )
-
-        def emit_internal_optimizer_end(trace: Any, summary: str) -> None:
-            _ = trace
-            tool_call_id = (
-                active_internal_optimizer_calls.pop() if active_internal_optimizer_calls else None
-            )
-            record_event(
-                ToolCallEndEvent(
-                    tool_name="sql_optimization_advisor",
-                    tool_call_id=tool_call_id,
-                    result_summary=summary,
-                    success=True,
-                )
-            )
-
-        set_sql_optimizer_event_handlers = getattr(
-            runtime.tool_executor,
-            "set_sql_optimizer_event_handlers",
-            None,
-        )
-        if callable(set_sql_optimizer_event_handlers):
-            set_sql_optimizer_event_handlers(
-                on_start=emit_internal_optimizer_start,
-                on_end=emit_internal_optimizer_end,
-            )
 
         if cancel_event and cancel_event.is_set():
             self._mark_runtime_cancelled(state)

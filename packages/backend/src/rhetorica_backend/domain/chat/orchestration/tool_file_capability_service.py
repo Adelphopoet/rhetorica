@@ -126,11 +126,11 @@ class ToolFileCapabilityService:
             return result
         try:
             if tool_name == "list_files":
-                result = self._list_files(state)
+                result = self._list_files(request, state)
             elif tool_name == "inspect_file":
-                result = self._inspect_file(arguments, state)
+                result = self._inspect_file(arguments, request, state)
             elif tool_name == "run_file_code":
-                result = self._run_code(arguments, state)
+                result = self._run_code(arguments, request, state)
             elif tool_name == "publish_files":
                 result = self._publish(arguments, request, state)
             elif tool_name == "export_sql_result":
@@ -192,8 +192,9 @@ class ToolFileCapabilityService:
         finally:
             self._record(operation, outcome, started, bytes_count)
 
-    def _list_files(self, state: ToolOrchestrationState) -> dict[str, Any]:
+    def _list_files(self, request: ChatAskRequest, state: ToolOrchestrationState) -> dict[str, Any]:
         files = self._artifacts.list_conversation(
+            workspace_id=request.workspace_id,
             conversation_id=str(state.conversation_id),
             owner_user_id=self._owner_user_id,
             limit=100,
@@ -205,9 +206,14 @@ class ToolFileCapabilityService:
         }
 
     def _inspect_file(
-        self, arguments: dict[str, Any], state: ToolOrchestrationState
+        self,
+        arguments: dict[str, Any],
+        request: ChatAskRequest,
+        state: ToolOrchestrationState,
     ) -> dict[str, Any]:
-        artifact = self._owned_input(str(arguments.get("artifact_id") or ""), state)
+        artifact = self._owned_input(
+            str(arguments.get("artifact_id") or ""), state, request.workspace_id
+        )
         result = self._sandbox.inspect_file(
             session_id=state.sandbox_session_id,
             input_file=self._sandbox_input(artifact),
@@ -217,7 +223,12 @@ class ToolFileCapabilityService:
             self._active_session_ids.add(state.sandbox_session_id)
         return {"ok": True, **result}
 
-    def _run_code(self, arguments: dict[str, Any], state: ToolOrchestrationState) -> dict[str, Any]:
+    def _run_code(
+        self,
+        arguments: dict[str, Any],
+        request: ChatAskRequest,
+        state: ToolOrchestrationState,
+    ) -> dict[str, Any]:
         code = str(arguments.get("code") or "")
         if not code or len(code) > 20_000:
             return self._error("invalid_code")
@@ -225,7 +236,10 @@ class ToolFileCapabilityService:
         artifact_ids = [str(item) for item in raw_ids if isinstance(item, str)]
         if len(artifact_ids) > 5:
             return self._error("too_many_files")
-        artifacts = [self._owned_input(artifact_id, state) for artifact_id in artifact_ids]
+        artifacts = [
+            self._owned_input(artifact_id, state, request.workspace_id)
+            for artifact_id in artifact_ids
+        ]
         run = self._sandbox.run_python(
             session_id=state.sandbox_session_id,
             code=code,
@@ -405,9 +419,13 @@ class ToolFileCapabilityService:
             "delivery_state": "assistant_attachment",
         }
 
-    def _owned_input(self, artifact_id: str, state: ToolOrchestrationState) -> Any:
+    def _owned_input(
+        self, artifact_id: str, state: ToolOrchestrationState, workspace_id: str
+    ) -> Any:
         artifact = self._artifacts.get_owned(
-            artifact_id=artifact_id, owner_user_id=self._owner_user_id
+            artifact_id=artifact_id,
+            owner_user_id=self._owner_user_id,
+            workspace_id=workspace_id,
         )
         if artifact.conversation_id != state.conversation_id:
             raise PermissionError("artifact_conversation_mismatch")

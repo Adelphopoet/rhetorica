@@ -7,6 +7,7 @@ DATABASE_URL_LOCAL ?= postgresql+psycopg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)
 
 .PHONY: bootstrap infra-up infra-down apps-up apps-down dev-up dev-down dev-down-clean logs ps uv-sync uv-lock web-install compose-config test test-parallel
 .PHONY: wait-postgres db-migrate db-migrate-make db-downgrade db-current db-heads
+.PHONY: gitlab-publisher-up gitlab-publisher-down gitlab-publisher-live
 
 bootstrap:
 	cp -n .env.example .env || true
@@ -18,10 +19,10 @@ infra-down:
 	$(COMPOSE) -f $(COMPOSE_FILE) stop postgres redis qdrant minio minio-init
 
 apps-up:
-	$(COMPOSE) -f $(COMPOSE_FILE) $(APP_PROFILE) up -d api worker web
+	$(COMPOSE) -f $(COMPOSE_FILE) $(APP_PROFILE) up -d api worker web coding-query-gateway
 
 apps-down:
-	$(COMPOSE) -f $(COMPOSE_FILE) $(APP_PROFILE) stop api worker web
+	$(COMPOSE) -f $(COMPOSE_FILE) $(APP_PROFILE) stop api worker web coding-query-gateway
 
 dev-up:
 	$(COMPOSE) -f $(COMPOSE_FILE) $(APP_PROFILE) up -d --build

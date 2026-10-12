@@ -87,6 +87,7 @@ class StreamingRuntimeTransportArtifact(BaseModel):
 
     artifact_type: Literal["streaming_events"] = "streaming_events"
     events: list[StreamEvent] = Field(default_factory=list)
+    journal_events: list[dict[str, object]] = Field(default_factory=list)
 
 
 RuntimeTransportArtifact = Annotated[
@@ -494,6 +495,7 @@ class TransportFinalizationInput(BaseModel):
     llm_usages: list[dict[str, Any]] = Field(default_factory=list)
     history_persistence: HistoryPersistenceDecision
     transport_events: list[StreamEvent] = Field(default_factory=list)
+    journal_events: list[dict[str, object]] | None = None
     persisted_user_message_id: str | None = None
 
 

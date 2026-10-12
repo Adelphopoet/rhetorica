@@ -14,6 +14,7 @@ from rhetorica_backend.infra.postgres.agent_repository import AgentProfileReposi
 from rhetorica_backend.infra.postgres.connector_repository import ConnectorRepository
 from rhetorica_backend.infra.postgres.llm_connector_repository import LlmConnectorRepository
 from rhetorica_backend.infra.postgres.user_repository import UserAccountItem, UserAccountRepository
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 
 ANALYTICAL_TOOLS = {
     "run_sql": "Выполнить защищённый SQL и сохранить результат в файл",
@@ -30,17 +31,24 @@ class ScenarioResourcePolicy:
         agents: AgentProfileRepository,
         connectors: ConnectorRepository,
         llm_connectors: LlmConnectorRepository,
+        workspaces: WorkspaceRepository | None = None,
     ):
         self.users = users
         self.agents = agents
         self.connectors = connectors
         self.llm_connectors = llm_connectors
+        self.workspaces = workspaces
 
     def user(self, user_id: str, workspace_id: str) -> UserAccountItem:
         user = self.users.get_by_id(user_id=user_id)
-        if user is None or not user.is_active or user.workspace_id != workspace_id:
+        if user is None or not user.is_active:
             raise WorkflowError("scenario_actor_access_revoked", status_code=403)
-        return user
+        if self.workspaces is None:
+            if user.workspace_id != workspace_id:
+                raise WorkflowError("scenario_actor_access_revoked", status_code=403)
+        elif self.workspaces.membership(workspace_id=workspace_id, user_id=user.id) is None:
+            raise WorkflowError("scenario_actor_access_revoked", status_code=403)
+        return user.for_workspace(workspace_id)
 
     def agent(self, agent_id: str, user: UserAccountItem) -> AgentProfileItem:
         agent = self.agents.get(

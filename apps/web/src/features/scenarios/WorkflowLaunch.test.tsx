@@ -1,9 +1,12 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render as renderUi, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createConversation } from "@/features/chat/historyApi";
 import { deleteStagedFile, uploadFile, type FileArtifactRef } from "@/features/files/fileApi";
 import { LaunchForm } from "./WorkflowLaunch";
 import { startWorkflow, type Version } from "./workflowApi";
+
+function render(ui: React.ReactNode) { return renderUi(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{ui}</QueryClientProvider>); }
 
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => router }));

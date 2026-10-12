@@ -9,8 +9,13 @@ from rhetorica_backend.contracts.admin_integrations import (
     RagConnectorItem,
     UpsertRagConnectorRequest,
 )
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.models import RagConnectorConfigOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_resource_access import (
+    WorkspaceResourceAccess,
+    present_resource,
+)
 from rhetorica_backend.infra.secrets import SecretStore, SecretStoreError, get_secret_store
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +27,11 @@ class RagConnectorRepository:
     def __init__(self, db: DatabaseRuntime, secret_store: SecretStore | None = None):
         self._db = db
         self._secret_store = secret_store or get_secret_store()
+        self._resources = WorkspaceResourceAccess(
+            db,
+            kind=WorkspaceResourceKind.RAG_CONNECTOR,
+            model=RagConnectorConfigOrm,
+        )
 
     def upsert(self, request: UpsertRagConnectorRequest) -> RagConnectorItem:
         now = datetime.now(tz=UTC)
@@ -134,48 +144,33 @@ class RagConnectorRepository:
             return self._to_contract(row)
 
     def list(self, workspace_id: str, limit: int) -> list[RagConnectorItem]:
-        with self._db.session() as session:
-            stmt = (
-                select(RagConnectorConfigOrm)
-                .where(RagConnectorConfigOrm.workspace_id == workspace_id)
-                .order_by(RagConnectorConfigOrm.updated_at.desc())
-                .limit(limit)
-            )
-            rows = session.execute(stmt).scalars().all()
-        return [self._to_contract(row) for row in rows]
+        return [
+            present_resource(self._to_contract(resource.row), resource)
+            for resource in self._resources.list(workspace_id=workspace_id, limit=limit)
+        ]
 
     def get(self, workspace_id: str, name: str | None = None) -> RagConnectorItem | None:
-        with self._db.session() as session:
-            stmt = select(RagConnectorConfigOrm).where(
-                RagConnectorConfigOrm.workspace_id == workspace_id
-            )
-            if name:
-                stmt = stmt.where(RagConnectorConfigOrm.name == name)
-            stmt = stmt.order_by(RagConnectorConfigOrm.updated_at.desc()).limit(1)
-            row = session.execute(stmt).scalar_one_or_none()
-        if row is None:
+        resource = next(
+            (
+                item
+                for item in self._resources.list(workspace_id=workspace_id, limit=None)
+                if name is None or item.alias == name
+            ),
+            None,
+        )
+        if resource is None:
             return None
-        return self._to_contract(row)
+        return present_resource(self._to_contract(resource.row), resource)
 
     def get_connection(
         self, workspace_id: str, name: str | None = None
     ) -> RagConnectionConfig | None:
-        with self._db.session() as session:
-            base_stmt = select(RagConnectorConfigOrm).where(
-                RagConnectorConfigOrm.workspace_id == workspace_id,
-            )
-            stmt = base_stmt.where(RagConnectorConfigOrm.is_active.is_(True))
-            if name:
-                stmt = stmt.where(RagConnectorConfigOrm.name == name)
-            stmt = stmt.order_by(RagConnectorConfigOrm.updated_at.desc()).limit(1)
-            row = session.execute(stmt).scalar_one_or_none()
-            has_workspace_rows = (
-                session.execute(base_stmt.limit(1)).scalar_one_or_none() is not None
-            )
-        if row is None:
-            if has_workspace_rows:
+        resource = self._resources.first_active(workspace_id=workspace_id, name=name)
+        if resource is None:
+            if self._resources.list(workspace_id=workspace_id, limit=1):
                 return None
             return self._builtin_connection_from_env()
+        row = resource.row
         return RagConnectionConfig(
             provider=row.provider,
             base_url=row.base_url,

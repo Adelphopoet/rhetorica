@@ -376,68 +376,7 @@ export function mergeToolCallsWithOptimizationTrace(args: {
   payload?: ChatAskResponse;
   timestamp?: Date;
 }): ToolCallEntry[] {
-  const toolCalls = mergeToolCallsWithSemanticGrounding(args);
-  const trace = args.payload?.optimization_trace;
-  if (!trace?.optimizer_used) {
-    return toolCalls;
-  }
-
-  const timestamp = args.timestamp?.toISOString();
-  const summary = (() => {
-    if (trace.applied) {
-      return `Применена оптимизация запроса${trace.rules_triggered.length ? `: ${trace.rules_triggered.join(", ")}` : ""}`;
-    }
-    if (trace.findings.length > 0) {
-      const findingWord =
-        trace.findings.length === 1
-          ? "замечание"
-          : trace.findings.length < 5
-            ? "замечания"
-            : "замечаний";
-      return `Только рекомендации: ${trace.findings.length} ${findingWord}`;
-    }
-    return "SQL проверен перед выполнением";
-  })();
-  const optimizerArguments = {
-    applied: trace.applied,
-    accepted_or_rejected: trace.accepted_or_rejected ?? null,
-    risk_level: trace.risk_level ?? null,
-    confidence: trace.confidence ?? null,
-    rules_triggered: trace.rules_triggered,
-    skills_used: trace.skills_used,
-    evidence_used: trace.evidence_used,
-    findings: trace.findings,
-    recommended_actions: trace.recommended_actions,
-    input_sql: trace.input_sql ?? null,
-    optimized_sql_draft: trace.optimized_sql_draft ?? null,
-  };
-  const existingIndex = toolCalls.findIndex((call) => call.tool_name === "sql_optimization_advisor");
-  if (existingIndex >= 0) {
-    const mergedToolCalls = [...toolCalls];
-    const existingCall = mergedToolCalls[existingIndex];
-    mergedToolCalls[existingIndex] = {
-      ...existingCall,
-      arguments: {
-        ...(existingCall?.arguments ?? {}),
-        ...optimizerArguments,
-      },
-      result_summary: summary,
-      success: existingCall?.success ?? true,
-      completed_at: existingCall?.completed_at ?? timestamp,
-    };
-    return mergedToolCalls;
-  }
-
-  const optimizerToolCall: ToolCallEntry = {
-    id: `tool-${args.timestamp?.getTime() ?? Date.now()}-optimizer`,
-    tool_name: "sql_optimization_advisor",
-    arguments: optimizerArguments,
-    result_summary: summary,
-    success: true,
-    started_at: timestamp,
-    completed_at: timestamp,
-    sequence: nextSyntheticSequence(toolCalls),
-  };
-
-  return [...toolCalls, optimizerToolCall];
+  // Historical conversations retain their recorded tool events.  New turns no
+  // longer synthesize an optimizer event from a legacy trace payload.
+  return mergeToolCallsWithSemanticGrounding(args);
 }

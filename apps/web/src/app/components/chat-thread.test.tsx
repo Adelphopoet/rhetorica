@@ -695,7 +695,7 @@ describe("ChatThread", () => {
     expect(screen.getByText("safe")).toBeInTheDocument();
   });
 
-  it("renders optimizer trace as a synthetic tool call card", () => {
+  it("does not synthesize an optimizer tool card from a historical trace", () => {
     const messages: ChatMessageViewModel[] = [
       {
         id: "assistant-optimizer",
@@ -703,20 +703,6 @@ describe("ChatThread", () => {
         text: "Оптимизировал запрос",
         timestamp: new Date("2026-04-04T09:00:00Z"),
         deliveryState: "complete",
-        toolCalls: [
-          {
-            id: "call-optimizer",
-            tool_name: "sql_optimization_advisor",
-            arguments: {
-              selected_connector_name: "clickhouse",
-              engine: "clickhouse",
-            },
-            result_summary: "Advisory only: 2 findings",
-            success: true,
-            started_at: "2026-04-04T09:00:01Z",
-            completed_at: "2026-04-04T09:00:02Z",
-          },
-        ],
         payload: {
           answer: "Оптимизировал запрос",
           conversation_id: "conv-opt",
@@ -769,20 +755,8 @@ describe("ChatThread", () => {
 
     renderThread(messages);
 
-    fireEvent.click(screen.getByRole("button", { name: /показать журнал выполнения/i }));
-
-    expect(screen.getByText(/sql optimization advisor/i)).toBeInTheDocument();
-    expect(screen.getByText(/только рекомендации: 1 замечание/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/date filter can be mirrored before the join/i, {
-        selector: "span",
-      })
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/mirror the business-date filter on both joined facts to shrink scans/i, {
-        selector: "p",
-      })
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /показать журнал выполнения/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/sql optimization advisor/i)).not.toBeInTheDocument();
   });
 
   it("renders semantic table scoring inside the system log metadata tool card", () => {

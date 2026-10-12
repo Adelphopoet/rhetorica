@@ -11,6 +11,9 @@ export type { TextareaProps } from "./components/Textarea";
 export { Select } from "./components/Select";
 export type { SelectProps } from "./components/Select";
 
+export { DropdownSelect } from "./components/DropdownSelect";
+export type { DropdownSelectProps, DropdownSelectOption } from "./components/DropdownSelect";
+
 export { Switch } from "./components/Switch";
 export type { SwitchProps } from "./components/Switch";
 

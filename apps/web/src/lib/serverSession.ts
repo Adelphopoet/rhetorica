@@ -3,6 +3,8 @@ import { fetchBackend } from "@/lib/backendAuth";
 
 export type AuthSession = {
   workspace_id: string;
+  home_workspace_id: string;
+  workspace_role: "owner" | "analyst" | "viewer";
   role: string;
   expires_at: string;
   user: {
@@ -39,6 +41,14 @@ export async function requireServerSession(nextPath: string): Promise<AuthSessio
 export async function requireAdminSession(nextPath: string): Promise<AuthSession> {
   const session = await requireServerSession(nextPath);
   if (session.role !== "admin") {
+    redirect("/");
+  }
+  return session;
+}
+
+export async function requireWorkspaceManagerSession(nextPath: string): Promise<AuthSession> {
+  const session = await requireServerSession(nextPath);
+  if (session.role !== "admin" && session.workspace_role !== "owner") {
     redirect("/");
   }
   return session;

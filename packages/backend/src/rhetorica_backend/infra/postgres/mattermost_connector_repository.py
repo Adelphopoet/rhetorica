@@ -9,12 +9,17 @@ from rhetorica_backend.contracts.admin_integrations import (
     MattermostConnectorItem,
     UpsertMattermostConnectorRequest,
 )
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.models import (
     MattermostConnectorConfigOrm,
     MattermostEventLedgerOrm,
     MattermostThreadBindingOrm,
 )
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_resource_access import (
+    WorkspaceResourceAccess,
+    present_resource,
+)
 from rhetorica_backend.infra.secrets import SecretStore, SecretStoreError, get_secret_store
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -33,6 +38,11 @@ class MattermostConnectorRepository:
     ):
         self._db = db
         self._secret_store = secret_store or get_secret_store()
+        self._resources = WorkspaceResourceAccess(
+            db,
+            kind=WorkspaceResourceKind.MATTERMOST_CONNECTOR,
+            model=MattermostConnectorConfigOrm,
+        )
         self._binding_ttl = timedelta(seconds=binding_ttl_seconds)
 
     def upsert(self, request: UpsertMattermostConnectorRequest) -> MattermostConnectorItem:
@@ -153,18 +163,10 @@ class MattermostConnectorRepository:
             return self._to_contract(row)
 
     def list(self, workspace_id: str, limit: int) -> list[MattermostConnectorItem]:
-        with self._db.session() as session:
-            rows = (
-                session.execute(
-                    select(MattermostConnectorConfigOrm)
-                    .where(MattermostConnectorConfigOrm.workspace_id == workspace_id)
-                    .order_by(MattermostConnectorConfigOrm.updated_at.desc())
-                    .limit(limit)
-                )
-                .scalars()
-                .all()
-            )
-        return [self._to_contract(row) for row in rows]
+        return [
+            present_resource(self._to_contract(resource.row), resource)
+            for resource in self._resources.list(workspace_id=workspace_id, limit=limit)
+        ]
 
     def list_enabled(self) -> list[MattermostConnectorItem]:
         with self._db.session() as session:
@@ -185,19 +187,10 @@ class MattermostConnectorRepository:
         workspace_id: str,
         name: str | None = None,
     ) -> MattermostConnectionConfig | None:
-        with self._db.session() as session:
-            stmt = select(MattermostConnectorConfigOrm).where(
-                MattermostConnectorConfigOrm.workspace_id == workspace_id,
-                MattermostConnectorConfigOrm.is_active.is_(True),
-            )
-            if name:
-                stmt = stmt.where(MattermostConnectorConfigOrm.name == name)
-            row = session.execute(
-                stmt.order_by(MattermostConnectorConfigOrm.updated_at.desc()).limit(1)
-            ).scalar_one_or_none()
-        if row is None:
+        resource = self._resources.first_active(workspace_id=workspace_id, name=name)
+        if resource is None:
             return None
-        return self._connection_from_row(row, include_secret=True)
+        return self._connection_from_row(resource.row, include_secret=True)
 
     def delete(self, connector_id: str, workspace_id: str) -> bool:
         with self._db.session() as session:

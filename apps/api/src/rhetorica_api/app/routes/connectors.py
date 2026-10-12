@@ -10,13 +10,13 @@ from rhetorica_backend.infra.postgres.connector_repository import ConnectorRepos
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from sqlalchemy.exc import IntegrityError
 
-from rhetorica_api.app.auth import require_admin_access
+from rhetorica_api.app.auth import require_workspace_owner_access
 from rhetorica_api.app.settings import settings
 
 router = APIRouter(
     prefix="/v1/admin/connectors",
     tags=["connectors"],
-    dependencies=[Depends(require_admin_access)],
+    dependencies=[Depends(require_workspace_owner_access)],
 )
 
 

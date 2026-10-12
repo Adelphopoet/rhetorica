@@ -114,6 +114,7 @@ class TestConversationManager:
             agent_id=None,
             source_provider=None,
             source_message_id=None,
+            journal_events=None,
         )
 
     def test_save_message_no_repository(self):

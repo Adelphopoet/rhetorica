@@ -13,6 +13,7 @@ left to right direction
 actor "Аналитик" as Analyst
 actor "Администратор workspace" as Admin
 actor "Разработчик" as Developer
+actor "Ревьюер" as Reviewer
 actor "Пользователь платформы данных" as DataUser
 actor "Пользователь Rhetorica" as User
 
@@ -23,7 +24,7 @@ rectangle Rhetorica {
   usecase "UC-RH-4\nРаботать с файлами" as UC4
   usecase "UC-RH-5\nСоздать по шаблону и запустить сценарий" as UC5
   usecase "UC-RH-6\nНастроить коннекторы" as UC6
-  usecase "UC-RH-7\nНастроить агента и skills" as UC7
+  usecase "UC-RH-7\nНастроить агента, skills и coding-политику" as UC7
   usecase "UC-RH-8\nПроверить качество изменения" as UC8
   usecase "UC-RH-9\nЗапросить доступ к DWH" as UC9
   usecase "UC-RH-10\nПодключить внешний MCP-клиент" as UC10
@@ -33,6 +34,10 @@ rectangle Rhetorica {
   usecase "UC-RH-14\nНастроить тему и продолжить работу" as UC14
   usecase "UC-RH-15\nОграничить API-запросы локальной учётной записи" as UC15
   usecase "UC-RH-16\nОткрыть полезные инструкции" as UC16
+  usecase "UC-RH-17\nОбсудить и подтвердить разработку" as UC17
+  usecase "UC-RH-18\nПроверить immutable candidate" as UC18
+  usecase "UC-RH-19\nУправлять workspace" as UC19
+  usecase "UC-RH-20\nНастроить команду coding-агентов" as UC20
 }
 
 Analyst --> UC1
@@ -52,6 +57,10 @@ User --> UC13
 User --> UC14 : Кнопка темы
 Admin --> UC15
 Analyst --> UC16
+Analyst --> UC17
+Reviewer --> UC18
+Admin --> UC19
+Admin --> UC20
 @enduml
 ```
 

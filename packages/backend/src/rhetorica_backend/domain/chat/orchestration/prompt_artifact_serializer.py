@@ -13,6 +13,8 @@ from rhetorica_backend.domain.chat.sql_prompt_window import (
     normalize_sql_prompt_row_limit,
 )
 
+from .record_preview import RecordPreview, RecordPreviewPolicy
+
 PromptArtifactType = Literal[
     "evidence_summary",
     "tool_control",
@@ -33,13 +35,18 @@ class PromptArtifactEnvelope(BaseModel):
     truncated: bool = False
     truncation_flags: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    compact_encoding: bool = Field(default=False, exclude=True)
 
     def stable_json(self) -> str:
         """Return deterministic JSON for prompt injection and snapshot tests."""
         return json.dumps(
-            self.model_dump(mode="json"),
+            self.model_dump(
+                mode="json",
+                exclude={"token_estimate", "char_estimate"} if self.compact_encoding else set(),
+            ),
             ensure_ascii=False,
             sort_keys=True,
+            separators=(",", ":") if self.compact_encoding else None,
         )
 
 
@@ -403,6 +410,16 @@ class PromptArtifactSerializer:
         "tags",
         "domains",
         "entity",
+        "structured_content",
+        "content_json",
+        "data",
+        "items",
+        "content_markdown",
+        "artifact_id",
+        "results",
+        "candidates",
+        "tables",
+        "metricExpression",
     )
 
     def __init__(
@@ -410,7 +427,15 @@ class PromptArtifactSerializer:
         *,
         budget_policy: PromptContextBudgetPolicy | None = None,
         estimator: LlmTokenEstimator | None = None,
+        optimized_outputs: bool | None = None,
     ) -> None:
+        from ..settings import get_chat_settings
+
+        self._optimized_outputs = (
+            get_chat_settings().tool_output_policy_enabled
+            if optimized_outputs is None
+            else optimized_outputs
+        )
         self._budget_policy = budget_policy or PromptContextBudgetPolicy()
         self._estimator = estimator or LlmTokenEstimator(model_name=None)
 
@@ -453,6 +478,7 @@ class PromptArtifactSerializer:
             }.get(artifact_type, "prompt_artifact_budget_warning")
             self._append_once(warnings, warning)
         return PromptArtifactEnvelope(
+            compact_encoding=self._optimized_outputs,
             artifact_type=artifact_type,
             compact_payload=compact_payload,
             token_estimate=token_estimate,
@@ -518,8 +544,7 @@ class PromptArtifactSerializer:
             return self._normalize_airflow_artifact(artifact)
         return artifact
 
-    @staticmethod
-    def _normalize_mcp_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_mcp_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(artifact)
         result = normalized.pop("result")
         if not isinstance(result, dict):
@@ -547,6 +572,22 @@ class PromptArtifactSerializer:
                 item_type = item.get("type")
                 text = item.get("text")
                 if item_type == "text" and isinstance(text, str):
+                    if not self._optimized_outputs:
+                        text_parts.append(text)
+                        continue
+                    # Some MCP servers send the same object both as JSON text and as
+                    # structuredContent. Only discard proven semantic duplicates.
+                    try:
+                        decoded = json.loads(text)
+                    except (ValueError, TypeError):
+                        decoded = None
+                    if structured_content is not None and json.dumps(
+                        decoded, sort_keys=True
+                    ) == json.dumps(structured_content, sort_keys=True):
+                        continue
+                    if structured_content is None and isinstance(decoded, dict | list):
+                        mcp_payload.setdefault("content_json", []).append(decoded)
+                        continue
                     text_parts.append(text)
                     continue
                 compact_item = {
@@ -1147,7 +1188,11 @@ class PromptArtifactSerializer:
         truncation_flags: list[str],
     ) -> dict[str, Any]:
         compacted: dict[str, Any] = {}
-        selected_keys = list(value)[: self._budget_policy.max_columns]
+        ordered_keys = [key for key in self._ENTITY_KEY_PRIORITY if key in value]
+        ordered_keys.extend(key for key in value if key not in ordered_keys)
+        selected_keys = (ordered_keys if self._optimized_outputs else list(value))[
+            : self._budget_policy.max_columns
+        ]
         for key in selected_keys:
             if key in self._FORBIDDEN_KEYS:
                 continue
@@ -1169,6 +1214,15 @@ class PromptArtifactSerializer:
         key: str,
         truncation_flags: list[str],
     ) -> list[Any] | dict[str, Any]:
+        if self._optimized_outputs and key not in {"rows", "preview", *self._COLUMN_KEYS}:
+            page = RecordPreviewPolicy(
+                max_chars=min(6_000, self._budget_policy.max_payload_chars // 2)
+            ).project(value)
+            if page is not None:
+                self._append_once(truncation_flags, "record_details_omitted")
+                if page["items_omitted"]:
+                    self._append_once(truncation_flags, f"{key}_truncated")
+                return page
         if key in self._ROW_LIST_KEYS:
             limit = self._budget_policy.max_rows
         elif key in self._COLUMN_KEYS:
@@ -1261,6 +1315,8 @@ class PromptArtifactSerializer:
         column_limit: int,
         text_limit: int,
     ) -> Any:
+        if isinstance(value, RecordPreview):
+            return RecordPreviewPolicy.shrink(value, item_limit)
         if (
             key in self._ENTITY_LIST_KEYS.union(self._COLUMN_KEYS)
             and isinstance(value, dict)
@@ -1328,7 +1384,10 @@ class PromptArtifactSerializer:
             if key not in compacted
             and key not in ordered_keys
             and key not in self._FORBIDDEN_KEYS
-            and not isinstance(value[key], dict | list)
+            and (
+                not isinstance(value[key], dict | list)
+                or isinstance(value[key], RecordPreview)
+            )
         )
         for key in ordered_keys[: self._budget_policy.max_columns]:
             compacted[key] = self._compact_oversized_value(

@@ -53,6 +53,10 @@ alt токен действителен, а tool разрешён administrative
 else токен, scope, connector или tool не разрешён
   API --> Client: Отказ без вызова удалённого tool
 end
+opt Запрошен coding напрямую или через сценарий
+  Client -> API: Запуск разработки
+  API --> Client: Отказ канала до создания sandbox
+end
 @enduml
 ```
 
@@ -272,3 +276,15 @@ end
 
 - **WHEN** в workspace нет активного OpenMetadata-совместимого search tool либо удалённый вызов завершается ошибкой
 - **THEN** система возвращает model-readable ошибку и не выдаёт пустой список за успешно прочитанный каталог
+
+### Requirement: FR-RH-012.10 — Граница coding во внешнем MCP
+
+<a id="fr-rh-012-10"></a>
+Система SHALL отклонять запуск coding-задач через внешний MCP независимо от write-прав пользователя.
+
+**Use Cases:** UC-RH-10, UC-RH-17
+
+#### Scenario: Граница coding во внешнем MCP
+
+- **WHEN** MCP-клиент авторизован пользователем с разрешённым coding-профилем и запрашивает coding run
+- **THEN** система отклоняет запуск, не создавая sandbox

@@ -271,9 +271,8 @@ class LlmPromptBudgetService:
             messages=messages,
             tools=tools,
             response_schema=response_schema,
-            response_reserve_tokens=self._effective_response_reserve_tokens(
-                self.context_window_tokens()
-            ),
+            # The output reserve is already subtracted by prompt_budget_tokens().
+            response_reserve_tokens=0,
         )
 
     @staticmethod

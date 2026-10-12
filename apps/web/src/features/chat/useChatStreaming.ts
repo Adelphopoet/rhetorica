@@ -34,6 +34,7 @@ export type {
 } from "./streamingTypes";
 
 interface UseChatStreamingOptions {
+  codingResources?: import("@/features/coding/codingApi").CodingSelection | null;
   workspaceId?: string;
   onComplete?: (
     message: StreamingMessage,
@@ -65,6 +66,7 @@ interface UseChatStreamingReturn {
 
 export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChatStreamingReturn {
   const {
+    codingResources = null,
     workspaceId = "default",
     onComplete,
     onError,
@@ -185,6 +187,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
             agent_id: agentId,
             attachment_ids: attachmentIds,
             run_sql: true,
+            ...(codingResources && { coding_mode: true, coding_resources: codingResources, run_sql: false }),
             ...(clarificationId && {
               selected_clarification_id: clarificationId,
               selected_clarification_value: clarificationValue,
@@ -290,7 +293,7 @@ export function useChatStreaming(options: UseChatStreamingOptions = {}): UseChat
         }
       }
     },
-    [commitMessage, generateMessageId, isCurrentRequest, onComplete, onError, updateWithEvent, workspaceId]
+    [codingResources, commitMessage, generateMessageId, isCurrentRequest, onComplete, onError, updateWithEvent, workspaceId]
   );
 
   const cancelStreaming = useCallback(() => {

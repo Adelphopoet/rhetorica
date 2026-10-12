@@ -40,6 +40,7 @@ def test_gitlab_connector_upsert_list_update_delete(tmp_path: Path) -> None:
                 "default_group_paths": ["platform"],
                 "search_limit": 8,
                 "read_max_tokens": 1400,
+                "coding_archive_max_files": 25000,
             },
         },
     )
@@ -50,6 +51,7 @@ def test_gitlab_connector_upsert_list_update_delete(tmp_path: Path) -> None:
     assert payload["has_api_token"] is True
     assert payload["connection"]["api_token"] is None
     assert payload["connection"]["base_url"] == "https://gitlab.example.com"
+    assert payload["connection"]["coding_archive_max_files"] == 25000
     connector_id = payload["id"]
 
     list_response = client.get(
@@ -77,6 +79,7 @@ def test_gitlab_connector_upsert_list_update_delete(tmp_path: Path) -> None:
                 "default_group_paths": [],
                 "search_limit": 3,
                 "read_max_tokens": 900,
+                "coding_archive_max_files": 30000,
             },
         },
     )
@@ -86,6 +89,7 @@ def test_gitlab_connector_upsert_list_update_delete(tmp_path: Path) -> None:
     assert updated["connection"]["use_when"] == "Use for implementation and config lookup."
     assert updated["connection"]["verify_tls"] is False
     assert updated["connection"]["default_project_paths"] == ["group/app", "group/lib"]
+    assert updated["connection"]["coding_archive_max_files"] == 30000
     assert updated["has_api_token"] is True
 
     delete_response = client.delete(
@@ -94,3 +98,23 @@ def test_gitlab_connector_upsert_list_update_delete(tmp_path: Path) -> None:
     )
     assert delete_response.status_code == 200
     assert delete_response.json()["deleted"] is True
+
+
+def test_gitlab_connector_rejects_unsafe_coding_archive_limit(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/v1/admin/gitlab-connectors",
+        json={
+            "name": "gitlab-main",
+            "workspace_id": "default",
+            "connection": {
+                "provider": "gitlab",
+                "base_url": "https://gitlab.example.com",
+                "use_when": "Use for source code lookup.",
+                "coding_archive_max_files": 100001,
+            },
+        },
+    )
+
+    assert response.status_code == 422

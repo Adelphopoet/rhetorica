@@ -1,0 +1,21 @@
+{{- if .Values.codingRunner.enabled }}
+{{- $image := required "codingRunner.runner.imageDigest is required" .Values.codingRunner.runner.imageDigest -}}
+{{- if not (regexMatch "@sha256:[a-f0-9]{64}$" $image) -}}
+{{- fail "codingRunner.runner.imageDigest must be immutable repository@sha256:<64 hex>" -}}
+{{- end -}}
+{{- required "codingRunner.runner.runtimeClassName is required" .Values.codingRunner.runner.runtimeClassName -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-coding-controller
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: execution-controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.codingRunner.service.port }}
+      targetPort: http
+{{- end }}

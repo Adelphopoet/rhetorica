@@ -12,7 +12,7 @@ resolution-markers = [
 members = [
     "rhetorica-api",
     "rhetorica-backend",
-    "rhetorica-sandbox",
+    "rhetorica-coding-runner",
     "rhetorica-worker",
 ]
 
@@ -3808,6 +3808,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "qdrant-client" },
     { name = "redis" },
+    { name = "referencing" },
     { name = "reportlab" },
     { name = "sqlalchemy" },
     { name = "sqlglot" },
@@ -3867,6 +3868,7 @@ requires-dist = [
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6,<4.0" },
     { name = "qdrant-client", specifier = ">=1.12,<2.0" },
     { name = "redis", specifier = ">=5.2,<6.0" },
+    { name = "referencing", specifier = ">=0.37,<1.0" },
     { name = "reportlab", specifier = ">=4.4,<5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.0,<0.12.0" },
     { name = "sqlalchemy", specifier = ">=2.0,<3.0" },
@@ -3880,9 +3882,9 @@ requires-dist = [
 provides-extras = ["dev"]
 
 [[package]]
-name = "rhetorica-sandbox"
+name = "rhetorica-coding-runner"
 version = "0.1.0"
-source = { editable = "apps/sandbox" }
+source = { editable = "apps/coding-runner" }
 dependencies = [
     { name = "fastapi" },
     { name = "matplotlib" },

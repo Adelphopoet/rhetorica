@@ -1,0 +1,106 @@
+{{- if .Values.codingRunner.enabled }}
+{{- if ne (int .Values.codingRunner.gateway.replicaCount) 1 -}}
+{{- fail "codingRunner.gateway.replicaCount must be 1 until query handles use a shared store" -}}
+{{- end -}}
+{{- $fullname := include "rhetorica.fullname" . -}}
+{{- $gatewayUrl := default (printf "http://%s-coding-query-gateway:%v" $fullname (.Values.codingRunner.gateway.service.port | int)) .Values.codingRunner.gateway.publicBaseUrl -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-coding-query-gateway
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coding-gateway
+spec:
+  replicas: {{ .Values.codingRunner.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: coding-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "rhetorica.labels" . | nindent 8 }}
+        app.kubernetes.io/component: coding-gateway
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: "{{ .Values.executionRuntime.image.repository }}:{{ .Values.executionRuntime.image.tag }}"
+          imagePullPolicy: {{ .Values.executionRuntime.image.pullPolicy }}
+          command: ["uvicorn", "rhetorica_coding_runner.gateway:app", "--host", "0.0.0.0", "--port", "8082"]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: {{ $fullname }}-config
+            {{- with .Values.codingRunner.gateway.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- with .Values.codingRunner.gateway.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            # Keep the gateway's control-plane authentication narrow. It does
+            # not inherit the release-wide Secret, which also holds unrelated
+            # application credentials.
+            - name: CODING_QUERY_GATEWAY_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-secret
+                  key: CODING_QUERY_GATEWAY_INTERNAL_TOKEN
+            - name: CODING_QUERY_GATEWAY_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-secret
+                  key: CODING_QUERY_GATEWAY_SIGNING_SECRET
+            - name: CODING_QUERY_GATEWAY_PUBLIC_BASE_URL
+              value: {{ $gatewayUrl | quote }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+          resources:
+            {{- toYaml .Values.codingRunner.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-coding-query-gateway
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/component: coding-gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.codingRunner.gateway.service.port }}
+      targetPort: http
+{{- end }}

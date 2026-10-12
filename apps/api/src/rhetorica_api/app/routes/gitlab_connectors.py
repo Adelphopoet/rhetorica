@@ -12,13 +12,13 @@ from rhetorica_backend.infra.postgres.gitlab_connector_repository import (
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from sqlalchemy.exc import IntegrityError
 
-from rhetorica_api.app.auth import require_admin_access
+from rhetorica_api.app.auth import require_workspace_owner_access
 from rhetorica_api.app.settings import settings
 
 router = APIRouter(
     prefix="/v1/admin/gitlab-connectors",
     tags=["gitlab-connectors"],
-    dependencies=[Depends(require_admin_access)],
+    dependencies=[Depends(require_workspace_owner_access)],
 )
 
 

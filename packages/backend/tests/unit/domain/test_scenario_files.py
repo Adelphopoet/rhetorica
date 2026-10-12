@@ -319,7 +319,11 @@ def test_full_sql_file_reaches_python_and_remains_owned_after_cleanup(
         )
         == []
     )
-    published = artifacts.get_owned(artifact_id=output["files"][0]["id"], owner_user_id=user.id)
+    published = artifacts.get_owned(
+        artifact_id=output["files"][0]["id"],
+        owner_user_id=user.id,
+        workspace_id=user.workspace_id,
+    )
     assert set(published.source_artifact_ids) == {sql_output["file"]["id"], upload.id}
     assert storage.open(published.storage_key).body.read() == b"count\n1200\n"
     if interruption is None:

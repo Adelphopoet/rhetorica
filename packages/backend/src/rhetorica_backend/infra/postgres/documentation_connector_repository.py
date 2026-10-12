@@ -12,6 +12,7 @@ from rhetorica_backend.contracts.admin_integrations import (
     DocumentationSyncRunItem,
     UpsertDocumentationConnectorRequest,
 )
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.models import (
     DocumentationChunkOrm,
     DocumentationConnectorConfigOrm,
@@ -19,6 +20,10 @@ from rhetorica_backend.infra.postgres.models import (
     DocumentationSyncRunOrm,
 )
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_resource_access import (
+    WorkspaceResourceAccess,
+    present_resource,
+)
 from rhetorica_backend.infra.secrets import SecretStore, get_secret_store
 from sqlalchemy import case, delete, literal, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -103,6 +108,11 @@ class DocumentationConnectorRepository:
     def __init__(self, db: DatabaseRuntime, secret_store: SecretStore | None = None):
         self._db = db
         self._secret_store = secret_store or get_secret_store()
+        self._resources = WorkspaceResourceAccess(
+            db,
+            kind=WorkspaceResourceKind.DOCUMENTATION_CONNECTOR,
+            model=DocumentationConnectorConfigOrm,
+        )
 
     def upsert(self, request: UpsertDocumentationConnectorRequest) -> DocumentationConnectorItem:
         now = datetime.now(tz=UTC)
@@ -162,18 +172,10 @@ class DocumentationConnectorRepository:
             return self._to_contract(row)
 
     def list(self, workspace_id: str, limit: int) -> list[DocumentationConnectorItem]:
-        with self._db.session() as session:
-            rows = (
-                session.execute(
-                    select(DocumentationConnectorConfigOrm)
-                    .where(DocumentationConnectorConfigOrm.workspace_id == workspace_id)
-                    .order_by(DocumentationConnectorConfigOrm.updated_at.desc())
-                    .limit(limit)
-                )
-                .scalars()
-                .all()
-            )
-        return [self._to_contract(row) for row in rows]
+        return [
+            present_resource(self._to_contract(resource.row), resource)
+            for resource in self._resources.list(workspace_id=workspace_id, limit=limit)
+        ]
 
     def list_due(self, *, now: datetime, limit: int) -> list[DocumentationConnectorItem]:
         with self._db.session() as session:
@@ -199,17 +201,9 @@ class DocumentationConnectorRepository:
         workspace_id: str,
         name: str | None = None,
     ) -> DocumentationConnectorItem | None:
-        with self._db.session() as session:
-            stmt = select(DocumentationConnectorConfigOrm).where(
-                DocumentationConnectorConfigOrm.workspace_id == workspace_id,
-                DocumentationConnectorConfigOrm.is_active.is_(True),
-            )
-            if name:
-                stmt = stmt.where(DocumentationConnectorConfigOrm.name == name)
-            stmt = stmt.order_by(DocumentationConnectorConfigOrm.updated_at.desc()).limit(1)
-            row = session.execute(stmt).scalar_one_or_none()
-        if row is not None:
-            return self._to_contract(row)
+        resource = self._resources.first_active(workspace_id=workspace_id, name=name)
+        if resource is not None:
+            return present_resource(self._to_contract(resource.row), resource)
         builtin = self._builtin_connection_from_env()
         if builtin is None:
             return None
@@ -220,11 +214,13 @@ class DocumentationConnectorRepository:
         return builtin
 
     def get_by_id(self, connector_id: str, workspace_id: str) -> DocumentationConnectorItem | None:
-        with self._db.session() as session:
-            row = session.get(DocumentationConnectorConfigOrm, connector_id)
-        if row is None or row.workspace_id != workspace_id:
+        resource = self._resources.by_id(
+            workspace_id=workspace_id,
+            resource_id=connector_id,
+        )
+        if resource is None:
             return None
-        return self._to_contract(row)
+        return present_resource(self._to_contract(resource.row), resource)
 
     def get_connection(
         self,
@@ -233,6 +229,18 @@ class DocumentationConnectorRepository:
     ) -> DocumentationConnectionConfig | None:
         item = self.get(workspace_id=workspace_id, name=name)
         return item.connection if item is not None else None
+
+    def execution_scope(
+        self,
+        *,
+        workspace_id: str,
+        name: str,
+    ) -> tuple[str, str] | None:
+        """Return the source scope used by indexed content and SecretStore."""
+        resource = self._resources.first_active(workspace_id=workspace_id, name=name)
+        if resource is None:
+            return None
+        return resource.row.workspace_id, resource.row.name
 
     def delete(self, connector_id: str, workspace_id: str) -> bool:
         with self._db.session() as session:
@@ -725,10 +733,13 @@ class DocumentationConnectorRepository:
         workspace_id: str,
         connector_id: str,
     ) -> DocumentationConnectionConfig:
-        with self._db.session() as session:
-            row = session.get(DocumentationConnectorConfigOrm, connector_id)
-        if row is None or row.workspace_id != workspace_id:
+        resource = self._resources.by_id(
+            workspace_id=workspace_id,
+            resource_id=connector_id,
+        )
+        if resource is None:
             return connection
+        row = resource.row
         return connection.model_copy(
             update={
                 "api_token": self._resolve_secret(

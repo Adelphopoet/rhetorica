@@ -36,6 +36,8 @@ describe("AgentSheet", () => {
         open
         onOpenChange={vi.fn()}
         editingAgent={null}
+        workspaceId="default"
+        agents={[]}
         databaseConnectors={[]}
         llmConnectors={[]}
         documentationConnectors={[]}

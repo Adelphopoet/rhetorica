@@ -25,10 +25,10 @@ from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from rhetorica_backend.infra.postgres.user_repository import (
     ADMIN_ROLE,
     ANALYST_ROLE,
-    LOCAL_AUTH_PROVIDER,
     UserAccountItem,
     UserAccountRepository,
 )
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 from rhetorica_backend.infra.security.api_tokens import (
     api_token_prefix,
     digest_api_token,
@@ -117,6 +117,8 @@ class AuthContext:
     scopes: frozenset[str] = frozenset({"*"})
     credential_type: str = "session"
     token_id: str | None = None
+    active_workspace_id: str | None = None
+    workspace_role: str | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -140,6 +142,10 @@ class AuthContext:
 
     @property
     def workspace_id(self) -> str:
+        return self.active_workspace_id or self.user.workspace_id
+
+    @property
+    def home_workspace_id(self) -> str:
         return self.user.workspace_id
 
     @property
@@ -186,6 +192,20 @@ def _api_token_repository() -> PersonalAccessTokenRepository:
     return PersonalAccessTokenRepository(db=runtime)
 
 
+@lru_cache(maxsize=8)
+def _workspace_repository_for_url(database_url: str) -> WorkspaceRepository:
+    runtime = DatabaseRuntime(database_url)
+    runtime.create_schema()
+    return WorkspaceRepository(
+        db=runtime,
+        default_workspace_id=settings.auth_default_workspace_id,
+    )
+
+
+def _workspace_repository() -> WorkspaceRepository:
+    return _workspace_repository_for_url(settings.database_url)
+
+
 def _build_auth_context(
     user: UserAccountItem,
     *,
@@ -194,6 +214,8 @@ def _build_auth_context(
     scopes: frozenset[str] = frozenset({"*"}),
     credential_type: str = "session",
     token_id: str | None = None,
+    active_workspace_id: str | None = None,
+    workspace_role: str | None = None,
 ) -> AuthContext:
     return AuthContext(
         user=user,
@@ -202,10 +224,27 @@ def _build_auth_context(
         scopes=scopes,
         credential_type=credential_type,
         token_id=token_id,
+        active_workspace_id=active_workspace_id,
+        workspace_role=workspace_role,
     )
 
 
-def create_access_token_for_user(user: UserAccountItem) -> tuple[str, AuthContext]:
+def create_access_token_for_user(
+    user: UserAccountItem,
+    *,
+    active_workspace_id: str | None = None,
+) -> tuple[str, AuthContext]:
+    membership = _workspace_repository().session_membership(
+        requested_workspace_id=active_workspace_id,
+        user_id=user.id,
+    )
+    if membership is None:
+        raise AuthError(
+            "workspace_access_denied",
+            status_code=status.HTTP_403_FORBIDDEN,
+            headers={},
+        )
+    selected_workspace_id = membership.workspace_id
     now = datetime.now(tz=UTC)
     expires_at = now + timedelta(minutes=settings.auth_jwt_ttl_minutes)
     payload = {
@@ -214,6 +253,7 @@ def create_access_token_for_user(user: UserAccountItem) -> tuple[str, AuthContex
         "login": user.login,
         "auth_provider": user.auth_provider,
         "workspace_id": user.workspace_id,
+        "active_workspace_id": selected_workspace_id,
         "role": user.role,
         "iat": now,
         "exp": expires_at,
@@ -228,6 +268,8 @@ def create_access_token_for_user(user: UserAccountItem) -> tuple[str, AuthContex
         user,
         issued_at=now,
         expires_at=expires_at,
+        active_workspace_id=selected_workspace_id,
+        workspace_role=str(membership.role),
     )
 
 
@@ -350,6 +392,12 @@ def decode_personal_access_token(token: str) -> AuthContext:
     if not user.is_active:
         raise AuthError("inactive_user", status_code=status.HTTP_403_FORBIDDEN, headers={})
     used_item = _api_token_repository().record_successful_use(token_id=item.id) or item
+    membership = _workspace_repository().membership(
+        workspace_id=item.workspace_id,
+        user_id=user.id,
+    )
+    if membership is None:
+        raise AuthError("workspace_access_denied", status_code=403, headers={})
     return _build_auth_context(
         user,
         issued_at=used_item.created_at,
@@ -357,6 +405,8 @@ def decode_personal_access_token(token: str) -> AuthContext:
         scopes=frozenset(used_item.scopes),
         credential_type="personal_access_token",
         token_id=used_item.id,
+        active_workspace_id=item.workspace_id,
+        workspace_role=str(membership.role),
     )
 
 
@@ -374,6 +424,12 @@ def decode_oauth_access_token(token: str) -> AuthContext:
         raise AuthError("unknown_subject")
     if not user.is_active:
         raise AuthError("inactive_user", status_code=status.HTTP_403_FORBIDDEN, headers={})
+    membership = _workspace_repository().membership(
+        workspace_id=item.workspace_id,
+        user_id=user.id,
+    )
+    if membership is None:
+        raise AuthError("workspace_access_denied", status_code=403, headers={})
     return _build_auth_context(
         user,
         issued_at=item.created_at,
@@ -381,6 +437,8 @@ def decode_oauth_access_token(token: str) -> AuthContext:
         scopes=frozenset(item.scopes),
         credential_type="oauth_access_token",
         token_id=item.id,
+        active_workspace_id=item.workspace_id,
+        workspace_role=str(membership.role),
     )
 
 
@@ -416,9 +474,10 @@ def decode_access_token(token: str) -> AuthContext:
 
     auth_subject = str(payload["sub"])
     auth_provider = str(payload["auth_provider"])
-    workspace_id = str(payload["workspace_id"])
+    home_workspace_id = str(payload["workspace_id"])
+    active_workspace_id = str(payload.get("active_workspace_id") or home_workspace_id)
     user = _user_repository().get_by_auth_identity(
-        workspace_id=workspace_id,
+        workspace_id=home_workspace_id,
         auth_provider=auth_provider,
         auth_subject=auth_subject,
     )
@@ -426,6 +485,12 @@ def decode_access_token(token: str) -> AuthContext:
         raise AuthError("unknown_subject")
     if not user.is_active:
         raise AuthError("inactive_user", status_code=status.HTTP_403_FORBIDDEN, headers={})
+    membership = _workspace_repository().membership(
+        workspace_id=active_workspace_id,
+        user_id=user.id,
+    )
+    if membership is None:
+        raise AuthError("workspace_access_denied", status_code=403, headers={})
 
     issued_at = datetime.fromtimestamp(int(payload["iat"]), tz=UTC)
     expires_at = datetime.fromtimestamp(int(payload["exp"]), tz=UTC)
@@ -433,12 +498,16 @@ def decode_access_token(token: str) -> AuthContext:
         user,
         issued_at=issued_at,
         expires_at=expires_at,
+        active_workspace_id=active_workspace_id,
+        workspace_role=str(membership.role),
     )
 
 
 def ensure_bootstrap_login_secret(secret: str | None) -> None:
     if not settings.auth_bootstrap_enabled:
-        raise AuthError("bootstrap_auth_disabled", status_code=status.HTTP_404_NOT_FOUND, headers={})
+        raise AuthError(
+            "bootstrap_auth_disabled", status_code=status.HTTP_404_NOT_FOUND, headers={}
+        )
     expected = settings.auth_bootstrap_login_secret
     provided = secret or ""
     if not expected or not secrets.compare_digest(provided, expected):
@@ -466,6 +535,18 @@ def get_current_auth_context() -> AuthContext:
 def ensure_workspace_access(workspace_id: str, auth_context: AuthContext | None = None) -> str:
     current_auth = auth_context or get_current_auth_context()
     if workspace_id != current_auth.workspace_id:
+        raise AuthError(
+            "workspace_access_denied",
+            status_code=status.HTTP_403_FORBIDDEN,
+            headers={},
+        )
+    if (
+        _workspace_repository().membership(
+            workspace_id=workspace_id,
+            user_id=current_auth.user_id,
+        )
+        is None
+    ):
         raise AuthError(
             "workspace_access_denied",
             status_code=status.HTTP_403_FORBIDDEN,
@@ -612,10 +693,30 @@ async def validate_http_workspace_binding(request: Request, auth_context: AuthCo
             ensure_workspace_access(workspace_id, auth_context)
 
 
+def validate_workspace_role(request: Request, auth_context: AuthContext) -> None:
+    if (
+        auth_context.is_admin
+        or auth_context.workspace_role != "viewer"
+        or request.method in {"GET", "HEAD", "OPTIONS"}
+    ):
+        return
+    path = request.url.path.rstrip("/") or "/"
+    if (
+        path.startswith("/v1/auth/")
+        or (path.startswith("/v1/workspaces/") and path.endswith("/select"))
+        or (path.startswith("/v1/oauth/consent/") and path.endswith(("/approve", "/deny")))
+    ):
+        return
+    raise AuthError(
+        "workspace_viewer_read_only",
+        status_code=status.HTTP_403_FORBIDDEN,
+        headers={},
+    )
+
+
 def authenticate_local_user(*, login: str, password: str) -> UserAccountItem:
-    workspace_id = settings.auth_default_workspace_id
-    user = _user_repository().get_by_login(workspace_id=workspace_id, login=login)
-    if user is None or user.auth_provider != LOCAL_AUTH_PROVIDER or user.password_hash is None:
+    user = _user_repository().get_unique_local_by_login(login=login)
+    if user is None or user.password_hash is None:
         raise AuthError("invalid_credentials")
     if not user.is_active:
         raise AuthError("inactive_user", status_code=status.HTTP_403_FORBIDDEN, headers={})
@@ -662,14 +763,65 @@ def seed_local_admin_account() -> None:
 def require_admin_access() -> AuthContext:
     if not settings.auth_enabled:
         now = datetime.now(tz=UTC)
+        user = _user_repository().ensure_bootstrap_user(settings.auth_default_workspace_id)
+        membership = _workspace_repository().ensure_home_membership(user_id=user.id)
         return _build_auth_context(
-            _user_repository().ensure_bootstrap_user(settings.auth_default_workspace_id),
+            user,
             issued_at=now,
             expires_at=now + timedelta(minutes=settings.auth_jwt_ttl_minutes),
+            active_workspace_id=user.workspace_id,
+            workspace_role=str(membership.role),
         )
     auth_context = get_current_auth_context()
     if not auth_context.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin_access_denied")
+    return auth_context
+
+
+def require_authenticated_access() -> AuthContext:
+    if not settings.auth_enabled:
+        return require_admin_access()
+    return get_current_auth_context()
+
+
+async def require_workspace_owner_access(request: Request) -> AuthContext:
+    auth_context = require_authenticated_access()
+    if auth_context.is_admin:
+        return auth_context
+
+    requested_workspace_id = request.query_params.get("workspace_id")
+    if not requested_workspace_id and request.method in {"POST", "PUT", "PATCH"}:
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type.lower():
+            body = await request.body()
+            if body:
+                try:
+                    payload = json.loads(body)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict):
+                    workspace_id = payload.get("workspace_id")
+                    if isinstance(workspace_id, str) and workspace_id:
+                        requested_workspace_id = workspace_id
+
+    if requested_workspace_id != auth_context.workspace_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "workspace_scope_required"
+                if requested_workspace_id is None
+                else "workspace_access_denied"
+            ),
+        )
+    membership = _workspace_repository().membership(
+        workspace_id=auth_context.workspace_id,
+        user_id=auth_context.user_id,
+    )
+    if membership is None or membership.role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="workspace_owner_access_denied",
+        )
     return auth_context
 
 
@@ -686,6 +838,7 @@ def install_auth(app: FastAPI) -> None:
             auth_context = authenticate_http_request(request)
             await validate_token_scope(request, auth_context)
             await validate_http_workspace_binding(request, auth_context)
+            validate_workspace_role(request, auth_context)
         except AuthError as exc:
             headers = exc.headers
             path = request.url.path.rstrip("/") or "/"

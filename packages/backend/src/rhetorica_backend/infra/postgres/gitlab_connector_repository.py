@@ -10,8 +10,10 @@ from rhetorica_backend.contracts.admin_integrations import (
     GitLabProvider,
     UpsertGitLabConnectorRequest,
 )
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.models import GitLabConnectorConfigOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 from rhetorica_backend.infra.secrets import SecretStore, SecretStoreError, get_secret_store
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +25,7 @@ class GitLabConnectorRepository:
     def __init__(self, db: DatabaseRuntime, secret_store: SecretStore | None = None):
         self._db = db
         self._secret_store = secret_store or get_secret_store()
+        self._workspace_resources = WorkspaceRepository(db=db)
 
     def upsert(self, request: UpsertGitLabConnectorRequest) -> GitLabConnectorItem:
         now = datetime.now(tz=UTC)
@@ -84,40 +87,80 @@ class GitLabConnectorRepository:
                 .scalars()
                 .all()
             )
-        return [self._to_contract(row) for row in rows]
+        result = [self._to_contract(row) for row in rows]
+        local_names = {item.name for item in result}
+        for grant in self._workspace_resources.list_resource_grants(workspace_id=workspace_id):
+            if (
+                not grant.is_active
+                or grant.resource_kind != WorkspaceResourceKind.GITLAB_CONNECTOR
+                or grant.alias in local_names
+            ):
+                continue
+            with self._db.session() as session:
+                row = session.get(GitLabConnectorConfigOrm, grant.resource_id)
+            if row is None or row.workspace_id != grant.owner_workspace_id or not row.is_active:
+                continue
+            result.append(self._to_contract(row, workspace_id=workspace_id, name=grant.alias))
+            if len(result) >= limit:
+                break
+        return result[:limit]
 
     def get(
         self,
         workspace_id: str,
         name: str | None = None,
     ) -> GitLabConnectorItem | None:
+        if not name:
+            with self._db.session() as session:
+                row = session.execute(
+                    select(GitLabConnectorConfigOrm)
+                    .where(
+                        GitLabConnectorConfigOrm.workspace_id == workspace_id,
+                        GitLabConnectorConfigOrm.is_active.is_(True),
+                    )
+                    .order_by(GitLabConnectorConfigOrm.updated_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+            return self._to_contract(row) if row is not None else None
+        resolved = self._workspace_resources.resolve_resource(
+            workspace_id=workspace_id,
+            resource_kind=WorkspaceResourceKind.GITLAB_CONNECTOR,
+            alias=name,
+        )
+        if resolved is None:
+            return None
         with self._db.session() as session:
-            stmt = select(GitLabConnectorConfigOrm).where(
-                GitLabConnectorConfigOrm.workspace_id == workspace_id,
-                GitLabConnectorConfigOrm.is_active.is_(True),
-            )
-            if name:
-                stmt = stmt.where(GitLabConnectorConfigOrm.name == name)
-            stmt = stmt.order_by(GitLabConnectorConfigOrm.updated_at.desc()).limit(1)
-            row = session.execute(stmt).scalar_one_or_none()
+            row = session.get(GitLabConnectorConfigOrm, resolved.resource_id)
         if row is None:
             return None
-        return self._to_contract(row)
+        return self._to_contract(row, workspace_id=workspace_id, name=name)
 
     def get_connection(
         self,
         workspace_id: str,
         name: str | None = None,
     ) -> GitLabConnectionConfig | None:
-        with self._db.session() as session:
-            stmt = select(GitLabConnectorConfigOrm).where(
-                GitLabConnectorConfigOrm.workspace_id == workspace_id,
-                GitLabConnectorConfigOrm.is_active.is_(True),
+        if name:
+            resolved = self._workspace_resources.resolve_resource(
+                workspace_id=workspace_id,
+                resource_kind=WorkspaceResourceKind.GITLAB_CONNECTOR,
+                alias=name,
             )
-            if name:
-                stmt = stmt.where(GitLabConnectorConfigOrm.name == name)
-            stmt = stmt.order_by(GitLabConnectorConfigOrm.updated_at.desc()).limit(1)
-            row = session.execute(stmt).scalar_one_or_none()
+            if resolved is None:
+                return None
+            with self._db.session() as session:
+                row = session.get(GitLabConnectorConfigOrm, resolved.resource_id)
+        else:
+            with self._db.session() as session:
+                row = session.execute(
+                    select(GitLabConnectorConfigOrm)
+                    .where(
+                        GitLabConnectorConfigOrm.workspace_id == workspace_id,
+                        GitLabConnectorConfigOrm.is_active.is_(True),
+                    )
+                    .order_by(GitLabConnectorConfigOrm.updated_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
         if row is None:
             return None
         return GitLabConnectionConfig(
@@ -130,6 +173,35 @@ class GitLabConnectorRepository:
             default_group_paths=list(row.default_group_paths or []),
             search_limit=row.search_limit,
             read_max_tokens=row.read_max_tokens,
+            coding_archive_max_files=row.coding_archive_max_files,
+            extra_settings=row.extra_settings,
+        )
+
+    def get_connection_by_id(
+        self, *, workspace_id: str, connector_id: str
+    ) -> GitLabConnectionConfig | None:
+        resolved = self._workspace_resources.resolve_resource_id(
+            workspace_id=workspace_id,
+            resource_kind=WorkspaceResourceKind.GITLAB_CONNECTOR,
+            resource_id=connector_id,
+        )
+        if resolved is None:
+            return None
+        with self._db.session() as session:
+            row = session.get(GitLabConnectorConfigOrm, resolved.resource_id)
+        if row is None:
+            return None
+        return GitLabConnectionConfig(
+            provider=cast(GitLabProvider, row.provider),
+            base_url=row.base_url,
+            api_token=self._resolve_api_token(row),
+            use_when=row.use_when,
+            verify_tls=row.verify_tls,
+            default_project_paths=list(row.default_project_paths or []),
+            default_group_paths=list(row.default_group_paths or []),
+            search_limit=row.search_limit,
+            read_max_tokens=row.read_max_tokens,
+            coding_archive_max_files=row.coding_archive_max_files,
             extra_settings=row.extra_settings,
         )
 
@@ -160,6 +232,7 @@ class GitLabConnectorRepository:
         row.default_group_paths = list(request.connection.default_group_paths)
         row.search_limit = request.connection.search_limit
         row.read_max_tokens = request.connection.read_max_tokens
+        row.coding_archive_max_files = request.connection.coding_archive_max_files
         row.extra_settings = request.connection.extra_settings
 
         if request.connection.api_token is not None:
@@ -176,11 +249,16 @@ class GitLabConnectorRepository:
             row.api_token = None
 
     @staticmethod
-    def _to_contract(row: GitLabConnectorConfigOrm) -> GitLabConnectorItem:
+    def _to_contract(
+        row: GitLabConnectorConfigOrm,
+        *,
+        workspace_id: str | None = None,
+        name: str | None = None,
+    ) -> GitLabConnectorItem:
         return GitLabConnectorItem(
             id=row.id,
-            name=row.name,
-            workspace_id=row.workspace_id,
+            name=name or row.name,
+            workspace_id=workspace_id or row.workspace_id,
             is_active=row.is_active,
             connection=GitLabConnectionConfig(
                 provider=cast(GitLabProvider, row.provider),
@@ -192,6 +270,7 @@ class GitLabConnectorRepository:
                 default_group_paths=list(row.default_group_paths or []),
                 search_limit=row.search_limit,
                 read_max_tokens=row.read_max_tokens,
+                coding_archive_max_files=row.coding_archive_max_files,
                 extra_settings=row.extra_settings,
             ),
             has_api_token=bool(row.api_token_secret_ref or row.api_token),

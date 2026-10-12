@@ -147,6 +147,7 @@ def test_response_assembler_persists_visualization_and_output_file_links() -> No
     assert attached_files == [
         {
             "artifact_ids": ["artifact-1"],
+            "workspace_id": "default",
             "message_id": "assistant-1",
             "conversation_id": "conv-1",
             "relation": "output",

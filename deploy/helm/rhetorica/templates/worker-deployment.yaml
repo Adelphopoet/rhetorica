@@ -14,6 +14,7 @@ spec:
   template:
     metadata:
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "rhetorica.labels" . | nindent 8 }}
@@ -44,18 +45,9 @@ spec:
             {{- with .Values.worker.extraEnvFrom }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- if or .Values.database.existingSecret .Values.worker.env }}
+          {{- with .Values.worker.env }}
           env:
-            {{- if .Values.database.existingSecret }}
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.database.existingSecret | quote }}
-                  key: {{ .Values.database.urlKey | quote }}
-            {{- end }}
-            {{- with .Values.worker.env }}
             {{- toYaml . | nindent 12 }}
-            {{- end }}
           {{- end }}
           {{- with .Values.worker.resources }}
           resources:
@@ -64,11 +56,6 @@ spec:
           volumeMounts:
             - name: worker-tmp
               mountPath: /tmp
-          {{- if .Values.database.caConfigMap }}
-            - name: database-ca
-              mountPath: {{ .Values.database.caMountPath | quote }}
-              readOnly: true
-          {{- end }}
           {{- if .Values.extraCa.existingConfigMap }}
             - name: extra-ca-certs
               mountPath: {{ .Values.extraCa.mountPath | quote }}
@@ -78,11 +65,6 @@ spec:
         - name: worker-tmp
           emptyDir:
             sizeLimit: {{ .Values.worker.tempSizeLimit | quote }}
-      {{- if .Values.database.caConfigMap }}
-        - name: database-ca
-          configMap:
-            name: {{ .Values.database.caConfigMap | quote }}
-      {{- end }}
       {{- if .Values.extraCa.existingConfigMap }}
         - name: extra-ca-certs
           configMap:

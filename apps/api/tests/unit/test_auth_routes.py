@@ -9,6 +9,7 @@ from rhetorica_api.app import rate_limits as rate_limit_module
 from rhetorica_api.app.auth import (
     _api_token_repository,
     _user_repository,
+    _workspace_repository_for_url,
     seed_local_admin_account,
     validate_auth_token_peppers,
 )
@@ -21,6 +22,7 @@ from rhetorica_api.app.settings import settings
 from rhetorica_backend.domain.execution import build_execution_service
 from rhetorica_backend.domain.rate_limits import RateLimitDecision, RateLimitUnavailable
 from rhetorica_backend.infra.postgres.user_repository import UserAccountRepository
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 from rhetorica_backend.infra.security.passwords import hash_password
 
 ADMIN_LOGIN = "admin"
@@ -86,6 +88,7 @@ def _client(
     llm_connector_routes._repository.cache_clear()
     _user_repository.cache_clear()
     _api_token_repository.cache_clear()
+    _workspace_repository_for_url.cache_clear()
 
     _, db_runtime = build_execution_service(settings.database_url)
     db_runtime.create_schema()
@@ -191,6 +194,25 @@ def test_user_can_issue_list_use_and_revoke_personal_access_token(tmp_path: Path
     )
     assert session.status_code == 200
     assert session.json()["user"]["login"] == ADMIN_LOGIN
+
+    assert (
+        client.post(
+            "/v1/admin/workspaces", json={"id": "token-team", "name": "Token team"}, headers=headers
+        ).status_code
+        == 201
+    )
+    assert client.post("/v1/workspaces/token-team/select", headers=headers).status_code == 200
+    pat_headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/v1/auth/session", headers=pat_headers).json()["workspace_id"] == "default"
+    denied_switch = client.post("/v1/workspaces/default/select", headers=pat_headers)
+    assert denied_switch.status_code == 403
+    restored_token = _login(client)
+    assert (
+        client.get(
+            "/v1/auth/session", headers={"Authorization": f"Bearer {restored_token}"}
+        ).json()["workspace_id"]
+        == "token-team"
+    )
 
     revoked = client.delete(f"/v1/auth/tokens/{payload['id']}", headers=headers)
     assert revoked.status_code == 204
@@ -712,6 +734,87 @@ def test_unlimited_user_skips_limiter_and_limited_user_gets_503_when_redis_is_do
     assert unavailable.json()["detail"] == "rate_limit_unavailable"
 
 
+def test_workspace_directory_and_memberships_expose_user_identity(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    access_token = _login(client)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    created = client.post(
+        "/v1/admin/users",
+        json={
+            "login": "workspace-member",
+            "password": MEMBER_PASSWORD,
+            "display_name": "Workspace Member",
+            "role": "analyst",
+        },
+        headers=headers,
+    ).json()
+
+    directory = client.get("/v1/workspaces/user-directory", headers=headers)
+    memberships = client.get(
+        "/v1/admin/workspaces/default/memberships",
+        headers=headers,
+    )
+
+    assert directory.status_code == 200
+    assert {
+        "id": created["id"],
+        "login": "workspace-member",
+        "display_name": "Workspace Member",
+    }.items() <= next(user for user in directory.json() if user["id"] == created["id"]).items()
+    assert memberships.status_code == 200
+    member = next(item for item in memberships.json() if item["user_id"] == created["id"])
+    assert member["user_login"] == "workspace-member"
+    assert member["user_display_name"] == "Workspace Member"
+
+
+def test_duplicate_workspace_returns_conflict(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    access_token = _login(client)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    payload = {"id": "analytics", "name": "Analytics", "metadata": {}}
+
+    assert client.post("/v1/admin/workspaces", json=payload, headers=headers).status_code == 201
+    duplicate = client.post("/v1/admin/workspaces", json=payload, headers=headers)
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "workspace_conflict"
+
+
+def test_default_workspace_access_cannot_be_revoked_or_downgraded(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    access_token = _login(client)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    created = client.post(
+        "/v1/admin/users",
+        json={"login": "protected-member", "password": MEMBER_PASSWORD, "role": "analyst"},
+        headers=headers,
+    ).json()
+
+    member_token = _login(client, login="protected-member", password=MEMBER_PASSWORD)
+    workspaces = client.get(
+        "/v1/workspaces",
+        headers={"Authorization": f"Bearer {member_token}"},
+    )
+    downgrade = client.put(
+        f"/v1/admin/workspaces/default/memberships/{created['id']}",
+        json={"user_id": created["id"], "role": "viewer", "is_active": True},
+        headers=headers,
+    )
+    revoke = client.delete(
+        f"/v1/admin/workspaces/default/memberships/{created['id']}",
+        headers=headers,
+    )
+
+    assert workspaces.status_code == 200
+    default = next(item for item in workspaces.json() if item["is_default"])
+    assert default["workspace"]["id"] == "default"
+    assert default["membership"]["role"] == "analyst"
+    assert downgrade.status_code == 409
+    assert downgrade.json()["detail"] == "default_workspace_membership_required"
+    assert revoke.status_code == 409
+    assert revoke.json()["detail"] == "default_workspace_membership_required"
+
+
 def test_current_admin_cannot_delete_self(tmp_path: Path) -> None:
     client = _client(tmp_path)
     access_token = _login(client)
@@ -800,6 +903,288 @@ def test_workspace_mismatch_still_rejected(tmp_path: Path) -> None:
     assert response.json()["detail"] == "workspace_access_denied"
 
 
+def test_browser_session_switches_workspace_without_mutating_home_identity(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    admin_token = _login(client)
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    created_user = client.post(
+        "/v1/admin/users",
+        json={
+            "login": "workspace-user",
+            "password": MEMBER_PASSWORD,
+            "role": "analyst",
+        },
+        headers=admin_headers,
+    ).json()
+    assert (
+        client.post(
+            "/v1/admin/workspaces",
+            json={"id": "analytics", "name": "Analytics", "metadata": {}},
+            headers=admin_headers,
+        ).status_code
+        == 201
+    )
+    assert (
+        client.put(
+            f"/v1/admin/workspaces/analytics/memberships/{created_user['id']}",
+            json={"user_id": created_user["id"], "role": "analyst", "is_active": True},
+            headers=admin_headers,
+        ).status_code
+        == 200
+    )
+
+    home_token = _login(client, login="workspace-user", password=MEMBER_PASSWORD)
+    selected = client.post(
+        "/v1/workspaces/analytics/select",
+        headers={"Authorization": f"Bearer {home_token}"},
+    )
+    assert selected.status_code == 200
+    selected_token = selected.json()["access_token"]
+    session = client.get(
+        "/v1/auth/session",
+        headers={"Authorization": f"Bearer {selected_token}"},
+    )
+    assert session.status_code == 200
+    assert session.json()["workspace_id"] == "analytics"
+    assert session.json()["home_workspace_id"] == "default"
+    persisted = UserAccountRepository(
+        db=build_execution_service(settings.database_url)[1]
+    ).get_by_id(user_id=created_user["id"])
+    assert persisted is not None
+    assert persisted.workspace_id == "default"
+
+    denied = client.post(
+        "/v1/workspaces/unavailable/select",
+        headers={"Authorization": f"Bearer {selected_token}"},
+    )
+    assert denied.status_code == 403
+    restored_token = _login(client, login="workspace-user", password=MEMBER_PASSWORD)
+    restored = client.get(
+        "/v1/auth/session", headers={"Authorization": f"Bearer {restored_token}"}
+    ).json()
+    assert restored["workspace_id"] == "analytics"
+    assert restored["home_workspace_id"] == "default"
+    other_user_token = _login(client)
+    assert (
+        client.get(
+            "/v1/auth/session", headers={"Authorization": f"Bearer {other_user_token}"}
+        ).json()["workspace_id"]
+        == "default"
+    )
+
+    assert (
+        client.delete(
+            f"/v1/admin/workspaces/analytics/memberships/{created_user['id']}",
+            headers=admin_headers,
+        ).status_code
+        == 204
+    )
+    revoked = client.get(
+        "/v1/auth/session",
+        headers={"Authorization": f"Bearer {selected_token}"},
+    )
+    assert revoked.status_code == 403
+    assert revoked.json()["detail"] == "workspace_access_denied"
+
+    fallback_token = _login(client, login="workspace-user", password=MEMBER_PASSWORD)
+    fallback = client.get(
+        "/v1/auth/session", headers={"Authorization": f"Bearer {fallback_token}"}
+    ).json()
+    assert fallback["workspace_id"] == "default"
+    assert fallback["workspace_role"] == "analyst"
+
+
+def test_local_user_created_from_non_default_workspace_can_login(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    admin_token = _login(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    assert (
+        client.post(
+            "/v1/admin/workspaces",
+            json={"id": "engineering", "name": "Engineering", "metadata": {}},
+            headers=headers,
+        ).status_code
+        == 201
+    )
+    selected = client.post(
+        "/v1/workspaces/engineering/select",
+        headers=headers,
+    ).json()["access_token"]
+
+    created = client.post(
+        "/v1/admin/users",
+        json={"login": "engineer", "password": MEMBER_PASSWORD, "role": "analyst"},
+        headers={"Authorization": f"Bearer {selected}"},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["workspace_id"] == "default"
+    user_token = _login(client, login="engineer", password=MEMBER_PASSWORD)
+    workspaces = client.get(
+        "/v1/workspaces",
+        headers={"Authorization": f"Bearer {user_token}"},
+    ).json()
+    engineering = next(item for item in workspaces if item["workspace"]["id"] == "engineering")
+    assert engineering["membership"]["role"] == "analyst"
+
+
+def test_legacy_local_identity_can_login_from_its_home_workspace(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    db_runtime = build_execution_service(settings.database_url)[1]
+    users = UserAccountRepository(db=db_runtime)
+    legacy_user = users.create_local_user(
+        workspace_id="legacy",
+        login="legacy-user",
+        password_hash=hash_password(MEMBER_PASSWORD),
+        role="analyst",
+    )
+    WorkspaceRepository(db=db_runtime).ensure_home_membership(user_id=legacy_user.id)
+
+    response = client.post(
+        "/v1/auth/login",
+        json={"login": "legacy-user", "password": MEMBER_PASSWORD},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["workspace_id"] == "legacy"
+    assert response.json()["home_workspace_id"] == "legacy"
+    session = client.get(
+        "/v1/auth/session",
+        headers={"Authorization": f"Bearer {response.json()['access_token']}"},
+    )
+    assert session.status_code == 200
+    assert session.json()["home_workspace_id"] == "legacy"
+
+
+def test_local_login_rejects_ambiguous_cross_workspace_identity(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    db_runtime = build_execution_service(settings.database_url)[1]
+    users = UserAccountRepository(db=db_runtime)
+    workspaces = WorkspaceRepository(db=db_runtime)
+    for workspace_id in ("default", "legacy"):
+        user = users.create_local_user(
+            workspace_id=workspace_id,
+            login="duplicate-login",
+            password_hash=hash_password(MEMBER_PASSWORD),
+            role="analyst",
+        )
+        workspaces.ensure_home_membership(user_id=user.id)
+
+    response = client.post(
+        "/v1/auth/login",
+        json={"login": "duplicate-login", "password": MEMBER_PASSWORD},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "invalid_credentials"
+
+
+def test_viewer_is_read_only_and_pat_cannot_switch_workspace(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    admin_token = _login(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    assert (
+        client.post(
+            "/v1/admin/workspaces",
+            json={"id": "readonly", "name": "Read only", "metadata": {}},
+            headers=headers,
+        ).status_code
+        == 201
+    )
+    viewer = client.post(
+        "/v1/admin/users",
+        json={"login": "viewer", "password": MEMBER_PASSWORD, "role": "analyst"},
+        headers=headers,
+    ).json()
+    assert (
+        client.put(
+            f"/v1/admin/workspaces/readonly/memberships/{viewer['id']}",
+            json={"user_id": viewer["id"], "role": "viewer", "is_active": True},
+            headers=headers,
+        ).status_code
+        == 200
+    )
+    viewer_home_token = _login(client, login="viewer", password=MEMBER_PASSWORD)
+    selected = client.post(
+        "/v1/workspaces/readonly/select",
+        headers={"Authorization": f"Bearer {viewer_home_token}"},
+    )
+    selected_token = selected.json()["access_token"]
+    selected_headers = {"Authorization": f"Bearer {selected_token}"}
+
+    assert client.get("/v1/workspaces", headers=selected_headers).status_code == 200
+    denied = client.post(
+        "/v1/scenarios",
+        json={"workspace_id": "readonly"},
+        headers=selected_headers,
+    )
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "workspace_viewer_read_only"
+
+    oauth_deny = client.post(
+        "/v1/oauth/consent/unknown-transaction/deny",
+        headers=selected_headers,
+    )
+    assert oauth_deny.status_code == 404
+    oauth_approve = client.post(
+        "/v1/oauth/consent/unknown-transaction/approve",
+        headers=selected_headers,
+    )
+    assert oauth_approve.status_code == 404
+
+    token_response = client.post(
+        "/v1/auth/tokens",
+        json={"name": "Bound", "scopes": ["api:read", "api:write"], "lifetime_days": 90},
+        headers=selected_headers,
+    )
+    pat = token_response.json()["token"]
+    pat_switch = client.post(
+        "/v1/workspaces/default/select",
+        headers={"Authorization": f"Bearer {pat}"},
+    )
+    assert pat_switch.status_code == 403
+    assert pat_switch.json()["detail"] == "session_credential_required"
+
+
+def test_system_admin_remains_mutation_capable_with_viewer_membership(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    admin_token = _login(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    admin = client.get("/v1/admin/users", headers=headers).json()[0]
+    assert (
+        client.post(
+            "/v1/admin/workspaces",
+            json={"id": "managed", "name": "Managed", "metadata": {}},
+            headers=headers,
+        ).status_code
+        == 201
+    )
+    selected_token = client.post(
+        "/v1/workspaces/managed/select",
+        headers=headers,
+    ).json()["access_token"]
+    selected_headers = {"Authorization": f"Bearer {selected_token}"}
+    second_owner = client.post(
+        "/v1/admin/users",
+        json={"login": "second-admin", "password": MEMBER_PASSWORD, "role": "admin"},
+        headers=selected_headers,
+    )
+    assert second_owner.status_code == 200
+    downgraded = client.put(
+        f"/v1/admin/workspaces/managed/memberships/{admin['id']}",
+        json={"user_id": admin["id"], "role": "viewer", "is_active": True},
+        headers=selected_headers,
+    )
+    assert downgraded.status_code == 200
+
+    mutation = client.post(
+        "/v1/admin/users",
+        json={"login": "still-admin", "password": MEMBER_PASSWORD, "role": "analyst"},
+        headers=selected_headers,
+    )
+    assert mutation.status_code == 200
+
+
 def test_bootstrap_route_is_disabled_by_default(tmp_path: Path) -> None:
     client = _client(tmp_path, bootstrap_enabled=False)
 
@@ -822,6 +1207,123 @@ def test_bootstrap_route_works_only_when_explicitly_enabled(tmp_path: Path) -> N
 
     assert response.status_code == 200
     assert response.json()["user"]["auth_provider"] == "bootstrap"
+
+
+def test_workspace_owner_can_manage_local_resources_but_not_resource_grants(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    admin_token = _login(client)
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    owner = client.post(
+        "/v1/admin/users",
+        json={"login": "workspace-owner", "password": MEMBER_PASSWORD, "role": "analyst"},
+        headers=admin_headers,
+    ).json()
+    assert (
+        client.post(
+            "/v1/admin/workspaces",
+            json={"id": "owner-space", "name": "Owner Space", "metadata": {}},
+            headers=admin_headers,
+        ).status_code
+        == 201
+    )
+    assert (
+        client.put(
+            f"/v1/admin/workspaces/owner-space/memberships/{owner['id']}",
+            json={"user_id": owner["id"], "role": "owner", "is_active": True},
+            headers=admin_headers,
+        ).status_code
+        == 200
+    )
+
+    owner_token = _login(client, login="workspace-owner", password=MEMBER_PASSWORD)
+    selected_token = client.post(
+        "/v1/workspaces/owner-space/select",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    ).json()["access_token"]
+    owner_headers = {"Authorization": f"Bearer {selected_token}"}
+    default_connector = client.post(
+        "/v1/admin/connectors",
+        json={
+            "name": "default-trino",
+            "workspace_id": "default",
+            "connection": {
+                "engine": "trino",
+                "host": "trino.default.internal",
+                "port": 8443,
+                "username": "admin",
+                "password": "secret",
+                "catalog": "iceberg",
+                "schema": "analytics",
+                "secure": True,
+            },
+        },
+        headers=admin_headers,
+    )
+    assert default_connector.status_code == 200
+
+    missing_scope = client.get("/v1/admin/connectors", headers=owner_headers)
+    assert missing_scope.status_code == 403
+    assert missing_scope.json()["detail"] == "workspace_scope_required"
+    default_delete = client.delete(
+        f"/v1/admin/connectors/{default_connector.json()['id']}",
+        headers=owner_headers,
+    )
+    assert default_delete.status_code == 403
+    assert default_delete.json()["detail"] == "workspace_scope_required"
+    default_catalog = client.get("/v1/admin/connectors", headers=admin_headers)
+    assert any(item["id"] == default_connector.json()["id"] for item in default_catalog.json())
+
+    connector = client.post(
+        "/v1/admin/connectors",
+        json={
+            "name": "owner-trino",
+            "workspace_id": "owner-space",
+            "connection": {
+                "engine": "trino",
+                "host": "trino.internal",
+                "port": 8443,
+                "username": "owner",
+                "password": "secret",
+                "catalog": "iceberg",
+                "schema": "analytics",
+                "secure": True,
+            },
+        },
+        headers=owner_headers,
+    )
+
+    assert connector.status_code == 200
+    grant = client.post(
+        "/v1/admin/workspaces/owner-space/resource-grants",
+        json={
+            "resource_kind": "database_connector",
+            "resource_id": connector.json()["id"],
+            "owner_workspace_id": "owner-space",
+            "recipient_workspace_id": "owner-space",
+            "alias": "shared-owner-trino",
+        },
+        headers=owner_headers,
+    )
+    assert grant.status_code == 403
+    assert grant.json()["detail"] == "admin_access_denied"
+
+    assert (
+        client.put(
+            f"/v1/admin/workspaces/owner-space/memberships/{owner['id']}",
+            json={"user_id": owner["id"], "role": "analyst", "is_active": True},
+            headers=admin_headers,
+        ).status_code
+        == 200
+    )
+    stale_owner_access = client.get(
+        "/v1/admin/connectors",
+        params={"workspace_id": "owner-space"},
+        headers=owner_headers,
+    )
+    assert stale_owner_access.status_code == 403
+    assert stale_owner_access.json()["detail"] == "workspace_owner_access_denied"
 
 
 def test_keycloak_session_provisions_admin_from_group(tmp_path: Path, monkeypatch) -> None:
@@ -847,6 +1349,18 @@ def test_keycloak_session_provisions_admin_from_group(tmp_path: Path, monkeypatc
     assert payload["user"]["auth_provider"] == "keycloak"
     assert payload["user"]["auth_subject"] == "keycloak-sub-1"
     assert "access_token" in payload
+    headers = {"Authorization": f"Bearer {payload['access_token']}"}
+    assert (
+        client.post(
+            "/v1/admin/workspaces", json={"id": "sso-team", "name": "SSO team"}, headers=headers
+        ).status_code
+        == 201
+    )
+    assert client.post("/v1/workspaces/sso-team/select", headers=headers).status_code == 200
+    restored = client.post("/v1/auth/keycloak/session", json={"id_token": "id-token"})
+    assert restored.status_code == 200
+    assert restored.json()["workspace_id"] == "sso-team"
+    assert restored.json()["home_workspace_id"] == "default"
 
 
 def test_keycloak_session_defaults_logged_in_user_to_analyst(tmp_path: Path, monkeypatch) -> None:

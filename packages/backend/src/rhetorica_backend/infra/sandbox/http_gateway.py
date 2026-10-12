@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import suppress
 from pathlib import PurePath
-from typing import BinaryIO
+from typing import BinaryIO, cast
 from urllib.parse import quote, unquote
 
 import httpx
@@ -47,7 +47,7 @@ class HttpSandboxGateway:
         try:
             response = self._request(
                 "POST",
-                f"/internal/v1/sessions/{resolved_session}/execute",
+                f"/internal/v1/files/sessions/{resolved_session}/execute",
                 json={
                     "code": code,
                     "inputs": [self._input_payload(item) for item in inputs],
@@ -80,7 +80,7 @@ class HttpSandboxGateway:
         )
 
     def ensure_session(self, session_id: str) -> str:
-        response = self._request("PUT", f"/internal/v1/sessions/{session_id}")
+        response = self._request("PUT", f"/internal/v1/files/sessions/{session_id}")
         return str(response.json()["session_id"])
 
     def inspect_file(
@@ -93,19 +93,19 @@ class HttpSandboxGateway:
         try:
             response = self._request(
                 "POST",
-                f"/internal/v1/sessions/{resolved_session}/inspect",
+                f"/internal/v1/files/sessions/{resolved_session}/inspect",
                 json={"input": self._input_payload(input_file)},
             )
         except SandboxGatewayError as exc:
             if exc.code == "sandbox_timeout":
                 self._cancel_timed_out_session(resolved_session)
             raise
-        payload = response.json()
+        payload = cast(dict[str, object], response.json())
         payload["session_id"] = resolved_session
         return payload
 
     def close_session(self, session_id: str) -> None:
-        self._request("DELETE", f"/internal/v1/sessions/{session_id}")
+        self._request("DELETE", f"/internal/v1/files/sessions/{session_id}")
 
     def download_output(
         self,
@@ -119,7 +119,7 @@ class HttpSandboxGateway:
         try:
             with self._client.stream(
                 "GET",
-                f"/internal/v1/sessions/{quote(session_id, safe='')}/outputs/{quote(output_id, safe='')}",
+                f"/internal/v1/files/sessions/{quote(session_id, safe='')}/outputs/{quote(output_id, safe='')}",
             ) as response:
                 self._raise_for_status(response)
                 filename = PurePath(
@@ -156,20 +156,23 @@ class HttpSandboxGateway:
             )
 
     def _create_session(self) -> str:
-        response = self._request("POST", "/internal/v1/sessions")
+        response = self._request("POST", "/internal/v1/files/sessions")
         return str(response.json()["session_id"])
 
     def _cancel_timed_out_session(self, session_id: str) -> None:
-        """Request supervisor cancellation; its DELETE kills any active jail."""
+        """Request runtime cancellation; DELETE kills its active process group."""
         with suppress(Exception):
             self._client.delete(
-                f"/internal/v1/sessions/{quote(session_id, safe='')}",
+                f"/internal/v1/files/sessions/{quote(session_id, safe='')}",
                 timeout=5.0,
             )
 
-    def _request(self, method: str, path: str, **kwargs: object) -> httpx.Response:
+    def _request(self, method: str, path: str, *, json: object | None = None) -> httpx.Response:
         try:
-            response = self._client.request(method, path, **kwargs)
+            if json is None:
+                response = self._client.request(method, path)
+            else:
+                response = self._client.request(method, path, json=json)
         except httpx.TimeoutException as exc:
             raise SandboxGatewayError(
                 "sandbox_timeout",

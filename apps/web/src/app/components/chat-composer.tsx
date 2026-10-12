@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 import { Button, cn, Textarea, Tooltip } from "@rhetorica/ui";
 import { Bookmark, Check, ChevronDown, File, LoaderCircle, Paperclip, Send, Sparkles, Square, Star, X } from "lucide-react";
+import type { CodingTeamOption } from "@/features/coding/codingApi";
 import type { AgentProfile } from "@/features/agents/agentsApi";
 import { useAgentMenuStore } from "@/features/agents/agentMenuStore";
 import { formatFileSize, type AttachmentDraft } from "@/features/files/fileApi";
@@ -24,6 +25,7 @@ function clampDockHeight(value: number, max?: number): number {
 }
 
 interface ChatComposerProps {
+  codingControls?: ReactNode;
   value: string;
   loading: boolean;
   chatWidth: ChatWidth;
@@ -37,6 +39,9 @@ interface ChatComposerProps {
   maxDockHeight?: number;
   agents?: AgentProfile[];
   selectedAgentId?: string | null;
+  teams?: CodingTeamOption[];
+  selectedTeamId?: string | null;
+  onSelectTeam?: (team: CodingTeamOption) => void;
   agentLocked?: boolean;
   onChange: (value: string) => void;
   onSelectAgent?: (agentId: string | null) => void;
@@ -52,6 +57,7 @@ interface ChatComposerProps {
 }
 
 export function ChatComposer({
+  codingControls,
   value,
   loading,
   chatWidth,
@@ -65,6 +71,9 @@ export function ChatComposer({
   maxDockHeight,
   agents = [],
   selectedAgentId = null,
+  teams = [],
+  selectedTeamId = null,
+  onSelectTeam = () => undefined,
   agentLocked = false,
   onChange,
   onSelectAgent = () => undefined,
@@ -86,9 +95,20 @@ export function ChatComposer({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const submitDisabled = loading || (!value.trim() && attachments.length === 0);
+  const [agentSearch, setAgentSearch] = useState("");
+  const [searchMenuOpen, setSearchMenuOpen] = useState(agentMenuOpen);
+  if (searchMenuOpen !== agentMenuOpen) {
+    // Reset the search when the menu closes, during render rather than in an effect.
+    setSearchMenuOpen(agentMenuOpen);
+    if (!agentMenuOpen) setAgentSearch("");
+  }
+  const visibleAgents = agents.filter(agent => `${agent.title} ${agent.description ?? ""} ${agent.slug}`.toLocaleLowerCase().includes(agentSearch.trim().toLocaleLowerCase()));
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
-  const favoriteAgents = agents.filter((agent) => agent.is_favorite);
-  const otherAgents = agents.filter((agent) => !agent.is_favorite);
+  const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? null;
+  const agentTitle = (id?: string | null) => id === "__default_assistant__" ? "Rhetorica" : agents.find(agent => agent.id === id)?.title ?? "координатор";
+  const visibleTeams = teams.filter(team => `${team.name} ${agentTitle(team.coordinator_agent_profile_id)} ${(team.members ?? []).map(member => member.label).join(" ")}`.toLocaleLowerCase().includes(agentSearch.trim().toLocaleLowerCase()));
+  const favoriteAgents = visibleAgents.filter((agent) => agent.is_favorite);
+  const otherAgents = visibleAgents.filter((agent) => !agent.is_favorite);
   const agentControlDisabled = loading || agentLocked;
   const agentStarPending = Boolean(
     selectedAgent && agentStarPendingAgentId === selectedAgent.id
@@ -284,7 +304,7 @@ export function ChatComposer({
               <div ref={agentMenuRef} className="relative">
                 <button
                   type="button"
-aria-label="Агент"
+                  aria-label="Агент"
                   data-tour="agent-menu"
                   aria-haspopup="menu"
                   aria-expanded={agentMenuOpen}
@@ -293,21 +313,34 @@ aria-label="Агент"
                   className="inline-flex h-9 max-w-[260px] items-center gap-2 rounded-full border border-border-strong bg-surface px-3 text-sm text-primary shadow-[0_10px_30px_rgb(var(--color-shadow)/calc(0.18*var(--shadow-opacity-scale)))] transition hover:border-accent-border hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <Sparkles className="h-4 w-4 shrink-0 text-accent" />
-                  <span className="truncate">{selectedAgent?.title ?? "Rhetorica"}</span>
+                  <span className="truncate">{selectedTeam ? `${selectedTeam.name} · команда` : selectedAgent?.title ?? "Rhetorica"}</span>
                   <ChevronDown className="h-4 w-4 shrink-0 text-secondary" />
                 </button>
 
                 {agentMenuOpen ? (
 <div
                     role="menu"
+                    aria-label="Выбор агента"
+                    onKeyDown={event => {
+                      if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+                      event.preventDefault();
+                      const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'));
+                      if (!rows.length) return;
+                      const current = rows.indexOf(document.activeElement as HTMLButtonElement);
+                      const next = current === -1 ? (event.key === "ArrowDown" ? 0 : rows.length - 1) : (current + (event.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+                      rows[next].focus();
+                    }}
                     className={cn("absolute bottom-full left-0 z-30 mb-2 max-h-[min(60vh,32rem)] w-[min(340px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto overscroll-contain rounded-[18px] border border-border-strong bg-surface p-2 pr-0 pl-[0.65rem] shadow-[0_24px_70px_rgb(var(--color-shadow)/calc(0.46*var(--shadow-opacity-scale)))] [scrollbar-gutter:stable]", agentMenuPulse && "glow-pulse")}
                   >
-                    <AgentMenuRow
+                    <div className="sticky top-0 z-10 bg-surface pb-2 pr-2">
+                      <input autoFocus aria-label="Поиск агента" type="search" value={agentSearch} onChange={event => setAgentSearch(event.target.value)} placeholder="Найти агента…" className="h-10 w-full rounded-xl border border-control-border bg-elevated px-3 text-sm outline-none transition focus:border-accent-border focus:ring-2 focus:ring-accent/20" />
+                    </div>
+                    {(!agentSearch.trim() || "rhetorica".includes(agentSearch.trim().toLowerCase())) && <AgentMenuRow
                       title="Rhetorica"
                       description="По умолчанию"
-                      selected={selectedAgentId == null}
+                      selected={selectedAgentId == null && !selectedTeam}
                       onClick={() => selectAgent(null)}
-                    />
+                    />}
                     {favoriteAgents.length ? (
                       <AgentMenuGroup title="Избранное">
                         {favoriteAgents.map((agent) => (
@@ -316,8 +349,21 @@ aria-label="Агент"
                             title={agent.title}
                             description={agent.description ?? agent.slug}
                             starCount={agent.star_count}
-                            selected={agent.id === selectedAgentId}
+                            selected={agent.id === selectedAgentId && !selectedTeam}
                             onClick={() => selectAgent(agent.id)}
+                          />
+                        ))}
+                      </AgentMenuGroup>
+                    ) : null}
+                    {visibleTeams.length ? (
+                      <AgentMenuGroup title="Команды">
+                        {visibleTeams.map((team) => (
+                          <AgentMenuRow
+                            key={team.id}
+                            title={team.name}
+                            description={`Координатор: ${agentTitle(team.coordinator_agent_profile_id)} · ${(team.members ?? []).map(member => member.label).join(", ")}`}
+                            selected={team.id === selectedTeamId}
+                            onClick={() => { onSelectTeam(team); closeAgentMenu(); }}
                           />
                         ))}
                       </AgentMenuGroup>
@@ -330,17 +376,18 @@ aria-label="Агент"
                             title={agent.title}
                             description={agent.description ?? agent.slug}
                             starCount={agent.star_count}
-                            selected={agent.id === selectedAgentId}
+                            selected={agent.id === selectedAgentId && !selectedTeam}
                             onClick={() => selectAgent(agent.id)}
                           />
                         ))
                       ) : (
-                        <p className="px-3 py-2 text-sm text-secondary">Нет агентов</p>
+                        <p className="px-3 py-3 text-sm text-secondary">{agentSearch ? "Агенты не найдены" : "Нет агентов"}</p>
                       )}
                     </AgentMenuGroup>
                   </div>
                 ) : null}
               </div>
+              {codingControls}
               <Tooltip
                 content={dock === "bottom" ? "Разместить справа" : "Разместить внизу"}
                 side={dock === "bottom" ? "top" : "bottom"}

@@ -202,7 +202,7 @@ class ArtifactService:
             trusted_generated=source is ArtifactSource.SQL_RESULT,
         )
         if artifact_id:
-            existing = self._repository.get_owned(artifact_id, owner_user_id)
+            existing = self._repository.get_owned(artifact_id, owner_user_id, workspace_id)
             if existing is not None:
                 if (
                     existing.workspace_id != workspace_id
@@ -251,11 +251,16 @@ class ArtifactService:
         self,
         *,
         artifact_ids: list[str],
+        workspace_id: str,
         conversation_id: str,
         owner_user_id: str,
     ) -> list[Artifact]:
         artifacts = [
-            self.get_owned(artifact_id=artifact_id, owner_user_id=owner_user_id)
+            self.get_owned(
+                artifact_id=artifact_id,
+                owner_user_id=owner_user_id,
+                workspace_id=workspace_id,
+            )
             for artifact_id in dict.fromkeys(artifact_ids)
         ]
         if len(artifacts) != len(artifact_ids):
@@ -265,8 +270,8 @@ class ArtifactService:
         self._policy.validate_turn([artifact.size_bytes for artifact in artifacts])
         return artifacts
 
-    def get_owned(self, *, artifact_id: str, owner_user_id: str) -> Artifact:
-        artifact = self._repository.get_owned(artifact_id, owner_user_id)
+    def get_owned(self, *, artifact_id: str, owner_user_id: str, workspace_id: str) -> Artifact:
+        artifact = self._repository.get_owned(artifact_id, owner_user_id, workspace_id)
         if artifact is None or artifact.status in {
             ArtifactStatus.RESERVED,
             ArtifactStatus.DELETING,
@@ -276,14 +281,20 @@ class ArtifactService:
         return artifact
 
     def open_content(
-        self, *, artifact_id: str, owner_user_id: str
+        self, *, artifact_id: str, owner_user_id: str, workspace_id: str
     ) -> tuple[Artifact, StoredObject]:
-        artifact = self.get_owned(artifact_id=artifact_id, owner_user_id=owner_user_id)
+        artifact = self.get_owned(
+            artifact_id=artifact_id,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
+        )
         return artifact, self._storage.open(artifact.storage_key)
 
-    def delete_staged(self, *, artifact_id: str, owner_user_id: str) -> bool:
+    def delete_staged(self, *, artifact_id: str, owner_user_id: str, workspace_id: str) -> bool:
         artifact = self._repository.delete_staged(
-            artifact_id=artifact_id, owner_user_id=owner_user_id
+            artifact_id=artifact_id,
+            owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
         )
         if artifact is None:
             raise ArtifactConflictError("Only unlinked staged uploads can be deleted")
@@ -299,12 +310,14 @@ class ArtifactService:
         self,
         *,
         artifact_ids: list[str],
+        workspace_id: str,
         message_id: str,
         conversation_id: str,
         owner_user_id: str,
     ) -> list[Artifact]:
         self.validate_turn_inputs(
             artifact_ids=artifact_ids,
+            workspace_id=workspace_id,
             conversation_id=conversation_id,
             owner_user_id=owner_user_id,
         )
@@ -313,14 +326,18 @@ class ArtifactService:
             message_id=message_id,
             conversation_id=conversation_id,
             owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
             relation="input",
         )
 
     def list_conversation(
-        self, *, conversation_id: str, owner_user_id: str, limit: int = 100
+        self, *, workspace_id: str, conversation_id: str, owner_user_id: str, limit: int = 100
     ) -> list[Artifact]:
         return self._repository.list_conversation(
-            conversation_id=conversation_id, owner_user_id=owner_user_id, limit=limit
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            owner_user_id=owner_user_id,
+            limit=limit,
         )
 
     @property

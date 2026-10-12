@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+import pytest
 from rhetorica_backend.domain.chat.llm.prompt_builder import PromptBuilder
 from rhetorica_backend.domain.chat.llm.token_budget import LlmPromptBudgetService
 from rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime import (
@@ -1678,7 +1679,15 @@ def test_prompt_artifact_budget_warning_appears() -> None:
     assert envelope.truncated is True
 
 
-def test_default_evidence_result_is_bounded_but_keeps_artifact_handle() -> None:
+@pytest.mark.parametrize("optimized", [False, True])
+def test_default_evidence_result_is_bounded_but_keeps_artifact_handle(
+    monkeypatch, optimized
+) -> None:
+    from rhetorica_backend.domain.chat import settings
+
+    monkeypatch.setattr(
+        settings, "_settings", settings.ChatSettings(tool_output_policy_enabled=optimized)
+    )
     artifact_id = f"ta_{'d' * 32}"
     serialized = json.loads(
         ToolResultPromptSerializer().serialize(
@@ -1695,7 +1704,8 @@ def test_default_evidence_result_is_bounded_but_keeps_artifact_handle() -> None:
         )
     )
 
-    assert serialized["char_estimate"] <= 16_000
-    assert serialized["token_estimate"] <= 8_000
+    assert len(json.dumps(serialized["compact_payload"])) <= 16_000
+    assert ("char_estimate" not in serialized) is optimized
+    assert ("token_estimate" not in serialized) is optimized
     assert serialized["compact_payload"]["tool_artifact"]["artifact_id"] == artifact_id
     assert serialized["truncated"] is True

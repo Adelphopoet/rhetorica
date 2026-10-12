@@ -10,8 +10,10 @@ from rhetorica_backend.contracts.admin_integrations import (
     LlmConnectorItem,
     UpsertLlmConnectorRequest,
 )
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.models import LlmConnectorConfigOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 from rhetorica_backend.infra.secrets import SecretStore, SecretStoreError, get_secret_store
 from sqlalchemy import select, update
 
@@ -31,6 +33,7 @@ class LlmConnectorRepository:
     def __init__(self, db: DatabaseRuntime, secret_store: SecretStore | None = None):
         self._db = db
         self._secret_store = secret_store or get_secret_store()
+        self._workspace_resources = WorkspaceRepository(db=db)
 
     def upsert(self, request: UpsertLlmConnectorRequest) -> LlmConnectorItem:
         now = datetime.now(tz=UTC)
@@ -226,18 +229,56 @@ class LlmConnectorRepository:
             )
             rows = session.execute(stmt).scalars().all()
 
-        return [self._to_contract(row) for row in rows]
+        result = [self._to_contract(row) for row in rows]
+        local_names = {item.name for item in result}
+        for grant in self._workspace_resources.list_resource_grants(workspace_id=workspace_id):
+            if (
+                not grant.is_active
+                or grant.resource_kind != WorkspaceResourceKind.LLM_CONNECTOR
+                or grant.alias in local_names
+            ):
+                continue
+            with self._db.session() as session:
+                row = session.get(LlmConnectorConfigOrm, grant.resource_id)
+            if row is None or row.workspace_id != grant.owner_workspace_id or not row.is_active:
+                continue
+            result.append(
+                self._to_contract(
+                    row,
+                    workspace_id=workspace_id,
+                    name=grant.alias,
+                    is_default=False,
+                )
+            )
+            if len(result) >= limit:
+                break
+        return result[:limit]
 
     def get(self, workspace_id: str, name: str | None = None) -> LlmConnectorItem | None:
+        if name:
+            resolved = self._workspace_resources.resolve_resource(
+                workspace_id=workspace_id,
+                resource_kind=WorkspaceResourceKind.LLM_CONNECTOR,
+                alias=name,
+            )
+            if resolved is None:
+                return None
+            with self._db.session() as session:
+                row = session.get(LlmConnectorConfigOrm, resolved.resource_id)
+            if row is None:
+                return None
+            return self._to_contract(
+                row,
+                workspace_id=workspace_id,
+                name=name,
+                is_default=False if resolved.is_shared else row.is_default,
+            )
         with self._db.session() as session:
             stmt = select(LlmConnectorConfigOrm).where(
                 LlmConnectorConfigOrm.workspace_id == workspace_id,
                 LlmConnectorConfigOrm.is_active.is_(True),
             )
-            if name:
-                stmt = stmt.where(LlmConnectorConfigOrm.name == name)
-            else:
-                stmt = stmt.where(LlmConnectorConfigOrm.is_default.is_(True))
+            stmt = stmt.where(LlmConnectorConfigOrm.is_default.is_(True))
             stmt = stmt.limit(1)
             row = session.execute(stmt).scalar_one_or_none()
         if row is None:
@@ -254,7 +295,14 @@ class LlmConnectorRepository:
             session.commit()
             return True
 
-    def _to_contract(self, row: LlmConnectorConfigOrm) -> LlmConnectorItem:
+    def _to_contract(
+        self,
+        row: LlmConnectorConfigOrm,
+        *,
+        workspace_id: str | None = None,
+        name: str | None = None,
+        is_default: bool | None = None,
+    ) -> LlmConnectorItem:
         api_keys = self._resolve_api_keys(row)
         connection = LlmConnectionConfig(
             base_url=row.base_url,
@@ -274,10 +322,10 @@ class LlmConnectorRepository:
         )
         return LlmConnectorItem(
             id=row.id,
-            name=row.name,
-            workspace_id=row.workspace_id,
+            name=name or row.name,
+            workspace_id=workspace_id or row.workspace_id,
             is_active=row.is_active,
-            is_default=row.is_default,
+            is_default=row.is_default if is_default is None else is_default,
             connection=connection,
             has_api_key=bool(api_keys),
             api_key_count=len(api_keys),
@@ -294,13 +342,23 @@ class LlmConnectorRepository:
     def get_connection_resolution(
         self, workspace_id: str, name: str | None = None
     ) -> LlmConnectionResolution | None:
+        resolved = None
+        if name:
+            resolved = self._workspace_resources.resolve_resource(
+                workspace_id=workspace_id,
+                resource_kind=WorkspaceResourceKind.LLM_CONNECTOR,
+                alias=name,
+            )
+            if resolved is None:
+                return None
         with self._db.session() as session:
             stmt = select(LlmConnectorConfigOrm).where(
-                LlmConnectorConfigOrm.workspace_id == workspace_id,
+                LlmConnectorConfigOrm.workspace_id
+                == (resolved.owner_workspace_id if resolved is not None else workspace_id),
                 LlmConnectorConfigOrm.is_active.is_(True),
             )
-            if name:
-                stmt = stmt.where(LlmConnectorConfigOrm.name == name)
+            if resolved is not None:
+                stmt = stmt.where(LlmConnectorConfigOrm.id == resolved.resource_id)
             else:
                 stmt = stmt.where(LlmConnectorConfigOrm.is_default.is_(True))
             stmt = stmt.limit(1).with_for_update(read=True)

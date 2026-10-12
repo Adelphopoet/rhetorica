@@ -10,14 +10,17 @@ from rhetorica_backend.contracts.agents import (
     LiteLlmAgentApiSpikeResult,
     UpsertAgentProfileRequest,
 )
+from rhetorica_backend.infra.postgres.coding_policy_models import AgentGovernedPolicyOrm
 from rhetorica_backend.infra.postgres.models import (
     AgentFavoriteOrm,
     AgentProfileOrm,
     AgentStarOrm,
 )
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_models import WorkspaceOrm
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 
 class AgentProfileRepository:
@@ -34,6 +37,7 @@ class AgentProfileRepository:
     ) -> AgentProfileItem:
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
+            self._lock_workspace_if_present(session, request.workspace_id)
             row = session.execute(
                 select(AgentProfileOrm).where(
                     AgentProfileOrm.workspace_id == request.workspace_id,
@@ -47,6 +51,8 @@ class AgentProfileRepository:
                     now=now,
                 )
                 session.add(row)
+                session.flush()
+                session.add(self._empty_governed_policy(row, actor_user_id, now))
             else:
                 self._apply_update(row=row, request=request, actor_user_id=actor_user_id, now=now)
             try:
@@ -65,12 +71,15 @@ class AgentProfileRepository:
     ) -> AgentProfileItem:
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
+            self._lock_workspace_if_present(session, request.workspace_id)
             row = self._build_row(
                 request=request,
                 actor_user_id=actor_user_id,
                 now=now,
             )
             session.add(row)
+            session.flush()
+            session.add(self._empty_governed_policy(row, actor_user_id, now))
             try:
                 session.commit()
             except IntegrityError:
@@ -89,6 +98,7 @@ class AgentProfileRepository:
     ) -> AgentProfileItem | None:
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
+            self._lock_workspace_if_present(session, workspace_id)
             row = session.get(AgentProfileOrm, agent_id)
             if row is None or row.workspace_id != workspace_id:
                 return None
@@ -169,6 +179,7 @@ class AgentProfileRepository:
 
     def delete(self, *, agent_id: str, workspace_id: str) -> bool:
         with self._db.session() as session:
+            self._lock_workspace_if_present(session, workspace_id)
             row = session.get(AgentProfileOrm, agent_id)
             if row is None or row.workspace_id != workspace_id:
                 return False
@@ -228,6 +239,35 @@ class AgentProfileRepository:
                 "create_schema": "AgentConfig(agent_name, agent_card_params, litellm_params)",
                 "response_schema": "AgentResponse(agent_id, agent_name, agent_card_params)",
             },
+        )
+
+    @staticmethod
+    def _lock_workspace_if_present(session: Session, workspace_id: str) -> None:
+        session.execute(
+            select(WorkspaceOrm).where(WorkspaceOrm.id == workspace_id).with_for_update()
+        ).scalar_one_or_none()
+
+    @staticmethod
+    def _empty_governed_policy(
+        row: AgentProfileOrm,
+        actor_user_id: str | None,
+        now: datetime,
+    ) -> AgentGovernedPolicyOrm:
+        return AgentGovernedPolicyOrm(
+            agent_id=row.id,
+            workspace_id=row.workspace_id,
+            revision=1,
+            policy_json={
+                "gitlab_write_scopes": [],
+                "allowed_subagent_ids": [],
+                "delegation_grants": [],
+                "max_iterations": 100,
+                "max_runtime_seconds": 1200,
+            },
+            created_by=actor_user_id,
+            updated_by=actor_user_id,
+            created_at=now,
+            updated_at=now,
         )
 
     @staticmethod

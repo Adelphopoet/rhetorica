@@ -20,6 +20,7 @@ def loop_limit_notice_content(*, iteration: int, max_iterations: int) -> str:
             "clarification question."
         )
     return (
+        f"Used {iteration}/{max_iterations} LLM turns. "
         f"You have {remaining_turns} LLM turns left including this one before the "
         "agent run is stopped. Prioritize finishing, avoid exploratory or duplicate "
         "tool calls, and prepare a final response with clear limitations when evidence "

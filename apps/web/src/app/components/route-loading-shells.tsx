@@ -22,23 +22,32 @@ export function RouteLoadingShell({
 
 export function AdminRouteLoading() {
   return (
-    <RouteLoadingShell label="Загружаю консоль администратора…">
-      <header className="rounded-2xl border border-border bg-surface/[0.92] px-5 py-5">
-        <Skeleton className="h-5 w-32" />
-        <Skeleton className="mt-4 h-9 w-full max-w-[620px]" />
-        <Skeleton className="mt-3 h-4 w-full max-w-[780px]" />
-      </header>
-      <div className="grid gap-1.5 rounded-2xl border border-border bg-surface/90 p-1.5 sm:grid-cols-2 lg:grid-cols-5">
-        {Array.from({ length: 5 }).map((_, index) => (
-          <Skeleton key={index} className="h-16 w-full rounded-xl" />
-        ))}
+    <main className="min-h-screen bg-page px-4 py-4 md:px-6 lg:px-8">
+      <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-4">
+        <p role="status" className="flex items-center gap-2 text-sm text-secondary">
+          <Spinner size="md" />
+          Загружаю консоль администратора…
+        </p>
+        <header className="border-b border-border pb-4">
+          <Skeleton className="h-7 w-full max-w-72" />
+          <Skeleton className="mt-2 h-4 w-full max-w-lg" />
+        </header>
+        <div className="flex flex-wrap gap-4 border-b border-border pb-2">
+          {Array.from({ length: 5 }).map((_, index) => (
+            <Skeleton key={index} className="h-8 w-20 rounded-md" />
+          ))}
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={index} className="h-28 w-full rounded-lg" />
+          ))}
+        </div>
+        <div className="grid gap-3 xl:grid-cols-2">
+          <Skeleton className="h-40 w-full rounded-lg" />
+          <Skeleton className="h-80 w-full rounded-lg" />
+        </div>
       </div>
-      <div className="grid gap-6">
-        {Array.from({ length: 4 }).map((_, index) => (
-          <Skeleton key={index} className="h-32 w-full rounded-[24px]" />
-        ))}
-      </div>
-    </RouteLoadingShell>
+    </main>
   );
 }
 

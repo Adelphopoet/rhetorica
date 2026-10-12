@@ -2,15 +2,19 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Avatar, Button, cn } from "@rhetorica/ui";
+import { Avatar, Button, DropdownSelect, cn } from "@rhetorica/ui";
 import {
   Clock3,
+  Layers3,
   Diamond,
   LoaderCircle,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  Search,
+  ChevronLeft,
+  ChevronRight,
   Trash2,
   X,
 } from "lucide-react";
@@ -34,6 +38,7 @@ interface SidebarProps {
   collapsed: boolean;
   onCollapseChange: (collapsed: boolean) => void;
   workspaceName: string;
+  workspaces?: Array<{ id: string; name: string; role: "owner" | "analyst" | "viewer" }>;
   apiStatus: string;
   canAccessAdmin: boolean;
   userLogin: string;
@@ -43,6 +48,15 @@ interface SidebarProps {
   conversations: ConversationSummary[];
   activeConversationId: string | null;
   historyLoading: boolean;
+  historySearch?: string;
+  onHistorySearchChange?: (value: string) => void;
+  historyPage?: number;
+  historyHasNext?: boolean;
+  historyBusy?: boolean;
+  historyError?: string;
+  onHistoryPrevious?: () => void;
+  onHistoryNext?: () => void;
+  onHistoryRetry?: () => void;
   interactionDisabled: boolean;
   deletionDisabled: boolean;
   deletingConversationId: string | null;
@@ -114,6 +128,7 @@ export function Sidebar({
   collapsed,
   onCollapseChange,
   workspaceName,
+  workspaces = [],
   apiStatus,
   canAccessAdmin,
   userLogin,
@@ -123,6 +138,9 @@ export function Sidebar({
   conversations,
   activeConversationId,
   historyLoading,
+  historySearch = "", onHistorySearchChange,
+  historyPage = 0, historyHasNext = false, historyBusy = false, historyError,
+  onHistoryPrevious, onHistoryNext, onHistoryRetry,
   interactionDisabled,
   deletionDisabled,
   deletingConversationId,
@@ -137,6 +155,8 @@ export function Sidebar({
   const iconSrc = "/icon.png";
   const [profileMenuSignal, setProfileMenuSignal] = useState(0);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [workspaceSwitching, setWorkspaceSwitching] = useState(false);
+  const [workspaceSwitchError, setWorkspaceSwitchError] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; left: number } | null>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
@@ -266,7 +286,46 @@ export function Sidebar({
           </div>
         </div>
 
-        <section className="relative min-h-0 flex-1 overflow-y-auto pr-1">
+        {workspaces.length > 1 ? (
+          <div className="mb-4 space-y-2">
+            <label htmlFor="workspace-select" className="block px-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">Workspace</label>
+            <DropdownSelect
+              id="workspace-select"
+              aria-label="Workspace"
+              value={workspaceName}
+              disabled={workspaceSwitching}
+              icon={workspaceSwitching ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Layers3 className="h-4 w-4" />}
+              showDescription
+              error={workspaceSwitchError ?? undefined}
+              options={workspaces.map(workspace => ({
+                value: workspace.id,
+                label: workspace.name,
+                description: { owner: "Владелец", analyst: "Аналитик", viewer: "Наблюдатель" }[workspace.role],
+              }))}
+              onValueChange={(workspaceId) => {
+                setWorkspaceSwitchError(null);
+                setWorkspaceSwitching(true);
+                void fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/select`, {
+                  method: "POST",
+                }).then((response) => {
+                  if (!response.ok) throw new Error("workspace_select_failed");
+                  window.location.reload();
+                }).catch(() => {
+                  setWorkspaceSwitchError("Не удалось переключить workspace. Повторите попытку");
+                  setWorkspaceSwitching(false);
+                });
+              }}
+              className="bg-elevated/40"
+            />
+          </div>
+        ) : null}
+
+        {onHistorySearchChange && <div className="relative mb-3">
+          <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted" aria-hidden="true" />
+          <input type="search" aria-label="Поиск по чатам" placeholder="Поиск по чатам" maxLength={200} value={historySearch} onChange={event => onHistorySearchChange(event.target.value)} className="h-9 w-full rounded-xl border border-border bg-surface pl-9 pr-3 text-sm text-primary outline-none placeholder:text-muted focus:border-accent focus:ring-1 focus:ring-accent" />
+        </div>}
+        {historyError && <div role="alert" className="mb-3 text-xs text-danger">Не удалось загрузить чаты. <button type="button" onClick={onHistoryRetry} className="underline">Повторить</button></div>}
+        <section aria-label="История чатов" aria-busy={historyBusy} className="relative min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="space-y-4">
             {historyLoading ? (
               <div className="space-y-2">
@@ -284,9 +343,9 @@ export function Sidebar({
               </div>
             ) : null}
 
-            {!historyLoading && conversations.length === 0 ? (
+            {!historyLoading && !historyError && conversations.length === 0 ? (
               <div className="p-4 text-sm italic text-secondary">
-                Нет сохранённых чатов...
+                {historySearch ? "Совпадений нет" : "Нет сохранённых чатов…"}
               </div>
             ) : null}
 
@@ -371,6 +430,11 @@ export function Sidebar({
           </div>
         </section>
 
+        {(historyPage > 0 || historyHasNext) && <nav aria-label="Страницы чатов" className="mt-3 flex items-center justify-between border-t border-border pt-3 text-xs text-muted">
+          <button type="button" aria-label="Предыдущая страница чатов" disabled={historyPage === 0 || historyBusy} onClick={onHistoryPrevious} className="rounded-lg p-2 hover:bg-hover disabled:opacity-30"><ChevronLeft className="h-4 w-4" /></button>
+          <span aria-live="polite">Страница {historyPage + 1}</span>
+          <button type="button" aria-label="Следующая страница чатов" disabled={!historyHasNext || historyBusy || Boolean(historyError)} onClick={onHistoryNext} className="rounded-lg p-2 hover:bg-hover disabled:opacity-30"><ChevronRight className="h-4 w-4" /></button>
+        </nav>}
         <div className="mt-auto pt-4">
           <ProfileMenu
             workspaceName={workspaceName}

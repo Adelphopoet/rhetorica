@@ -1,7 +1,8 @@
 from functools import lru_cache
+from typing import Annotated
 
 from celery import Celery  # type: ignore[import-untyped]
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from rhetorica_backend.contracts import (
     ConversationDetailItem,
     ConversationItem,
@@ -143,6 +144,7 @@ def get_conversation(conversation_id: str) -> ConversationDetailItem:
                 "conversation_id": msg.conversation_id,
                 "role": msg.role,
                 "content": msg.content,
+                "journal_events": msg.journal_events,
                 "agent_id": msg.agent_id,
                 "created_at": msg.created_at.isoformat(),
                 "generated_sql": msg.generated_sql,
@@ -154,7 +156,12 @@ def get_conversation(conversation_id: str) -> ConversationDetailItem:
                 "claim_evidence_links": msg.claim_evidence_links,
                 "uncertainty_flags": msg.uncertainty_flags,
                 "capability_trace": msg.capability_trace,
-                "optimization_trace": msg.optimization_trace,
+                **(
+                    {"optimization_trace": msg.optimization_trace}
+                    if isinstance(msg.optimization_trace, dict)
+                    and msg.optimization_trace.get("optimizer_used")
+                    else {}
+                ),
                 "selected_connector": msg.selected_connector,
                 "analysis_document": msg.analysis_document,
                 "visualization": msg.visualization_spec,
@@ -175,13 +182,20 @@ def get_conversation(conversation_id: str) -> ConversationDetailItem:
 
 
 @router.get("/conversations", response_model=list[ConversationItem])
-def list_conversations(workspace_id: str = "default", limit: int = 50) -> list[ConversationItem]:
+def list_conversations(
+    workspace_id: str = "default",
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    search: Annotated[str, Query(max_length=200)] = "",
+) -> list[ConversationItem]:
     """List conversations for a workspace."""
     current_user = resolve_current_user(workspace_id)
     chat_repo = ChatRepository(db=get_db_runtime())
     conversations = chat_repo.list_conversations(
         workspace_id=workspace_id,
         limit=limit,
+        offset=offset,
+        search=search,
         owner_user_id=current_user.id,
     )
     return [

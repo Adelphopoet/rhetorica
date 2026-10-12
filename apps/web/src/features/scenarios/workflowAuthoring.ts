@@ -4,6 +4,7 @@ export const valueLabels = { string: "Текст", number: "Число", boolean
 export const templates = {
   analysis: { title: "Анализ данных", description: "SQL → Python → Агент → Результат. Файл запроса уже подключён к Python" },
   sql: { title: "SQL и выгрузка", description: "Параметры → SQL → Результат. Таблица и полный файл запроса" },
+  dbt: { title: "dbt: developer → QA → Draft MR", description: "Разработка в фоне с проверяемым diff и read-only QA. Выберите существующие ресурсы и специалистов в настройках шага" },
   agent: { title: "Ответ агента", description: "Вопрос → Агент → Результат. Простой старт без кода" },
 };
 export type Template = keyof typeof templates;
@@ -46,7 +47,13 @@ export function templateGraph(template: Template, connector: string, agent: stri
   const result = newNode("result", "result");
   let nodes: WorkflowNode[];
   let parameters: WorkflowDefinition["parameters"] = {};
-  if (template === "analysis") {
+  if (template === "dbt") {
+    const coding = newNode("coding_task", "coding");
+    parameters = { task: { type: "string", title: "Задание на разработку dbt", required: true } };
+    coding.inputs = { task: { source: "input", type: "string", path: ["task"], required: true } };
+    result.inputs = Object.fromEntries(Object.keys(coding.outputs).map(port => [port, fromOutput(coding, port)]));
+    nodes = [input, coding, result];
+  } else if (template === "analysis") {
     llm.inputs = { data: fromOutput(python, "result") };
     result.inputs = { answer_markdown: fromOutput(llm, "result"), files: fromOutput(python, "files") };
     nodes = [input, sql, python, llm, result];
@@ -60,7 +67,7 @@ export function templateGraph(template: Template, connector: string, agent: stri
     nodes = [input, llm, result];
   }
   result.outputs = Object.fromEntries(Object.entries(result.inputs).map(([key, binding]) => [key, { type: binding.type, required: binding.required }]));
-  return { workflow: { schema_version: 1, parameters, nodes, edges: nodes.slice(1).map((node, i) => ({ source: nodes[i].id, target: node.id })), allowed_tools: [] }, layout: { positions: Object.fromEntries(nodes.map((node, i) => [node.id, { x: 60 + i * 300, y: 130 }])) } };
+  return { workflow: { schema_version: template === "dbt" ? 2 : 1, parameters, nodes, edges: nodes.slice(1).map((node, i) => ({ source: nodes[i].id, target: node.id })), allowed_tools: [] }, layout: { positions: Object.fromEntries(nodes.map((node, i) => [node.id, { x: 60 + i * 300, y: 130 }])) } };
 }
 
 export function insertStep(draft: Draft, selected: string, type: NodeType, capabilities: Capabilities): { draft: Draft; id: string } {
@@ -84,5 +91,5 @@ export function insertStep(draft: Draft, selected: string, type: NodeType, capab
       if (position && position.x > origin.x) positions[item.id] = { ...position, x: position.x + 300 };
     }
   }
-  return { id, draft: { ...draft, workflow: { ...draft.workflow, nodes: [...draft.workflow.nodes, node], edges }, layout: { ...draft.layout, positions } } };
+  return { id, draft: { ...draft, workflow: { ...draft.workflow, schema_version: type === "coding_task" ? 2 : draft.workflow.schema_version, nodes: [...draft.workflow.nodes, node], edges }, layout: { ...draft.layout, positions } } };
 }

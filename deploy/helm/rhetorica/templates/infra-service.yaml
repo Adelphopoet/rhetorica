@@ -11,8 +11,8 @@ spec:
   publishNotReadyAddresses: true
   type: ClusterIP
   selector:
-    app.kubernetes.io/component: {{ .Values.infra.serviceSelector.component | default "infra" | quote }}
-    app.kubernetes.io/instance: {{ .Values.infra.serviceSelector.instance | default .Release.Name | quote }}
+    app.kubernetes.io/component: infra
+    app.kubernetes.io/instance: {{ .Release.Name }}
   ports:
     {{- if .Values.infra.temporal.enabled }}
     - name: temporal

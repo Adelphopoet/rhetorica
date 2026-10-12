@@ -12,13 +12,13 @@ from rhetorica_backend.infra.postgres.victoriametrics_connector_repository impor
 )
 from sqlalchemy.exc import IntegrityError
 
-from rhetorica_api.app.auth import require_admin_access
+from rhetorica_api.app.auth import require_workspace_owner_access
 from rhetorica_api.app.settings import settings
 
 router = APIRouter(
     prefix="/v1/admin/victoriametrics-connectors",
     tags=["victoriametrics-connectors"],
-    dependencies=[Depends(require_admin_access)],
+    dependencies=[Depends(require_workspace_owner_access)],
 )
 
 

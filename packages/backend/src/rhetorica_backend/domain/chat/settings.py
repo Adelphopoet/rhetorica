@@ -17,7 +17,14 @@ class ChatSettings(BaseSettings):
     )
 
     # LLM tool orchestration
-    max_iterations: int = 100  # Maximum LLM tool-orchestration turns
+    max_iterations: int = Field(default=100, ge=2, le=100)
+    context_harness_enabled: bool = False
+    tool_output_policy_enabled: bool = False
+    context_trim_trigger_ratio: float = Field(default=0.7, gt=0, lt=1)
+    context_target_ratio: float = Field(default=0.5, gt=0, lt=1)
+    context_compaction_max_calls: int = Field(default=10, ge=1, le=10)
+    tool_dispatch_enabled: bool = False
+    certified_tool_concurrency_enabled: bool = False
     default_message_limit: int = 20  # Default conversation history message limit
     context_compaction_enabled: bool = True
     context_compaction_trigger_ratio: float = Field(default=0.8, gt=0, lt=1)

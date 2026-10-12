@@ -12,10 +12,12 @@ vi.mock("@/features/scenarios/scenariosApi", () => ({
 }));
 
 function renderAdminPage({
+  isSystemAdmin = true,
   databaseConnectors = [],
   llmConnectors = [],
   mcpConnectors = [],
 }: {
+  isSystemAdmin?: boolean;
   databaseConnectors?: DatabaseConnectorItem[];
   llmConnectors?: LlmConnectorItem[];
   mcpConnectors?: McpConnectorItem[];
@@ -23,6 +25,7 @@ function renderAdminPage({
   return render(
     <ToastProvider>
       <AdminPageClient
+        isSystemAdmin={isSystemAdmin}
         databaseConnectors={databaseConnectors}
         llmConnectors={llmConnectors}
         documentationConnectors={[]}
@@ -89,12 +92,31 @@ function renderAdminPage({
         ]}
         currentUserId="user-1"
         workspaceId="default"
+        workspaces={[]}
+        workspaceMemberships={[]}
+        workspaceResourceGrants={[]}
+        workspaceUsers={[]}
+        workspaceResourceOptions={[]}
       />
     </ToastProvider>
   );
 }
 
 describe("AdminPageClient", () => {
+  it("limits workspace owners to local connectors and skills", async () => {
+    renderAdminPage({ isSystemAdmin: false });
+
+    expect(screen.getByRole("heading", { name: "Ресурсы рабочего пространства" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Настройки/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Доступ/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Проверка/ })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Управление/ }));
+    expect((await screen.findAllByRole("button", { name: "Добавить навык" })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Добавить агента" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Добавить официальный сценарий" })).not.toBeInTheDocument();
+  });
+
   it("opens the workflow creator with official scope from both governance actions", async () => {
     renderAdminPage();
     const tab = screen.getAllByRole("button", { name: /Управление/ }).find(button => button.getAttribute("aria-pressed") !== null)!;
@@ -495,6 +517,7 @@ describe("AdminPageClient", () => {
             default_group_paths: ["platform"],
             search_limit: 7,
             read_max_tokens: 1200,
+            coding_archive_max_files: 25000,
             extra_settings: {},
           },
           has_api_token: true,
@@ -523,6 +546,8 @@ describe("AdminPageClient", () => {
     await user.type(within(dialog).getByLabelText("Лимит поиска"), "7");
     await user.clear(within(dialog).getByLabelText("Максимум токенов на чтение"));
     await user.type(within(dialog).getByLabelText("Максимум токенов на чтение"), "1200");
+    await user.clear(within(dialog).getByLabelText("Максимум записей архива для Coding"));
+    await user.type(within(dialog).getByLabelText("Максимум записей архива для Coding"), "25000");
     await user.click(within(dialog).getByRole("button", { name: "Создать подключение" }));
 
     await waitFor(() => {
@@ -549,6 +574,7 @@ describe("AdminPageClient", () => {
         default_group_paths: ["platform"],
         search_limit: 7,
         read_max_tokens: 1200,
+        coding_archive_max_files: 25000,
         extra_settings: {},
       },
     });
@@ -852,6 +878,7 @@ describe("AdminPageClient", () => {
         expect.objectContaining({ method: "POST", cache: "no-store" })
       );
     });
+    await user.click(screen.getByRole("button", { name: "Просмотр: mcp-gitlab-main" }));
     await waitFor(() => {
       expect(screen.getByText("Инструменты")).toBeInTheDocument();
       expect(screen.getByText("2")).toBeInTheDocument();
@@ -1338,8 +1365,10 @@ describe("AdminPageClient", () => {
 
     await waitFor(() => {
       expect(within(screen.getByRole("main")).getByText("example-llm")).toBeInTheDocument();
-      expect(within(screen.getByRole("main")).getByText("По умолчанию")).toBeInTheDocument();
     });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Просмотр: example-llm" }));
+    expect(within(screen.getByRole("dialog")).getByText("По умолчанию")).toBeInTheDocument();
   });
 
   it("creates an impala database connector from setup", async () => {
@@ -1593,10 +1622,6 @@ describe("AdminPageClient", () => {
     const dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Название"), "support-tone");
     await user.selectOptions(
-      within(dialog).getByRole("combobox", { name: "Назначение" }),
-      "chat_instruction"
-    );
-    await user.selectOptions(
       within(dialog).getByRole("combobox", { name: "Источник" }),
       "manual_markdown"
     );
@@ -1719,7 +1744,6 @@ describe("AdminPageClient", () => {
     await user.click((await screen.findAllByRole("button", { name: "Добавить навык" }))[0]!);
     let dialog = await screen.findByRole("dialog");
     await user.type(within(dialog).getByLabelText("Название"), "draft-skill");
-    await user.selectOptions(within(dialog).getByRole("combobox", { name: "Назначение" }), "chat_instruction");
     await user.selectOptions(within(dialog).getByRole("combobox", { name: "Источник" }), "manual_markdown");
     await user.type(within(dialog).getByLabelText("Применять, когда"), "support tone");
     await user.type(within(dialog).getByLabelText("Текст навыка вручную"), "# Draft");
@@ -1729,7 +1753,6 @@ describe("AdminPageClient", () => {
     await user.click((await screen.findAllByRole("button", { name: "Добавить навык" }))[0]!);
     dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("Название")).toHaveValue("draft-skill");
-    expect(within(dialog).getByRole("combobox", { name: "Назначение" })).toHaveValue("chat_instruction");
     expect(within(dialog).getByRole("combobox", { name: "Источник" })).toHaveValue("manual_markdown");
     expect(within(dialog).getByLabelText("Применять, когда")).toHaveValue("support tone");
     expect(within(dialog).getByLabelText("Текст навыка вручную")).toHaveValue("# Draft");
@@ -1743,7 +1766,6 @@ describe("AdminPageClient", () => {
     await user.click((await screen.findAllByRole("button", { name: "Добавить навык" }))[0]!);
     dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("Название")).toHaveValue("");
-    expect(within(dialog).getByRole("combobox", { name: "Назначение" })).toHaveValue("sql_optimization_advisor");
     expect(within(dialog).getByRole("combobox", { name: "Источник" })).toHaveValue("github_markdown_url");
   });
 
@@ -1815,19 +1837,20 @@ describe("AdminPageClient", () => {
 });
 
 
-it("round-trips all LLM settings without losing nulls, headers, extra options or keys", async () => {
+it.each([false, true])("round-trips all LLM settings with store=%s without losing nulls, headers, extra options or keys", async (store) => {
   const user = userEvent.setup();
   const item: LlmConnectorItem = {
     id: "llm-round-trip", name: "Configured LLM", workspace_id: "default", is_active: true,
     is_default: true, has_api_key: true, api_key_count: 2,
     connection: {
-      base_url: "https://llm.example/v1", model: "test-model", endpoint_path: "/chat/completions",
+      base_url: "https://llm.example/v1", model: "test-model", endpoint_path: "/responses",
       verify_tls: true, temperature: null, top_p: 0.95, max_tokens: null,
       reasoning_effort: "medium",
       max_tokens_parameter: "max_completion_tokens", headers: { "X-Client": "analytics" },
       extra_settings: { chat_template_enable_thinking: false, llm_retry_attempts: 2,
         responses_endpoint_path: "/responses", context_window_tokens: 180000,
-        require_explicit_final_answer: false, verify_tls: true },
+        require_explicit_final_answer: false, verify_tls: true, store,
+        native_compaction_enabled: true, native_compaction_threshold_tokens: 1000 },
     },
     created_at: "2026-09-07T12:00:00Z", updated_at: "2026-09-07T12:00:00Z",
   };
@@ -1840,6 +1863,9 @@ it("round-trips all LLM settings without losing nulls, headers, extra options or
   expect(within(dialog).getByLabelText("Температура")).toHaveValue(null);
   expect(within(dialog).getByLabelText("Максимум токенов ответа")).toHaveValue(null);
   expect(within(dialog).getByLabelText("Top P")).toHaveValue(0.95);
+  expect(within(dialog).getByLabelText("Хранение ответов у провайдера (store)")).toHaveValue(String(store));
+  expect(within(dialog).getByLabelText("Нативное сжатие контекста")).toBeChecked();
+  expect(within(dialog).getByLabelText("Порог нативного сжатия (токены)")).toHaveValue(1000);
   expect(within(dialog).getByLabelText("Уровень reasoning")).toHaveValue("medium");
   const headers = within(dialog).getByLabelText("JSON HTTP-заголовков");
   expect(JSON.parse((headers as HTMLTextAreaElement).value)).toEqual(item.connection.headers);
@@ -1855,16 +1881,20 @@ it("round-trips all LLM settings without losing nulls, headers, extra options or
     temperature: null, top_p: 0.95, reasoning_effort: "medium", max_tokens: null, headers: item.connection.headers,
     retained_api_key_indexes: [0, 1], api_keys: null,
     extra_settings: { chat_template_enable_thinking: false, llm_retry_attempts: 2,
-      responses_endpoint_path: "/responses", context_window_tokens: 180000, require_explicit_final_answer: false },
+      responses_endpoint_path: "/responses", context_window_tokens: 180000, require_explicit_final_answer: false,
+      native_compaction_enabled: true, native_compaction_threshold_tokens: 1000, store },
   });
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   await user.click(await screen.findByRole("button", { name: "Редактировать" }));
   const reopened = await screen.findByRole("dialog");
+  expect(within(reopened).getByLabelText("Хранение ответов у провайдера (store)")).toHaveValue(String(store));
+  await user.selectOptions(within(reopened).getByLabelText("Хранение ответов у провайдера (store)"), "");
   await user.clear(within(reopened).getByLabelText("Top P"));
   await user.selectOptions(within(reopened).getByLabelText("Уровень reasoning"), "");
   await user.click(within(reopened).getByRole("button", { name: "Сохранить подключение" }));
   await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
   expect(JSON.parse(String(fetchSpy.mock.calls[1]?.[1]?.body)).connection.top_p).toBeNull();
+  expect(JSON.parse(String(fetchSpy.mock.calls[1]?.[1]?.body)).connection.extra_settings).not.toHaveProperty("store");
   expect(JSON.parse(String(fetchSpy.mock.calls[1]?.[1]?.body)).connection.reasoning_effort).toBeNull();
 
 });

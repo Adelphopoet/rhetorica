@@ -42,6 +42,7 @@ class ScenarioActivities:
         python: ScenarioPythonStepRunner,
         llm: ScenarioLlmStepRunner,
         tools: ScenarioLlmTools,
+        coding=None,
     ):
         self.repository = repository
         self.data = data
@@ -50,6 +51,7 @@ class ScenarioActivities:
         self.python = python
         self.llm = llm
         self.tools = tools
+        self.coding = coding
 
     @activity.defn(name="scenario_bootstrap")
     async def bootstrap(self, run_id: str) -> dict[str, Any]:
@@ -188,6 +190,10 @@ class ScenarioActivities:
             output = await self.llm.run(
                 node, inputs, context, self.tools.build(node, context, graph.allowed_tools)
             )
+        elif node.type == "coding_task":
+            if self.coding is None:
+                raise WorkflowError("coding_disabled", status_code=503)
+            output = await self.coding.run(node, inputs, context)
         elif node.type == "condition":
             output = {"branch": evaluate_condition(node, inputs)}
         elif node.type == "approval":

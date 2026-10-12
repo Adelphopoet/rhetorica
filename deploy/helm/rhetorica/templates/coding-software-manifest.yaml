@@ -1,0 +1,11 @@
+{{- if and .Values.codingRunner.enabled .Values.codingRunner.runner.softwareManifest }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-coding-software-manifest
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+data:
+  software-manifest.json: |-
+    {{- .Values.codingRunner.runner.softwareManifest | nindent 4 }}
+{{- end }}

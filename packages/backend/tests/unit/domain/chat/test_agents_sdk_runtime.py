@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from contextlib import contextmanager
+from itertools import pairwise
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,6 +29,7 @@ from rhetorica_backend.contracts.admin_integrations import LlmConnectionConfig
 from rhetorica_backend.contracts.chat import ChatAskRequest
 from rhetorica_backend.contracts.files import FileArtifactRef
 from rhetorica_backend.contracts.visualization import VisualizationSpec
+from rhetorica_backend.domain.chat.llm import sdk_models
 from rhetorica_backend.domain.chat.orchestration.agent_runtime import (
     AgentRuntimeInput,
     AgentRuntimePreparedContent,
@@ -76,7 +78,9 @@ def test_agents_sdk_tracing_stays_enabled_for_langfuse_instrumentation(monkeypat
     assert run_config.tracing_disabled is False
 
 
-def test_agents_sdk_tracing_is_disabled_without_active_langfuse_instrumentation(monkeypatch) -> None:
+def test_agents_sdk_tracing_is_disabled_without_active_langfuse_instrumentation(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.langfuse_enabled",
         lambda: False,
@@ -342,7 +346,12 @@ def test_credential_stream_retries_only_before_content_and_emits_safe_diagnostic
     )
 
     async def collect() -> list[str]:
-        return [event async for event in model.stream_response(None, [], ModelSettings(), [], None, [], "disabled")]
+        return [
+            event
+            async for event in model.stream_response(
+                None, [], ModelSettings(), [], None, [], "disabled"
+            )
+        ]
 
     assert asyncio.run(collect()) == ["completed"]
     assert calls == [0, 1]
@@ -520,7 +529,12 @@ def test_credential_stream_does_not_retry_after_published_content() -> None:
     model = _CredentialAwareSdkModel(connection=connection, model_factory=_Model, max_attempts=2)
 
     async def collect() -> list[str]:
-        return [event async for event in model.stream_response(None, [], ModelSettings(), [], None, [], "disabled")]
+        return [
+            event
+            async for event in model.stream_response(
+                None, [], ModelSettings(), [], None, [], "disabled"
+            )
+        ]
 
     with pytest.raises(httpx.ReadError):
         asyncio.run(collect())
@@ -576,21 +590,21 @@ def _transport(
 
 def test_sdk_base_url_preserves_responses_provider_prefix() -> None:
     assert (
-        _service()._sdk_base_url("https://llm.example.test/openai/v1/responses")
+        sdk_models.sdk_base_url("https://llm.example.test/openai/v1/responses")
         == "https://llm.example.test/openai/v1"
     )
 
 
 def test_sdk_base_url_preserves_chat_completions_provider_prefix() -> None:
     assert (
-        _service()._sdk_base_url("https://llm.example.test/openai/v1/chat/completions")
+        sdk_models.sdk_base_url("https://llm.example.test/openai/v1/chat/completions")
         == "https://llm.example.test/openai/v1"
     )
 
 
 def test_sdk_base_url_rejects_unsupported_endpoint() -> None:
     with pytest.raises(AgentsSdkCapabilityError):
-        _service()._sdk_base_url("https://llm.example.test/v1/generate")
+        sdk_models.sdk_base_url("https://llm.example.test/v1/generate")
 
 
 def test_instructions_are_separated_from_conversation_input() -> None:
@@ -1112,9 +1126,22 @@ def test_pinned_credential_wraps_both_stock_sdk_transports(
     assert isinstance(observed_models[0]._model_factory(0), expected_model)
 
 
+@pytest.mark.parametrize("giant_result", [False, True])
 def test_real_sdk_runner_executes_tool_then_accepts_typed_output(
     monkeypatch: pytest.MonkeyPatch,
+    giant_result: bool,
 ) -> None:
+    from rhetorica_backend.domain.chat import settings
+
+    monkeypatch.setattr(
+        settings,
+        "_settings",
+        settings.ChatSettings(
+            context_harness_enabled=False,
+            tool_output_policy_enabled=giant_result,
+        ),
+    )
+
     class _SequencedModel(Model):
         def __init__(self) -> None:
             self.calls = 0
@@ -1140,6 +1167,20 @@ def test_real_sdk_runner_executes_tool_then_accepts_typed_output(
                     ),
                     response_id="response-1",
                 )
+            if giant_result:
+                outputs = [
+                    item for item in kwargs["input"] if item.get("type") == "function_call_output"
+                ]
+                assert len(outputs) == 1
+                assert len(outputs[0]["output"]) <= 16000
+                payload = json.loads(outputs[0]["output"])["compact_payload"]
+                exact = state.tool_result_artifacts.read(
+                    artifact_id=payload["tool_artifact"]["artifact_id"],
+                    format="json",
+                    json_pointer="/rows/0/0",
+                    limit=6000,
+                )
+                assert exact["data"] == "x" * 5000
             return ModelResponse(
                 output=[
                     ResponseOutputMessage(
@@ -1176,10 +1217,19 @@ def test_real_sdk_runner_executes_tool_then_accepts_typed_output(
 
     model = _SequencedModel()
     monkeypatch.setattr(
-        "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.OpenAIResponsesModel",
+        "rhetorica_backend.domain.chat.llm.sdk_models.OpenAIResponsesModel",
         lambda **_kwargs: model,
     )
     executor = _RecordingToolExecutor()
+    if giant_result:
+        original_execute = executor.execute_tool
+
+        def execute_giant(**kwargs):
+            original_execute(**kwargs)
+            return {"ok": True, "rows": [["x" * 5000] * 20] * 10}
+
+        monkeypatch.setattr(executor, "execute_tool", execute_giant)
+    state = ToolOrchestrationState()
     result = asyncio.run(
         _service().run(
             runtime=AgentRuntimeInput(
@@ -1201,7 +1251,7 @@ def test_real_sdk_runner_executes_tool_then_accepts_typed_output(
                         },
                     }
                 ],
-                state=ToolOrchestrationState(),
+                state=state,
                 tool_executor=executor,
             ),
             transport=_transport([]),
@@ -1299,7 +1349,7 @@ def test_compaction_restarts_sdk_history_before_provider_reuses_call_id(
 
     model = _CompactionAwareModel()
     monkeypatch.setattr(
-        "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.OpenAIResponsesModel",
+        "rhetorica_backend.domain.chat.llm.sdk_models.OpenAIResponsesModel",
         lambda **_kwargs: model,
     )
     executor = _CompactionTriggeringExecutor()
@@ -1388,7 +1438,7 @@ def test_explicit_final_answer_uses_native_sdk_tool_protocol(
 
     model = _ExplicitFinalModel()
     monkeypatch.setattr(
-        "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.OpenAIResponsesModel",
+        "rhetorica_backend.domain.chat.llm.sdk_models.OpenAIResponsesModel",
         lambda **_kwargs: model,
     )
     connection = _LlmClient.connection.model_copy(
@@ -1471,7 +1521,7 @@ def test_invalid_explicit_final_answer_is_returned_to_model_for_repair(
 
     model = _RepairingFinalModel()
     monkeypatch.setattr(
-        "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.OpenAIResponsesModel",
+        "rhetorica_backend.domain.chat.llm.sdk_models.OpenAIResponsesModel",
         lambda **_kwargs: model,
     )
     connection = _LlmClient.connection.model_copy(
@@ -1532,7 +1582,7 @@ def test_valid_explicit_final_answer_survives_malformed_sibling_tool_call(
 
     model = _FinalWithMalformedCleanupModel()
     monkeypatch.setattr(
-        "rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime.OpenAIResponsesModel",
+        "rhetorica_backend.domain.chat.llm.sdk_models.OpenAIResponsesModel",
         lambda **_kwargs: model,
     )
     connection = _LlmClient.connection.model_copy(
@@ -1906,7 +1956,7 @@ def test_chat_completions_model_settings_honor_max_completion_tokens() -> None:
         }
     )
 
-    settings = _service()._model_settings(connection)
+    settings = sdk_models.build_model_settings(connection)
 
     assert settings.max_tokens is None
     assert settings.extra_args == {"max_completion_tokens": 777}
@@ -1924,11 +1974,154 @@ def test_responses_model_settings_use_client_compaction_and_reasoning_summary() 
         }
     )
 
-    settings = _service()._model_settings(connection)
+    settings = sdk_models.build_model_settings(connection)
 
     assert settings.context_management is None
     assert settings.reasoning is not None
     assert settings.reasoning.summary == "auto"
+
+
+def test_responses_model_settings_send_native_compaction_through_sdk() -> None:
+    connection = _LlmClient.connection.model_copy(
+        update={
+            "endpoint_path": "/responses",
+            "extra_settings": {
+                "native_compaction_enabled": True,
+                "native_compaction_threshold_tokens": 1000,
+            },
+        }
+    )
+
+    settings = sdk_models.build_model_settings(connection)
+
+    assert settings.context_management == [{"type": "compaction", "compact_threshold": 1000}]
+
+
+@pytest.mark.parametrize("optimized", [False, True])
+def test_native_compaction_preserves_opaque_item_without_legacy_restart(
+    monkeypatch: pytest.MonkeyPatch, optimized: bool
+) -> None:
+    from rhetorica_backend.domain.chat import settings as chat_settings
+
+    monkeypatch.setattr(
+        chat_settings, "_settings", chat_settings.ChatSettings(context_harness_enabled=optimized)
+    )
+    connection = _LlmClient.connection.model_copy(
+        update={
+            "endpoint_path": "/responses",
+            "extra_settings": {
+                "context_window_tokens": 200_000,
+                "native_compaction_enabled": True,
+                "native_compaction_threshold_tokens": 1000,
+            },
+        }
+    )
+    state = ToolOrchestrationState(force_context_compaction=True)
+    runtime = AgentRuntimeInput(
+        llm_client=SimpleNamespace(connection=connection),
+        request=ChatAskRequest(question="follow up"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=state,
+        tool_executor=_ToolExecutor(),
+    )
+    model_settings = sdk_models.build_model_settings(connection)
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=SimpleNamespace(),
+        model_settings=model_settings,
+        turn_control=_SdkTurnControl(max_turns=100),
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    opaque_item = {"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque-state"}
+    prepared = asyncio.run(
+        controller(
+            CallModelData(
+                model_data=ModelInputData(
+                    input=[
+                        {"role": "user", "content": "previous"},
+                        opaque_item,
+                        {"role": "user", "content": "follow up"},
+                    ],
+                    instructions="system contract",
+                ),
+                agent=SimpleNamespace(),
+                context=None,
+            )
+        )
+    )
+
+    assert opaque_item in prepared.input
+    assert {"role": "user", "content": "previous"} not in prepared.input
+    assert {"role": "user", "content": "follow up"} in prepared.input
+    assert state.warnings == []
+    assert controller._turn_control.compaction_calls == 0
+
+
+def test_native_compaction_keeps_only_checkpoint_suffix_after_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rhetorica_backend.domain.chat import settings as chat_settings
+
+    monkeypatch.setattr(
+        chat_settings, "_settings", chat_settings.ChatSettings(context_harness_enabled=True)
+    )
+    connection = _LlmClient.connection.model_copy(
+        update={
+            "endpoint_path": "/responses",
+            "extra_settings": {
+                "context_window_tokens": 200_000,
+                "native_compaction_enabled": True,
+                "native_compaction_threshold_tokens": 1000,
+            },
+        }
+    )
+    runtime = AgentRuntimeInput(
+        llm_client=SimpleNamespace(connection=connection),
+        request=ChatAskRequest(question="follow up"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=ToolOrchestrationState(),
+        tool_executor=_ToolExecutor(),
+    )
+    turn_control = _SdkTurnControl(max_turns=100)
+    turn_control.completed_turns = 1
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=SimpleNamespace(),
+        model_settings=sdk_models.build_model_settings(connection),
+        turn_control=turn_control,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    opaque_item = {"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque-state"}
+    tool_call = {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"}
+    tool_result = {"type": "function_call_output", "call_id": "call-1", "output": "ok"}
+    prepared = asyncio.run(
+        controller(
+            CallModelData(
+                model_data=ModelInputData(
+                    input=[
+                        {"role": "user", "content": "covered prefix"},
+                        opaque_item,
+                        tool_call,
+                        tool_result,
+                    ],
+                    instructions="system contract",
+                ),
+                agent=SimpleNamespace(),
+                context=None,
+            )
+        )
+    )
+
+    assert prepared.input[:3] == [opaque_item, tool_call, tool_result]
+    assert prepared.input[-1] == {
+        "role": "user",
+        "content": "<runtime_context>Continue the preceding task.</runtime_context>",
+    }
+    assert len(prepared.input) == 4
 
 
 def test_chat_completions_model_settings_do_not_send_responses_compaction() -> None:
@@ -1939,7 +2132,7 @@ def test_chat_completions_model_settings_do_not_send_responses_compaction() -> N
         }
     )
 
-    settings = _service()._model_settings(connection)
+    settings = sdk_models.build_model_settings(connection)
 
     assert settings.context_management is None
     assert settings.reasoning is None
@@ -1951,7 +2144,7 @@ def test_model_settings_forward_reasoning_effort_for_any_sdk_endpoint(endpoint_p
         update={"endpoint_path": endpoint_path, "reasoning_effort": "high"}
     )
 
-    settings = _service()._model_settings(connection)
+    settings = sdk_models.build_model_settings(connection)
 
     assert settings.reasoning is not None
     assert settings.reasoning.effort == "high"
@@ -1967,7 +2160,7 @@ def test_model_settings_preserve_responses_summary_with_effort() -> None:
         }
     )
 
-    settings = _service()._model_settings(connection)
+    settings = sdk_models.build_model_settings(connection)
 
     assert settings.reasoning is not None
     assert settings.reasoning.effort == "low"
@@ -2155,6 +2348,59 @@ def test_forced_compaction_replaces_sdk_input_with_checkpoint(
     assert state.blocked_tool_call_turn_count == 0
     assert state.force_context_compaction is False
     assert "context_compacted" in state.warnings
+
+
+@pytest.mark.parametrize("effort", [None, "none", "low"])
+@pytest.mark.parametrize("optimized", [False, True])
+def test_compactor_preserves_explicit_completion_token_parameter(monkeypatch, effort, optimized):
+    from openai.types.shared import Reasoning
+    from rhetorica_backend.domain.chat import settings
+
+    monkeypatch.setattr(
+        settings, "_settings", settings.ChatSettings(context_harness_enabled=optimized)
+    )
+
+    async def run(agent, **_kwargs):
+        assert agent.model_settings.max_tokens is None
+        assert agent.model_settings.extra_args == {
+            "max_completion_tokens": 2048 if optimized else 32_000
+        }
+        assert agent.model_settings.tool_choice == "none"
+        assert agent.model_settings.reasoning.effort == (
+            effort if optimized and effort is not None else "high"
+        )
+        assert ("valid JSON object" in agent.instructions) is optimized
+        return SimpleNamespace(final_output="checkpoint")
+
+    monkeypatch.setattr(
+        "rhetorica_backend.domain.chat.orchestration.sdk_input_controller.Runner.run", run
+    )
+    runtime = AgentRuntimeInput(
+        llm_client=SimpleNamespace(
+            connection=_LlmClient.connection.model_copy(
+                update={
+                    "extra_settings": {"runtime_compaction_reasoning_effort": effort},
+                }
+            )
+        ),
+        request=ChatAskRequest(question="test"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=ToolOrchestrationState(),
+        tool_executor=_ToolExecutor(),
+    )
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=_ObservedStreamModel("succeeded"),
+        model_settings=ModelSettings(
+            extra_args={"max_completion_tokens": 32_000}, reasoning=Reasoning(effort="high")
+        ),
+        turn_control=_SdkTurnControl(max_turns=100),
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    assert asyncio.run(controller._summarize([])) == "checkpoint"
+    assert controller._model_settings.reasoning.effort == "high"
 
 
 def test_prompt_budget_threshold_compacts_sdk_input_without_force(
@@ -2596,11 +2842,11 @@ def test_native_sdk_stream_call_diagnostics(
 ) -> None:
     cancel_event = asyncio.Event()
     model = _ObservedStreamModel(outcome, cancel_event)
-    monkeypatch.setattr(AgentsSdkTurnRuntime, "_sdk_model", staticmethod(lambda **_: model))
-    original_settings = AgentsSdkTurnRuntime._model_settings
+    monkeypatch.setattr(sdk_models, "build_sdk_model", staticmethod(lambda **_: model))
+    original_settings = sdk_models.build_model_settings
     monkeypatch.setattr(
-        AgentsSdkTurnRuntime,
-        "_model_settings",
+        sdk_models,
+        "build_model_settings",
         staticmethod(
             lambda connection: original_settings(connection).resolve(ModelSettings(timeout=0.08))
         ),
@@ -2660,11 +2906,11 @@ def test_native_sdk_nonstream_call_diagnostics(
     monkeypatch: pytest.MonkeyPatch, outcome: str
 ) -> None:
     model = _ObservedStreamModel(outcome)
-    monkeypatch.setattr(AgentsSdkTurnRuntime, "_sdk_model", staticmethod(lambda **_: model))
-    original_settings = AgentsSdkTurnRuntime._model_settings
+    monkeypatch.setattr(sdk_models, "build_sdk_model", staticmethod(lambda **_: model))
+    original_settings = sdk_models.build_model_settings
     monkeypatch.setattr(
-        AgentsSdkTurnRuntime,
-        "_model_settings",
+        sdk_models,
+        "build_model_settings",
         staticmethod(
             lambda connection: original_settings(connection).resolve(ModelSettings(timeout=0.05))
         ),
@@ -2792,9 +3038,95 @@ def test_compaction_timeout_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None
     assert usage.usage_reported is False
 
 
+def test_failed_compactor_does_not_discard_pending_primary_stream_events():
+    from rhetorica_backend.domain.chat.orchestration.sdk_model_observer import (
+        SdkModelCallObserver,
+        SdkModelObservationHooks,
+    )
+
+    runtime = AgentRuntimeInput(
+        llm_client=_LlmClient(),
+        request=ChatAskRequest(question="test"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=ToolOrchestrationState(),
+        tool_executor=_ToolExecutor(),
+    )
+    observer = SdkModelCallObserver(runtime, logging.getLogger(__name__))
+    primary = observer.start(phase="tool_loop", streamed=True)
+    observer.complete(
+        primary, ModelResponse(output=[], usage=Usage(requests=1), response_id="main")
+    )
+    hooks = SdkModelObservationHooks(observer, phase="context_compaction", streamed=False)
+    asyncio.run(hooks.on_llm_start(None, None, "compact", []))
+    hooks.finish(RuntimeError("auxiliary failure"))
+    observer.observe(
+        SimpleNamespace(
+            type="raw_response_event",
+            data=ResponseTextDeltaEvent.model_construct(
+                type="response.output_text.delta", delta="answer"
+            ),
+        )
+    )
+    assert primary.diagnostics.text_chars == 6
+    assert primary.diagnostics.status == "succeeded"
+    assert runtime.state.llm_usages[1].diagnostics.status == "error"
+
+
+@pytest.mark.parametrize("raw_usage", [None, {"input_tokens": 0, "output_tokens": 0}])
+def test_final_raw_usage_presence_overrides_synthetic_stream_zeros(raw_usage):
+    from openai.types.responses import Response, ResponseUsage
+    from rhetorica_backend.domain.chat.orchestration.sdk_model_observer import SdkModelCallObserver
+
+    runtime = AgentRuntimeInput(
+        llm_client=_PlainTextLlmClient(),
+        request=ChatAskRequest(question="test"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=ToolOrchestrationState(),
+        tool_executor=_ToolExecutor(),
+    )
+    observer = SdkModelCallObserver(runtime, logging.getLogger(__name__))
+    call = observer.start(phase="tool_loop", streamed=True)
+    observer.observe(
+        SimpleNamespace(
+            type="raw_response_event",
+            data=ResponseCreatedEvent.model_construct(
+                type="response.created",
+                response=Response.model_construct(
+                    id="r",
+                    usage=ResponseUsage.model_validate({
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                    }),
+                ),
+            ),
+        )
+    )
+    observer.complete(
+        call,
+        ModelResponse(
+            output=[],
+            usage=Usage(requests=1),
+            response_id="r",
+            raw_usage=raw_usage,
+        ),
+    )
+    assert runtime.state.llm_usages[0].usage_reported is (raw_usage is not None)
+    assert runtime.state.llm_usages[0].cache_usage_reported is False
+
+
 @pytest.mark.parametrize("endpoint", ["/chat/completions", "/responses"])
 @pytest.mark.parametrize("top_p", [None, 0.0, 0.95, 1.0])
-def test_native_sdk_sends_optional_top_p(endpoint: str, top_p: float | None) -> None:
+@pytest.mark.parametrize("store", [None, False, True])
+def test_native_sdk_sends_optional_top_p_and_store(
+    endpoint: str, top_p: float | None, store: bool | None
+) -> None:
     import httpx
     from openai import AsyncOpenAI
 
@@ -2803,37 +3135,514 @@ def test_native_sdk_sends_optional_top_p(endpoint: str, top_p: float | None) -> 
     captured = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-data-logging-enabled"] == "false"
         captured.append(json.loads(request.content))
         if endpoint == "/chat/completions":
-            return httpx.Response(200, json={
-                "id": "chatcmpl-test", "object": "chat.completion", "created": 0,
-                "model": "test", "choices": [{"index": 0, "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": "OK"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            })
-        return httpx.Response(200, json={
-            "id": "resp-test", "object": "response", "created_at": 0,
-            "model": "test", "status": "completed", "output": [],
-            "parallel_tool_calls": True, "tool_choice": "auto", "tools": [],
-        })
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "OK"},
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp-test",
+                "object": "response",
+                "created_at": 0,
+                "model": "test",
+                "status": "completed",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        )
 
     async def run() -> None:
         connection = LlmConnectionConfig(
-            base_url="https://llm.example/v1", model="test", endpoint_path=endpoint,
+            base_url="https://llm.example/v1",
+            model="test",
+            endpoint_path=endpoint,
             top_p=top_p,
+            headers={"x-data-logging-enabled": "false"},
+            extra_settings={} if store is None else {"store": store},
         )
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-            client = AsyncOpenAI(api_key="test-key", base_url=connection.base_url, http_client=http)
-            model = AgentsSdkTurnRuntime._sdk_model(connection=connection, openai_client=client)
+            client = AsyncOpenAI(
+                api_key="test-key",
+                base_url=connection.base_url,
+                default_headers=connection.headers,
+                http_client=http,
+            )
+            model = sdk_models.build_sdk_model(connection=connection, openai_client=client)
             await model.get_response(
-                system_instructions="Test", input="Hello",
-                model_settings=AgentsSdkTurnRuntime._model_settings(connection),
-                tools=[], output_schema=None, handoffs=[], tracing=ModelTracing.DISABLED,
+                system_instructions="Test",
+                input="Hello",
+                model_settings=sdk_models.build_model_settings(connection),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                tracing=ModelTracing.DISABLED,
             )
 
     asyncio.run(run())
     assert len(captured) == 1
+    if store is None:
+        assert "store" not in captured[0]
+    else:
+        assert captured[0]["store"] is store
     if top_p is None:
         assert "top_p" not in captured[0]
     else:
         assert captured[0]["top_p"] == top_p
+
+
+@pytest.mark.parametrize("restart_at_25", [False, True])
+@pytest.mark.parametrize("dispatch", [False, True])
+def test_optimized_sdk_stops_at_100_and_replays_service_prefix(
+    monkeypatch, restart_at_25, dispatch
+):
+    from rhetorica_backend.domain.chat import settings as chat_settings
+
+    monkeypatch.setattr(
+        chat_settings,
+        "_settings",
+        chat_settings.ChatSettings(
+            context_harness_enabled=True,
+            tool_dispatch_enabled=dispatch,
+        ),
+    )
+    calls = []
+    compactions = []
+
+    async def summarize(_self, prefix):
+        compactions.append(prefix)
+        return json.dumps({"goal": "Complete loop"})
+
+    monkeypatch.setattr(_SdkModelInputController, "_summarize", summarize)
+
+    class LoopModel(Model):
+        async def get_response(self, *args, **kwargs):
+            view = kwargs["input"]
+            calls.append(json.loads(json.dumps(view)))
+            assert len(calls) <= 100
+            assert view[-1]["role"] == "user"
+            step = len(calls)
+            if step >= 99:
+                assert kwargs["tools"] == []
+            if restart_at_25 and step == 25:
+                state.force_context_compaction = True
+            return ModelResponse(
+                output=[
+                    ResponseFunctionToolCall(
+                        type="function_call",
+                        name="invoke_tool" if dispatch else "step",
+                        call_id=f"step-{step}",
+                        arguments=json.dumps(
+                            {"tool_id": "step", "arguments": {"value": step}}
+                            if dispatch
+                            else {"value": step}
+                        ),
+                    )
+                ],
+                usage=Usage(requests=1),
+                response_id=f"r-{step}",
+            )
+
+        async def stream_response(self, *args, **kwargs):
+            if False:
+                yield None
+
+    monkeypatch.setattr(sdk_models, "build_sdk_model", staticmethod(lambda **_: LoopModel()))
+    client = SimpleNamespace(
+        connection=_PlainTextLlmClient.connection.model_copy(
+            update={
+                "extra_settings": {
+                    "structured_output_enabled": False,
+                    "context_window_tokens": 1_000_000,
+                    "runtime_context_role": "user",
+                }
+            }
+        )
+    )
+    definition = {
+        "type": "function",
+        "function": {
+            "name": "step",
+            "description": "Test step",
+            "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}},
+        },
+    }
+    state = ToolOrchestrationState()
+    executor = _RecordingToolExecutor()
+    result = asyncio.run(
+        _service().run(
+            runtime=AgentRuntimeInput(
+                llm_client=client,
+                request=ChatAskRequest(question="loop"),
+                db_connectors=[],
+                messages=[{"role": "user", "content": "loop"}],
+                tools=[definition],
+                state=state,
+                tool_executor=executor,
+            ),
+            transport=_transport([]),
+        )
+    )
+    assert len(calls) == 100
+    assert len(executor.calls) == 98
+    assert "agent_runtime_turn_limit_reached" in result["warnings"]
+    for index, (previous, current) in enumerate(pairwise(calls), 2):
+        if restart_at_25 and index == 26:
+            continue
+        assert current[: len(previous)] == previous
+    assert len(compactions) == int(restart_at_25)
+    assert "Used 50/100" in calls[50][-1]["content"]
+    assert "You have 50 LLM turns left" in calls[50][-1]["content"]
+    assert "Used 90/100" in calls[90][-1]["content"]
+    assert "You have 10 LLM turns left" in calls[90][-1]["content"]
+    assert state.llm_usages[-1].diagnostics.context_manifest["prefix_change"] == "append_only"
+
+
+def test_dispatch_validates_schema_and_unload_without_changing_top_level_tools(monkeypatch):
+    state = ToolOrchestrationState()
+    definition = {
+        "type": "function",
+        "function": {
+            "name": "read_metric",
+            "description": "Read a metric",
+            "parameters": {
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    state.loaded_mcp_tool_definitions["read_metric"] = definition
+    executor = _RecordingToolExecutor()
+    control = _SdkTurnControl(max_turns=100)
+    control.tool_mode = "dispatch"
+    runtime = AgentRuntimeInput(
+        llm_client=_LlmClient(),
+        request=ChatAskRequest(question="read"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=state,
+        tool_executor=executor,
+    )
+    registry = _FunctionToolRegistry(
+        coordinator=_service(tool_execution_policy=ToolExecutionPolicy()),
+        runtime=runtime,
+        transport=_transport([]),
+        turn_control=control,
+    )
+    schema_before = registry.active_definitions()
+    context = SimpleNamespace(tool_call_id="call-1", tool_name="invoke_tool", agent=None)
+    invalid = asyncio.run(
+        registry._dispatch_invoke(
+            context, '{"tool_id":"read_metric","arguments":{"value":"wrong"}}'
+        )
+    )
+    assert "tool_arguments_schema_invalid" in invalid
+    assert executor.calls == []
+    valid = asyncio.run(
+        registry._dispatch_invoke(context, '{"tool_id":"read_metric","arguments":{"value":2}}')
+    )
+    assert json.loads(valid)["compact_payload"]["ok"] is True
+    assert executor.calls[0]["tool_name"] == "read_metric"
+    state.loaded_mcp_tool_definitions.clear()
+    revoked = asyncio.run(
+        registry._dispatch_invoke(context, '{"tool_id":"read_metric","arguments":{"value":2}}')
+    )
+    assert "tool_not_loaded_or_permitted" in revoked
+    assert registry.active_definitions() == schema_before
+    assert len(executor.calls) == 1
+
+
+def test_v2_compaction_preserves_exact_tail_and_externalizes_ledger(monkeypatch):
+    from rhetorica_backend.domain.chat import settings as chat_settings
+
+    monkeypatch.setattr(
+        chat_settings, "_settings", chat_settings.ChatSettings(context_harness_enabled=True)
+    )
+
+    async def summarize(self, prefix):
+        assert len(prefix) == 4
+        return json.dumps({
+            "goal": "answer the current request",
+            "facts": ["two old batches executed"],
+        })
+
+    monkeypatch.setattr(_SdkModelInputController, "_summarize", summarize)
+    state = ToolOrchestrationState(force_context_compaction=True)
+    control = _SdkTurnControl(max_turns=100)
+    control.completed_turns = 50
+    runtime = AgentRuntimeInput(
+        llm_client=_LlmClient(),
+        request=ChatAskRequest(question="current"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=state,
+        tool_executor=_ToolExecutor(),
+    )
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=SimpleNamespace(),
+        model_settings=ModelSettings(),
+        turn_control=control,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    items = [{"role": "user", "content": "current"}]
+    for i in range(5):
+        items += [
+            {"type": "function_call", "call_id": str(i), "arguments": "{}"},
+            {"type": "function_call_output", "call_id": str(i), "output": "x" * 500},
+        ]
+    with pytest.raises(_SdkCompactionRestart) as error:
+        asyncio.run(
+            controller(
+                CallModelData(
+                    model_data=ModelInputData(input=items, instructions="system"),
+                    agent=SimpleNamespace(),
+                    context=None,
+                )
+            )
+        )
+    replacement = error.value.items
+    assert replacement[0]["content"].startswith("Rhetorica context checkpoint v2")
+    assert replacement[1:8] == [items[0], *items[5:]]
+    assert control.completed_turns == 50
+    assert control.compaction_calls == 1
+    checkpoint = json.loads(replacement[0]["content"].split("\n", 1)[1])
+    assert state.tool_result_artifacts.export(
+        artifact_id=checkpoint["ledger_artifact_id"]
+    ).payload == {"calls": []}
+
+
+def test_v2_compaction_caps_calls_and_never_repeats_a_boundary(monkeypatch):
+    from rhetorica_backend.domain.chat import settings as chat_settings
+
+    monkeypatch.setattr(
+        chat_settings, "_settings", chat_settings.ChatSettings(context_harness_enabled=True)
+    )
+    summaries = []
+
+    async def summarize(_self, prefix):
+        summaries.append(prefix)
+        return '{"goal":"answer"}'
+
+    monkeypatch.setattr(_SdkModelInputController, "_summarize", summarize)
+    state = ToolOrchestrationState(force_context_compaction=True)
+    control = _SdkTurnControl(max_turns=100)
+    control.completed_turns = 50
+    runtime = AgentRuntimeInput(
+        llm_client=_LlmClient(),
+        request=ChatAskRequest(question="current"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=state,
+        tool_executor=_ToolExecutor(),
+    )
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=SimpleNamespace(),
+        model_settings=ModelSettings(),
+        turn_control=control,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+
+    def view(sequence):
+        items = [
+            {"role": "assistant", "content": str(sequence) + "x" * 2500},
+            {"role": "user", "content": "current"},
+        ]
+        return CallModelData(
+            model_data=ModelInputData(input=items, instructions=""),
+            agent=SimpleNamespace(),
+            context=None,
+        )
+
+    for sequence in range(10):
+        state.force_context_compaction = True
+        with pytest.raises(_SdkCompactionRestart):
+            asyncio.run(controller(view(sequence)))
+        state.force_context_compaction = True
+        asyncio.run(controller(view(sequence)))  # exact same old prefix already summarized
+    asyncio.run(controller(view(11)))  # new boundary, but the auxiliary budget is exhausted
+    assert len(summaries) == control.compaction_calls == 10
+    assert control.completed_turns == 50
+
+
+def test_optimized_admission_rejects_giant_protected_input_and_compactor(monkeypatch):
+    from rhetorica_backend.domain.chat import settings as chat_settings
+
+    from agents import ModelBehaviorError
+
+    monkeypatch.setattr(
+        chat_settings, "_settings", chat_settings.ChatSettings(context_harness_enabled=True)
+    )
+    runtime = AgentRuntimeInput(
+        llm_client=_LlmClient(),
+        request=ChatAskRequest(question="current"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=ToolOrchestrationState(),
+        tool_executor=_ToolExecutor(),
+    )
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=OpenAIChatCompletionsModel(model="test", openai_client=SimpleNamespace()),
+        model_settings=ModelSettings(),
+        turn_control=_SdkTurnControl(max_turns=100),
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    giant = [{"role": "user", "content": "x" * 100_000}]
+    data = CallModelData(
+        model_data=ModelInputData(input=giant, instructions=""),
+        agent=SimpleNamespace(),
+        context=None,
+    )
+    with pytest.raises(ModelBehaviorError, match="Protected context exceeds"):
+        asyncio.run(controller(data))
+    with pytest.raises(ModelBehaviorError, match="Compaction input exceeds"):
+        asyncio.run(controller._summarize(giant))
+    assert runtime.state.llm_usages == []
+
+
+def test_compaction_restart_does_not_resummarize_checkpoint_without_new_old_history(monkeypatch):
+    from rhetorica_backend.domain.chat import settings
+
+    monkeypatch.setattr(settings, "_settings", settings.ChatSettings(context_harness_enabled=True))
+    summaries = []
+
+    async def summarize(_self, prefix):
+        summaries.append(prefix)
+        return '{"goal":"answer"}'
+
+    monkeypatch.setattr(_SdkModelInputController, "_summarize", summarize)
+    state = ToolOrchestrationState(force_context_compaction=True)
+    control = _SdkTurnControl(max_turns=100)
+    runtime = AgentRuntimeInput(
+        llm_client=_LlmClient(),
+        request=ChatAskRequest(question="current"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=state,
+        tool_executor=_ToolExecutor(),
+    )
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=SimpleNamespace(),
+        model_settings=ModelSettings(),
+        turn_control=control,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    items = [{"role": "user", "content": "current"}]
+    for i in range(5):
+        items.extend([
+            {"type": "function_call", "call_id": str(i), "arguments": "{}"},
+            {"type": "function_call_output", "call_id": str(i), "output": "x" * 1000},
+        ])
+
+    def data(view):
+        return CallModelData(
+            model_data=ModelInputData(input=view, instructions=""), agent=None, context=None
+        )
+
+    with pytest.raises(_SdkCompactionRestart) as restart:
+        asyncio.run(controller(data(items)))
+    state.force_context_compaction = True
+    prepared = asyncio.run(controller(data(restart.value.items)))
+    assert len(summaries) == control.compaction_calls == 1
+    # Once another batch pushes actual history out of the protected tail,
+    # a second compaction is allowed.
+    later = [
+        *prepared.input,
+        {"type": "function_call", "call_id": "5", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "5", "output": "x" * 1000},
+    ]
+    with pytest.raises(_SdkCompactionRestart):
+        asyncio.run(controller(data(later)))
+    assert len(summaries) == control.compaction_calls == 2
+
+
+@pytest.mark.parametrize("explicit_replay", [False, True])
+def test_explicit_reasoning_replay_contract_overrides_legacy_thinking(explicit_replay):
+    connection = _ThinkingPlainTextLlmClient.connection.model_copy(deep=True)
+    connection.extra_settings["runtime_reasoning_replay"] = explicit_replay
+    model = sdk_models.build_sdk_model(connection=connection, openai_client=SimpleNamespace())
+    assert model.should_replay_reasoning_content is not None
+    assert model.should_replay_reasoning_content(SimpleNamespace()) is explicit_replay
+
+
+@pytest.mark.parametrize(
+    "outcome", ["invalid_json", "larger_summary", "provider_error", "cancelled"]
+)
+def test_optional_compaction_failure_preserves_usable_context(monkeypatch, outcome):
+    from rhetorica_backend.domain.chat import settings
+
+    monkeypatch.setattr(settings, "_settings", settings.ChatSettings(context_harness_enabled=True))
+    attempts = []
+
+    async def summarize(_self, prefix):
+        attempts.append(prefix)
+        if outcome == "cancelled":
+            raise asyncio.CancelledError()
+        if outcome == "provider_error":
+            raise RuntimeError("auxiliary provider failed")
+        return "not JSON" if outcome == "invalid_json" else json.dumps({"goal": "x" * 4000})
+
+    monkeypatch.setattr(_SdkModelInputController, "_summarize", summarize)
+    state = ToolOrchestrationState(force_context_compaction=True)
+    control = _SdkTurnControl(max_turns=100)
+    runtime = AgentRuntimeInput(
+        llm_client=_LlmClient(),
+        request=ChatAskRequest(question="current"),
+        db_connectors=[],
+        messages=[],
+        tools=[],
+        state=state,
+        tool_executor=_ToolExecutor(),
+    )
+    controller = _SdkModelInputController(
+        runtime=runtime,
+        model=SimpleNamespace(),
+        model_settings=ModelSettings(),
+        turn_control=control,
+        run_config=RunConfig(tracing_disabled=True),
+    )
+    items = [
+        {"role": "assistant", "content": "earlier fact"},
+        {"role": "user", "content": "current"},
+    ]
+    data = CallModelData(
+        model_data=ModelInputData(input=items, instructions=""), agent=None, context=None
+    )
+    if outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(controller(data))
+    else:
+        assert asyncio.run(controller(data)).input[:2] == items
+        state.force_context_compaction = True
+        assert asyncio.run(controller(data)).input[:2] == items
+        assert state.warnings
+    assert control.compaction_calls == len(attempts) == 1
+    assert control.completed_turns == 0

@@ -9,8 +9,22 @@ from rhetorica_api.app.routes import agents as agent_routes
 from rhetorica_api.app.routes import chat_stream as chat_stream_routes
 from rhetorica_api.app.routes import execution as execution_routes
 from rhetorica_api.app.settings import settings
+from rhetorica_backend.contracts.admin_integrations import (
+    GitLabConnectionConfig,
+    UpsertGitLabConnectorRequest,
+)
+from rhetorica_backend.contracts.workspaces import (
+    CreateWorkspaceRequest,
+    CreateWorkspaceResourceGrantRequest,
+    UpsertWorkspaceMembershipRequest,
+)
 from rhetorica_backend.domain.execution import build_execution_service
+from rhetorica_backend.infra.postgres.gitlab_connector_repository import (
+    GitLabConnectorRepository,
+)
 from rhetorica_backend.infra.postgres.user_repository import UserAccountRepository
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
+from rhetorica_backend.infra.secrets import InMemorySecretStore
 from rhetorica_backend.infra.security.passwords import hash_password
 
 ADMIN_LOGIN = "admin"
@@ -29,6 +43,7 @@ def _client(tmp_path: Path, *, auth_enabled: bool = False) -> TestClient:
 
     execution_routes._runtime.cache_clear()
     agent_routes._repository.cache_clear()
+    agent_routes._policy_repository.cache_clear()
     chat_stream_routes._get_factory.cache_clear()
     _user_repository.cache_clear()
 
@@ -174,6 +189,261 @@ def test_analyst_can_read_and_star_but_not_admin_mutate_agents(tmp_path: Path) -
     )
     assert blocked_response.status_code == 403
     assert blocked_response.json()["detail"] == "admin_access_denied"
+
+
+def test_governed_policy_admin_api_is_versioned_and_not_public(tmp_path: Path) -> None:
+    client = _client(tmp_path, auth_enabled=True)
+    admin_token = _login(client)
+    user_repository = UserAccountRepository(db=build_execution_service(settings.database_url)[1])
+    user_repository.create_local_user(
+        workspace_id="default",
+        login="analyst",
+        password_hash=hash_password(MEMBER_PASSWORD),
+        role="analyst",
+    )
+    analyst_token = _login(client, login="analyst", password=MEMBER_PASSWORD)
+    owner = user_repository.create_local_user(
+        workspace_id="default",
+        login="workspace-owner",
+        password_hash=hash_password(MEMBER_PASSWORD),
+        role="analyst",
+    )
+    admin = user_repository.get_by_login(workspace_id="default", login=ADMIN_LOGIN)
+    assert admin is not None
+    WorkspaceRepository(db=build_execution_service(settings.database_url)[1]).upsert_membership(
+        workspace_id="default",
+        request=UpsertWorkspaceMembershipRequest(user_id=owner.id, role="owner"),
+        actor_user_id=admin.id,
+    )
+    owner_token = _login(client, login="workspace-owner", password=MEMBER_PASSWORD)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    created = client.post(
+        "/v1/admin/agents",
+        json=_agent_payload("policy-agent", "Policy Agent"),
+        headers=headers,
+    ).json()
+    endpoint = f"/v1/admin/agents/{created['id']}/governed-policy"
+
+    initial = client.get(endpoint, params={"workspace_id": "default"}, headers=headers)
+    assert initial.status_code == 200
+    assert initial.json()["revision"] == 1
+    assert initial.json()["gitlab_write_scopes"] == []
+
+    payload = {
+        "revision": 1,
+        "gitlab_write_scopes": [],
+        "allowed_subagent_ids": [],
+        "delegation_grants": [],
+        "max_iterations": 12,
+        "max_runtime_seconds": 300,
+    }
+    saved = client.put(endpoint, params={"workspace_id": "default"}, json=payload, headers=headers)
+    assert saved.status_code == 200
+    assert saved.json()["revision"] == 2
+
+    stale = client.put(endpoint, params={"workspace_id": "default"}, json=payload, headers=headers)
+    assert stale.status_code == 409
+    assert stale.json()["detail"] == {
+        "reason_code": "policy_revision_conflict",
+        "current_revision": 2,
+    }
+    default_policy = client.get(
+        "/v1/admin/default-assistant-policy",
+        params={"workspace_id": "default"},
+        headers=headers,
+    )
+    assert default_policy.status_code == 200
+    assert default_policy.json()["revision"] == 1
+    default_saved = client.put(
+        "/v1/admin/default-assistant-policy",
+        params={"workspace_id": "default"},
+        json={**payload, "max_iterations": 8},
+        headers=headers,
+    )
+    assert default_saved.status_code == 200
+    assert default_saved.json()["revision"] == 2
+    assert default_saved.json()["max_iterations"] == 8
+
+    forbidden = client.get(
+        endpoint,
+        params={"workspace_id": "default"},
+        headers={"Authorization": f"Bearer {analyst_token}"},
+    )
+    assert forbidden.status_code == 403
+
+    owner_forbidden = client.get(
+        endpoint,
+        params={"workspace_id": "default"},
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert owner_forbidden.status_code == 403
+    assert owner_forbidden.json()["detail"] == "admin_access_denied"
+
+    public = client.get(
+        "/v1/agents",
+        params={"workspace_id": "default"},
+        headers={"Authorization": f"Bearer {analyst_token}"},
+    ).json()[0]
+    assert "gitlab_write_scopes" not in public
+    assert "delegation_grants" not in public
+
+
+def test_governed_policy_rejects_workspace_mismatch_and_ineligible_children(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, auth_enabled=True)
+    admin_token = _login(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    runtime = build_execution_service(settings.database_url)[1]
+    users = UserAccountRepository(runtime)
+    admin = users.get_by_login(workspace_id="default", login=ADMIN_LOGIN)
+    assert admin is not None
+    workspaces = WorkspaceRepository(runtime)
+    workspaces.create(
+        CreateWorkspaceRequest(id="foreign", name="Foreign"),
+        actor_user_id=admin.id,
+    )
+    foreign_token = client.post(
+        "/v1/workspaces/foreign/select",
+        headers=headers,
+    ).json()["access_token"]
+    foreign_headers = {"Authorization": f"Bearer {foreign_token}"}
+
+    parent = client.post(
+        "/v1/admin/agents",
+        json=_agent_payload("parent", "Parent"),
+        headers=headers,
+    ).json()
+    inactive = client.post(
+        "/v1/admin/agents",
+        json=_agent_payload("inactive-child", "Inactive child", is_active=False),
+        headers=headers,
+    ).json()
+    foreign_payload = _agent_payload("foreign-child", "Foreign child")
+    foreign_payload["workspace_id"] = "foreign"
+    foreign = client.post(
+        "/v1/admin/agents",
+        json=foreign_payload,
+        headers=foreign_headers,
+    ).json()
+    endpoint = f"/v1/admin/agents/{parent['id']}/governed-policy"
+
+    mismatch = client.get(
+        endpoint,
+        params={"workspace_id": "foreign"},
+        headers=foreign_headers,
+    )
+    assert mismatch.status_code == 404
+    assert mismatch.json()["detail"] == "agent_policy_target_not_found"
+
+    for child_id in (inactive["id"], foreign["id"]):
+        rejected = client.put(
+            endpoint,
+            params={"workspace_id": "default"},
+            json={
+                "revision": 1,
+                "gitlab_write_scopes": [],
+                "allowed_subagent_ids": [child_id],
+                "delegation_grants": [],
+                "max_iterations": 100,
+                "max_runtime_seconds": 1200,
+            },
+            headers=headers,
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["detail"] == "unknown_allowed_subagent"
+
+
+def test_governed_policy_uses_live_shared_connector_and_records_audit(tmp_path: Path) -> None:
+    client = _client(tmp_path, auth_enabled=True)
+    admin_token = _login(client)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    runtime = build_execution_service(settings.database_url)[1]
+    users = UserAccountRepository(runtime)
+    admin = users.get_by_login(workspace_id="default", login=ADMIN_LOGIN)
+    assert admin is not None
+    workspaces = WorkspaceRepository(runtime)
+    workspaces.create(
+        CreateWorkspaceRequest(id="platform", name="Platform"),
+        actor_user_id=admin.id,
+    )
+    connector = GitLabConnectorRepository(
+        runtime,
+        secret_store=InMemorySecretStore(),
+    ).upsert(
+        UpsertGitLabConnectorRequest(
+            name="source-gitlab",
+            workspace_id="platform",
+            connection=GitLabConnectionConfig(
+                base_url="https://gitlab.example.test",
+                use_when="API policy test",
+            ),
+        )
+    )
+    grant = workspaces.create_resource_grant(
+        CreateWorkspaceResourceGrantRequest(
+            resource_kind="gitlab_connector",
+            resource_id=connector.id,
+            owner_workspace_id="platform",
+            recipient_workspace_id="default",
+            alias="shared-gitlab",
+        ),
+        actor_user_id=admin.id,
+    )
+    parent_payload = _agent_payload("publisher", "Publisher")
+    parent_payload["allowed_gitlab_connector_names"] = ["shared-gitlab"]
+    parent = client.post(
+        "/v1/admin/agents",
+        json=parent_payload,
+        headers=headers,
+    ).json()
+    endpoint = f"/v1/admin/agents/{parent['id']}/governed-policy"
+    policy = {
+        "revision": 1,
+        "gitlab_write_scopes": [
+            {
+                "connector_id": connector.id,
+                "project_id": "analytics/rhetorica",
+                "target_branches": ["feature/policy"],
+                "allowed_paths": ["packages/backend"],
+            }
+        ],
+        "allowed_subagent_ids": [],
+        "delegation_grants": [],
+        "max_iterations": 20,
+        "max_runtime_seconds": 300,
+    }
+
+    saved = client.put(
+        endpoint,
+        params={"workspace_id": "default"},
+        json=policy,
+        headers=headers,
+    )
+    assert saved.status_code == 200
+    audit = workspaces.list_audit(workspace_id="default")
+    policy_events = [
+        event
+        for event in audit
+        if event.target_type == "agent_governed_policy" and event.target_id == parent["id"]
+    ]
+    assert len(policy_events) == 1
+    assert policy_events[0].previous_value["revision"] == 1
+    assert policy_events[0].current_value["revision"] == 2
+
+    assert workspaces.revoke_resource_grant(
+        grant_id=grant.id,
+        workspace_id="default",
+        actor_user_id=admin.id,
+    )
+    rejected = client.put(
+        endpoint,
+        params={"workspace_id": "default"},
+        json={**policy, "revision": 2},
+        headers=headers,
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == "gitlab_connector_not_accessible"
 
 
 def test_chat_conversation_pins_agent_and_rejects_switch(tmp_path: Path) -> None:

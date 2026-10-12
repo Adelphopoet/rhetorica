@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from hashlib import sha256
+from typing import cast
 from uuid import uuid4
 
 from rhetorica_backend.contracts.connectors import ConnectorItem, UpsertConnectorRequest
-from rhetorica_backend.contracts.execution import EngineConnectionConfig
+from rhetorica_backend.contracts.execution import EngineConnectionConfig, EngineType
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.models import ConnectorConfigOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 from rhetorica_backend.infra.secrets import SecretStore, SecretStoreError, get_secret_store
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +22,7 @@ class ConnectorRepository:
     def __init__(self, db: DatabaseRuntime, secret_store: SecretStore | None = None):
         self._db = db
         self._secret_store = secret_store or get_secret_store()
+        self._workspace_resources = WorkspaceRepository(db=db)
 
     def upsert(self, request: UpsertConnectorRequest) -> ConnectorItem:
         now = datetime.now(tz=UTC)
@@ -163,18 +167,37 @@ class ConnectorRepository:
                 stmt = stmt.limit(limit)
             rows = session.execute(stmt).scalars().all()
 
-        return [self._to_contract(row) for row in rows]
+        result = [self._to_contract(row) for row in rows]
+        local_names = {item.name for item in result}
+        for grant in self._workspace_resources.list_resource_grants(workspace_id=workspace_id):
+            if (
+                not grant.is_active
+                or grant.resource_kind != WorkspaceResourceKind.DATABASE_CONNECTOR
+                or grant.alias in local_names
+            ):
+                continue
+            with self._db.session() as session:
+                row = session.get(ConnectorConfigOrm, grant.resource_id)
+            if row is None or row.workspace_id != grant.owner_workspace_id or not row.is_active:
+                continue
+            result.append(self._to_contract(row, workspace_id=workspace_id, name=grant.alias))
+            if limit is not None and len(result) >= limit:
+                break
+        return result[:limit] if limit is not None else result
 
     def get(self, workspace_id: str, name: str) -> ConnectorItem | None:
+        resolved = self._workspace_resources.resolve_resource(
+            workspace_id=workspace_id,
+            resource_kind=WorkspaceResourceKind.DATABASE_CONNECTOR,
+            alias=name,
+        )
+        if resolved is None:
+            return None
         with self._db.session() as session:
-            stmt = select(ConnectorConfigOrm).where(
-                ConnectorConfigOrm.workspace_id == workspace_id,
-                ConnectorConfigOrm.name == name,
-            )
-            row = session.execute(stmt).scalar_one_or_none()
+            row = session.get(ConnectorConfigOrm, resolved.resource_id)
         if row is None:
             return None
-        return self._to_contract(row)
+        return self._to_contract(row, workspace_id=workspace_id, name=name)
 
     def get_connection(self, workspace_id: str, name: str) -> EngineConnectionConfig | None:
         return self.get_connection_for_execution(workspace_id=workspace_id, name=name)
@@ -182,17 +205,24 @@ class ConnectorRepository:
     def get_connection_for_execution(
         self, workspace_id: str, name: str
     ) -> EngineConnectionConfig | None:
+        resolved = self._workspace_resources.resolve_resource(
+            workspace_id=workspace_id,
+            resource_kind=WorkspaceResourceKind.DATABASE_CONNECTOR,
+            alias=name,
+        )
+        if resolved is None:
+            return None
         with self._db.session() as session:
             stmt = select(ConnectorConfigOrm).where(
-                ConnectorConfigOrm.workspace_id == workspace_id,
-                ConnectorConfigOrm.name == name,
+                ConnectorConfigOrm.id == resolved.resource_id,
+                ConnectorConfigOrm.workspace_id == resolved.owner_workspace_id,
                 ConnectorConfigOrm.is_active.is_(True),
             )
             row = session.execute(stmt).scalar_one_or_none()
         if row is None:
             return None
         return EngineConnectionConfig(
-            engine=row.engine,
+            engine=cast(EngineType, row.engine),
             host=row.host,
             port=row.port,
             username=row.username,
@@ -205,6 +235,45 @@ class ConnectorRepository:
             verify=row.verify,
             extra_settings=row.extra_settings,
             extra_credentials=self._resolve_extra_credentials(row),
+        )
+
+    def get_connection_by_id_for_execution(
+        self, *, workspace_id: str, connector_id: str
+    ) -> tuple[str, EngineConnectionConfig] | None:
+        """Resolve a live accessible connector by immutable ID, returning its workspace alias."""
+        resolved = self._workspace_resources.resolve_resource_id(
+            workspace_id=workspace_id,
+            resource_kind=WorkspaceResourceKind.DATABASE_CONNECTOR,
+            resource_id=connector_id,
+        )
+        if resolved is None:
+            return None
+        with self._db.session() as session:
+            stmt = select(ConnectorConfigOrm).where(
+                ConnectorConfigOrm.id == connector_id,
+                ConnectorConfigOrm.workspace_id == resolved.owner_workspace_id,
+                ConnectorConfigOrm.is_active.is_(True),
+            )
+            row = session.execute(stmt).scalar_one_or_none()
+        if row is None:
+            return None
+        return (
+            resolved.alias,
+            EngineConnectionConfig(
+                engine=cast(EngineType, row.engine),
+                host=row.host,
+                port=row.port,
+                username=row.username,
+                password=self._resolve_password(row),
+                usage_description=row.usage_description,
+                database=row.database,
+                catalog=row.catalog,
+                schema=row.schema_name,
+                secure=row.secure,
+                verify=row.verify,
+                extra_settings=row.extra_settings,
+                extra_credentials=self._resolve_extra_credentials(row),
+            ),
         )
 
     def delete(self, connector_id: str, workspace_id: str) -> bool:
@@ -220,9 +289,14 @@ class ConnectorRepository:
             return True
 
     @staticmethod
-    def _to_contract(row: ConnectorConfigOrm) -> ConnectorItem:
+    def _to_contract(
+        row: ConnectorConfigOrm,
+        *,
+        workspace_id: str | None = None,
+        name: str | None = None,
+    ) -> ConnectorItem:
         connection = EngineConnectionConfig(
-            engine=row.engine,
+            engine=cast(EngineType, row.engine),
             host=row.host,
             port=row.port,
             username=row.username,
@@ -234,12 +308,14 @@ class ConnectorRepository:
             secure=row.secure,
             verify=row.verify,
             extra_settings=row.extra_settings,
-            extra_credentials=dict.fromkeys(sorted((row.extra_credential_secret_refs or {}).keys())),
+            extra_credentials=dict.fromkeys(
+                sorted((row.extra_credential_secret_refs or {}).keys())
+            ),
         )
         return ConnectorItem(
             id=row.id,
-            name=row.name,
-            workspace_id=row.workspace_id,
+            name=name or row.name,
+            workspace_id=workspace_id or row.workspace_id,
             is_active=row.is_active,
             connection=connection,
             has_password=bool(row.password_secret_ref or row.password),

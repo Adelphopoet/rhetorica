@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from rhetorica_backend.domain.coding.errors import CodingRunError
 from rhetorica_backend.domain.scenarios.errors import WorkflowError
 from rhetorica_backend.infra.langfuse import install_langfuse
 from rhetorica_backend.infra.logging import configure_logging, get_logger
@@ -19,12 +20,15 @@ from rhetorica_api.app.oauth import validate_oauth_public_urls
 from rhetorica_api.app.rate_limits import close_api_rate_limit_runtime, install_api_rate_limits
 from rhetorica_api.app.request_logging import install_request_logging
 from rhetorica_api.app.routes.agents import admin_router as admin_agents_router
+from rhetorica_api.app.routes.agents import policy_router as admin_agent_policies_router
 from rhetorica_api.app.routes.agents import router as agents_router
 from rhetorica_api.app.routes.airflow_connectors import router as airflow_connectors_router
 from rhetorica_api.app.routes.analysis_exports import router as analysis_exports_router
 from rhetorica_api.app.routes.auth import router as auth_router
 from rhetorica_api.app.routes.chat import router as chat_router
 from rhetorica_api.app.routes.chat_stream import router as chat_stream_router
+from rhetorica_api.app.routes.coding_environments import router as coding_environments_router
+from rhetorica_api.app.routes.coding_runs import router as coding_runs_router
 from rhetorica_api.app.routes.connectors import router as connectors_router
 from rhetorica_api.app.routes.documentation_connectors import (
     router as documentation_connectors_router,
@@ -50,6 +54,8 @@ from rhetorica_api.app.routes.victoriametrics_connectors import (
     router as victoriametrics_connectors_router,
 )
 from rhetorica_api.app.routes.workspace_skills import router as workspace_skills_router
+from rhetorica_api.app.routes.workspaces import admin_router as admin_workspaces_router
+from rhetorica_api.app.routes.workspaces import router as workspaces_router
 from rhetorica_api.app.settings import settings
 from rhetorica_api.app.telemetry import install_api_telemetry
 
@@ -108,6 +114,10 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.exception_handler(CodingRunError)
+    async def coding_error_handler(_request: Request, exc: CodingRunError) -> JSONResponse:
+        return JSONResponse({"detail": exc.code, "code": exc.code}, status_code=exc.status_code)
+
     @app.exception_handler(WorkflowError)
     async def workflow_error_handler(_request: Request, exc: WorkflowError) -> JSONResponse:
         return JSONResponse(
@@ -126,6 +136,9 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(agents_router)
     app.include_router(admin_agents_router)
+    app.include_router(admin_agent_policies_router)
+    app.include_router(coding_environments_router)
+    app.include_router(coding_runs_router)
     app.include_router(users_router)
     app.include_router(sql_guard_router)
     app.include_router(execution_router)
@@ -142,6 +155,8 @@ def create_app() -> FastAPI:
     app.include_router(victoriametrics_connectors_router)
     app.include_router(rag_connectors_router)
     app.include_router(workspace_skills_router)
+    app.include_router(workspaces_router)
+    app.include_router(admin_workspaces_router)
     app.include_router(rag_insights_review_router)
     app.include_router(scenarios_router)
     app.include_router(analysis_exports_router)

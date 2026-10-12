@@ -272,6 +272,11 @@ class ScenarioRunRepository:
                 raise
             return run_contract(run)
 
+    def coding_node_ids(self, run_id: str, user: UserAccountItem) -> list[str]:
+        with self.db.session() as session:
+            run = owned_run(session, run_id, user)
+            return [str(node["id"]) for node in run.definition.get("nodes", []) if node.get("type") == "coding_task"]
+
     def get(self, run_id: str, user: UserAccountItem) -> tuple[ScenarioRun, str | None]:
         with self.db.session() as session:
             run = owned_run(session, run_id, user)

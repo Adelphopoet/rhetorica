@@ -213,6 +213,9 @@ class ChatOrchestrator:
         Returns:
             Chat response.
         """
+        if request.coding_mode or request.coding_resources is not None:
+            from rhetorica_backend.domain.coding.errors import CodingRunError
+            raise CodingRunError("channel_not_allowed", status_code=403)
         self._logger.info(
             "chat.ask.started",
             extra={

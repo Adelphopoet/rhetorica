@@ -21,11 +21,20 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent,
     ResponseTextDeltaEvent,
 )
-from rhetorica_backend.domain.chat.llm.llm_client import LlmCallDiagnostics, LlmCallUsage
+from rhetorica_backend.domain.chat.llm.llm_client import LlmCallDiagnostics, LlmCallUsage, LlmClient
 from rhetorica_backend.domain.chat.orchestration.agent_runtime import AgentRuntimeInput
+from rhetorica_backend.domain.chat.orchestration.provider_usage import (
+    inclusive_input_tokens,
+    normalize_cache_usage,
+)
 
 from agents import ModelTimeoutError, RunHooks
 from agents.items import ModelResponse
+
+from ..llm.token_budget import LlmPromptBudgetService
+from ..settings import get_chat_settings
+from .context_projection import ModelCallManifest
+from .provider_capabilities import ProviderRuntimeCapabilities
 
 
 @dataclass
@@ -79,19 +88,26 @@ class SdkModelCallObserver:
         details = usage.input_tokens_details
         cached = int(getattr(details, "cached_tokens", 0) or 0)
         cache_write = int(getattr(details, "cache_write_tokens", 0) or 0)
+        cache = normalize_cache_usage(response.raw_usage)
         current = self._runtime.state.llm_usages[call.usage_index]
+        input_tokens = inclusive_input_tokens(
+            response.raw_usage,
+            sdk_input=int(usage.input_tokens or 0),
+            usage_format=ProviderRuntimeCapabilities.from_settings(
+                self._runtime.llm_client.connection.extra_settings
+            ).usage_format,
+        )
         self._runtime.state.llm_usages[call.usage_index] = replace(
             current,
-            prompt_tokens=int(usage.input_tokens or 0),
+            prompt_tokens=input_tokens,
             completion_tokens=int(usage.output_tokens or 0),
-            total_tokens=int(usage.total_tokens or 0),
-            retries=max(0, usage.requests - 1),
-            cached_input_tokens=cached,
-            cache_write_input_tokens=cache_write,
-            cache_usage_reported=bool(cached or cache_write),
+            total_tokens=input_tokens + int(usage.output_tokens or 0),
+            retries=max(current.retries, usage.requests - 1, 0),
+            cached_input_tokens=cache.read_tokens if cache.reported else cached,
+            cache_write_input_tokens=cache.write_tokens if cache.write_reported else cache_write,
+            cache_usage_reported=cache.reported or bool(cached),
             usage_reported=(
-                current.usage_reported
-                or response.raw_usage is not None
+                response.raw_usage is not None
                 or bool(usage.input_tokens or usage.output_tokens or usage.total_tokens)
             ),
         )
@@ -122,19 +138,17 @@ class SdkModelCallObserver:
         response = getattr(data, "response", None)
         if isinstance(response, Response):
             diagnostic.response_id = response.id
-            if response.usage is not None:
+            if response.usage is not None and diagnostic.status == "running":
+                cache = normalize_cache_usage(response.usage)
                 current = self._runtime.state.llm_usages[call.usage_index]
                 self._runtime.state.llm_usages[call.usage_index] = replace(
                     current,
                     prompt_tokens=response.usage.input_tokens,
                     completion_tokens=response.usage.output_tokens,
                     total_tokens=response.usage.total_tokens,
-                    cached_input_tokens=response.usage.input_tokens_details.cached_tokens,
-                    cache_write_input_tokens=response.usage.input_tokens_details.cache_write_tokens,
-                    cache_usage_reported=bool(
-                        response.usage.input_tokens_details.cached_tokens
-                        or response.usage.input_tokens_details.cache_write_tokens
-                    ),
+                    cached_input_tokens=cache.read_tokens,
+                    cache_write_input_tokens=cache.write_tokens,
+                    cache_usage_reported=cache.reported,
                     usage_reported=True,
                 )
         if isinstance(data, ResponseTextDeltaEvent):
@@ -168,19 +182,57 @@ class SdkModelCallObserver:
             diagnostic.first_chunk_at = now
             self._log("llm.call.first_chunk", call)
 
-    def finish(self, error: BaseException | None = None) -> None:
-        """Close unfinished calls only; errors outside an LLM never relabel earlier calls."""
-        for call in self._calls:
+    def credential_attempt(self, *, attempt: int, **_fields: Any) -> None:
+        for call in reversed(self._calls):
             if call.diagnostics.status == "running":
+                current = self._runtime.state.llm_usages[call.usage_index]
+                self._runtime.state.llm_usages[call.usage_index] = replace(
+                    current, retries=max(current.retries, attempt - 1)
+                )
+                break
+
+    def compaction_manifest(self, instructions: str, items: list[Any]) -> dict[str, Any]:
+        connection = self._runtime.llm_client.connection
+        configured_window = connection.extra_settings.get("context_window_tokens")
+        budget = LlmPromptBudgetService(
+            model_name=connection.model,
+            context_window_tokens=configured_window if isinstance(configured_window, int) else None,
+            response_reserve_tokens=2048,
+        )
+        if not get_chat_settings().context_harness_enabled:
+            budget = LlmClient(connection).build_prompt_budget_service()
+        estimate = budget.estimate_request(
+            messages=[{"role": "system", "content": instructions}, *items]
+        ).tokens
+        return ModelCallManifest().build(
+            instructions=instructions,
+            tools=[],
+            items=items,
+            estimated_tokens=estimate,
+            budget_tokens=budget.prompt_budget_tokens(),
+            reason="auxiliary_compaction",
+            instructions_version=(
+                "context-compactor-v2" if get_chat_settings().context_harness_enabled
+                else "context-compactor-v1"
+            ),
+        )
+
+    def finish(self, error: BaseException | None = None, *, call: _Call | None = None) -> None:
+        """Close unfinished calls only; errors outside an LLM never relabel earlier calls."""
+        for current_call in [call] if call is not None else self._calls:
+            if current_call.diagnostics.status == "running":
                 status = "error"
                 if isinstance(error, ModelTimeoutError):
                     status = "timeout"
                 elif isinstance(error, asyncio.CancelledError):
                     status = "cancelled"
-                call.diagnostics.error_type = type(error).__name__ if error is not None else None
-                self._end(call, status)
-            self._log_completed(call)
-        self._streams.clear()
+                current_call.diagnostics.error_type = type(error).__name__ if error is not None else None
+                self._end(current_call, status)
+            self._log_completed(current_call)
+        if call is None:
+            self._streams.clear()
+        else:
+            self._streams = deque(item for item in self._streams if item is not call)
 
     def _end(self, call: _Call, status: str) -> None:
         call.diagnostics.status = status
@@ -208,6 +260,11 @@ class SdkModelCallObserver:
                 "model": usage.model,
                 "phase": usage.phase,
                 "duration_ms": usage.duration_ms,
+                "http_retries": usage.retries,
+                "input_tokens": usage.prompt_tokens,
+                "output_tokens": usage.completion_tokens,
+                "cached_input_tokens": usage.cached_input_tokens,
+                "cache_usage_reported": usage.cache_usage_reported,
                 "usage_reported": usage.usage_reported,
                 **asdict(call.diagnostics),
             },
@@ -227,7 +284,15 @@ class SdkModelObservationHooks(RunHooks[Any]):
         self, context: Any, agent: Any, system_prompt: Any, input_items: Any
     ) -> None:
         self._call = self._observer.start(phase=self._phase, streamed=self._streamed)
+        if self._phase == "context_compaction":
+            self._call.diagnostics.context_manifest = self._observer.compaction_manifest(
+                system_prompt or "", input_items
+            )
 
     async def on_llm_end(self, context: Any, agent: Any, response: ModelResponse) -> None:
         if self._call is not None:
             self._observer.complete(self._call, response)
+
+    def finish(self, error: BaseException) -> None:
+        if self._call is not None:
+            self._observer.finish(error, call=self._call)

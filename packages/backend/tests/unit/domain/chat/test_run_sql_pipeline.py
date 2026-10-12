@@ -54,8 +54,6 @@ def test_successful_sql_execution_does_not_require_legacy_metadata_usage_hook() 
         referenced_tables=["dm.orders_daily_report"],
         referenced_columns=["net_revenue"],
     )
-    optimizer = MagicMock()
-    optimizer.should_optimize.return_value = False
     support = SimpleNamespace(
         _requested_connector_name=lambda arguments: arguments.get("connector_name"),
         _prefer_context_connector=lambda **kwargs: kwargs["selected_connector"],
@@ -78,7 +76,6 @@ def test_successful_sql_execution_does_not_require_legacy_metadata_usage_hook() 
     pipeline = RunSqlPipeline(
         sql_router=sql_router,
         semantic_preflight_service=preflight,
-        sql_optimization_service=optimizer,
         support=support,
     )
 

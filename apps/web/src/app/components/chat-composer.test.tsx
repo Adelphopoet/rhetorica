@@ -252,3 +252,36 @@ describe("ChatComposer", () => {
     expect(screen.getByRole("button", { name: /Разместить внизу/i })).toBeInTheDocument();
   });
 });
+
+it("places coding after the agent selector and filters agents in the menu", () => {
+  useAgentMenuStore.setState({ agentMenuOpen: false, agentMenuPulse: false });
+  const select = vi.fn();
+  render(<ChatComposer value="" loading={false} chatWidth={1100} dock="bottom" onToggleDock={vi.fn()} dockWidth={380} dockHeight={300} onResizeDockWidth={vi.fn()} onResizeDockHeight={vi.fn()} agents={[makeAgent(1), makeAgent(2)]} onSelectAgent={select} codingControls={<button>Coding test</button>} onChange={vi.fn()} onSubmit={vi.fn()} onCancel={vi.fn()} />);
+  const agent = screen.getByRole("button", { name: "Агент" });
+  expect(agent.compareDocumentPosition(screen.getByRole("button", { name: "Coding test" })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(agent);
+  const search = screen.getByRole("searchbox", { name: "Поиск агента" });
+  fireEvent.change(search, { target: { value: "Agent 2" } });
+  expect(screen.queryByRole("menuitemradio", { name: /Agent 1/ })).not.toBeInTheDocument();
+  const target = screen.getByRole("menuitemradio", { name: /Agent 2/ });
+  fireEvent.keyDown(search, { key: "ArrowDown" });
+  expect(target).toHaveFocus();
+  fireEvent.click(target);
+  expect(select).toHaveBeenCalledWith("agent-2");
+});
+
+it("offers coding teams beside agents and labels the selected team", () => {
+  const onSelectTeam = vi.fn();
+  const team = { id: "team-1", name: "dbt team", available: true, coordinator_agent_profile_id: "agent-1", members: [{ id: "engineer", label: "Data engineer", capability: "candidate" as const }, { id: "reviewer", label: "Reviewer", capability: "review" as const }] };
+  const props = { value: "", loading: false, chatWidth: 1100 as const, dock: "bottom" as const, onToggleDock: vi.fn(), dockWidth: 380, dockHeight: 500, onResizeDockWidth: vi.fn(), onResizeDockHeight: vi.fn(), onChange: () => undefined, onSubmit: () => undefined, onCancel: () => undefined, agents: [makeAgent(1)], teams: [team], onSelectTeam };
+  const { rerender } = render(<ChatComposer {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "Агент" }));
+
+  const row = screen.getByRole("menuitemradio", { name: /dbt team/ });
+  expect(row).toHaveTextContent("Координатор: Agent 1 · Data engineer, Reviewer");
+  fireEvent.click(row);
+  expect(onSelectTeam).toHaveBeenCalledWith(team);
+
+  rerender(<ChatComposer {...props} selectedAgentId="agent-1" selectedTeamId="team-1" />);
+  expect(screen.getByRole("button", { name: "Агент" })).toHaveTextContent("dbt team · команда");
+});

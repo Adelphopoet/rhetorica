@@ -180,6 +180,16 @@ def validate_workflow(definition: ScenarioWorkflowDefinition) -> WorkflowValidat
             issue("sql_configuration_required", "Укажите коннектор и SQL.", key)
         if node.type == "python" and not node.code.strip():
             issue("python_code_required", "Добавьте Python-код.", key)
+        if node.type == "coding_task":
+            if definition.schema_version != 2:
+                issue("coding_task_requires_schema_v2", "Разработка требует версию схемы 2", key)
+            for field in ["root_agent_id", "developer_agent_id", "qa_agent_id", "gitlab_connector_id", "project_id", "target_branch", "environment_profile_id"]:
+                if not getattr(node, field):
+                    issue("coding_configuration_required", f"Выберите {field}", key, field)
+            if "task" not in node.inputs or node.inputs["task"].type != "string":
+                issue("coding_task_input_required", "Подключите текст задания к входу task", key, "task")
+            if node.developer_agent_id and node.developer_agent_id == node.qa_agent_id:
+                issue("independent_qa_agent_required", "Developer и QA должны быть разными агентами", key)
         if node.type == "llm":
             if not node.agent_id:
                 issue("agent_required", "Выберите агента.", key, "agent_id")

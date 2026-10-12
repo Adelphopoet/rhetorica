@@ -445,7 +445,6 @@ def llm_request_failed_payload(
             else (state.execution.model_dump(mode="json") if state.execution else None)
         ),
         "visualization": None,
-        "optimization_trace": state.optimization_trace.model_dump(mode="json"),
         "capability_trace": build_capability_trace_from_state(
             state=state,
             metadata_sources=sorted(state.metadata_sources),

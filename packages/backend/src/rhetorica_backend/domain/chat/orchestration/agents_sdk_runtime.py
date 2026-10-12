@@ -10,21 +10,20 @@ import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
-from typing import Any, Generic, Literal, TypeVar, cast
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any, Generic, TypeVar, cast
 
 import httpx2
 from openai import AsyncOpenAI, BadRequestError, NotFoundError, UnprocessableEntityError
 from openai.types.responses import (
+    ResponseFunctionToolCall,
     ResponseReasoningItem,
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseReasoningTextDeltaEvent,
     ResponseTextDeltaEvent,
 )
-from openai.types.shared import Reasoning
 from rhetorica_backend.domain.chat.error_contract import ErrorCategory, classify_exception
+from rhetorica_backend.domain.chat.llm import sdk_models
 from rhetorica_backend.domain.chat.llm.llm_client import LlmClient
-from rhetorica_backend.domain.chat.llm.prompt_builder import PromptBuilder
 from rhetorica_backend.domain.chat.orchestration.agent_runtime import (
     AgentIterationContext,
     AgentRuntimeInput,
@@ -32,20 +31,11 @@ from rhetorica_backend.domain.chat.orchestration.agent_runtime import (
     AgentRuntimeTransport,
 )
 from rhetorica_backend.domain.chat.orchestration.final_response_contract import (
-    SUBMIT_FINAL_ANSWER_TOOL_NAME,
     ChatFinalResponseContractV1,
     final_response_json_schema,
-    final_response_tool_schema,
-)
-from rhetorica_backend.domain.chat.orchestration.loop_limit_awareness import (
-    loop_limit_notice_content,
-    should_force_finalization,
 )
 from rhetorica_backend.domain.chat.orchestration.models import (
-    ExecuteToolCallPlan,
-    RejectRepeatedToolCallPlan,
     SuccessfulTurnCompletion,
-    ToolCallRequest,
 )
 from rhetorica_backend.domain.chat.orchestration.sdk_model_observer import (
     SdkModelCallObserver,
@@ -65,23 +55,25 @@ from rhetorica_backend.infra.langfuse import (
 from agents import (
     Agent,
     AgentOutputSchema,
-    FunctionTool,
-    FunctionToolResult,
     MaxTurnsExceeded,
     ModelBehaviorError,
-    ModelSettings,
     RunConfig,
     Runner,
-    ToolsToFinalOutputResult,
+    ToolExecutionConfig,
     UserError,
 )
 from agents.items import ModelResponse, ToolCallItem, ToolCallOutputItem
 from agents.models.interface import Model
-from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-from agents.models.openai_responses import OpenAIResponsesModel
-from agents.models.reasoning_content_replay import ReasoningContentReplayContext
-from agents.run_config import CallModelData, ModelInputData
-from agents.tool_context import ToolContext
+
+from .provider_capabilities import ProviderRuntimeCapabilities
+from .sdk_input_controller import _SdkModelInputController
+from .sdk_runtime_contracts import (
+    AgentsSdkCapabilityError,
+    _SdkCompactionRestart,
+    _SdkTurnControl,
+    _TransportStop,
+)
+from .sdk_tool_registry import _FunctionToolRegistry
 
 TState = TypeVar("TState", bound=ToolOrchestrationState)
 TResult = TypeVar("TResult")
@@ -105,48 +97,6 @@ def build_agent_run_config() -> RunConfig:
         trace_include_sensitive_data=langfuse_capture_content(),
         tool_not_found_behavior="return_error_to_model",
     )
-
-
-def _replay_provider_reasoning_content(_context: ReasoningContentReplayContext) -> bool:
-    """Preserve explicit provider thinking context across SDK-managed tool turns."""
-    return True
-
-
-class AgentsSdkCapabilityError(RuntimeError):
-    """Configured connector cannot satisfy the required Agents SDK contract."""
-
-
-class _TransportStop(Exception):
-    def __init__(self, payload: Any) -> None:
-        super().__init__("transport requested runtime stop")
-        self.payload = payload
-
-
-class _SdkCompactionRestart(Exception):
-    """Restart the public SDK run from a compacted, self-contained checkpoint."""
-
-    def __init__(self, checkpoint: dict[str, Any]) -> None:
-        super().__init__("restart Agents SDK run from compacted checkpoint")
-        self.checkpoint = checkpoint
-
-
-class _SdkTurnControl:
-    """Exact SDK model-call counter shared by hooks, tools and input filtering."""
-
-    def __init__(self, *, max_turns: int) -> None:
-        self.max_turns = max_turns
-        self.completed_turns = 0
-
-    @property
-    def current_iteration(self) -> int:
-        return self.completed_turns
-
-    @property
-    def tools_enabled(self) -> bool:
-        return not should_force_finalization(
-            completed_turns=self.completed_turns,
-            max_iterations=self.max_turns,
-        )
 
 
 class _CredentialAwareSdkModel(Model):
@@ -204,9 +154,7 @@ class _CredentialAwareSdkModel(Model):
         self._observe_credential(
             attempt=attempt,
             credential_reused=selected_index == previous_index,
-            credential_switched=(
-                previous_index is not None and selected_index != previous_index
-            ),
+            credential_switched=(previous_index is not None and selected_index != previous_index),
             outcome=outcome,
             retryable=retryable,
         )
@@ -272,15 +220,13 @@ class _CredentialAwareSdkModel(Model):
                     outcome=(
                         "stream_started_error"
                         if not replay_allowed
-                        else "retryable_error" if retryable else "non_retryable_error"
+                        else "retryable_error"
+                        if retryable
+                        else "non_retryable_error"
                     ),
                     retryable=retryable,
                 )
-                if (
-                    not replay_allowed
-                    or position + 1 >= len(indexes)
-                    or not retryable
-                ):
+                if not replay_allowed or position + 1 >= len(indexes) or not retryable:
                     raise
                 continue
             self._commit_success(selected_index, previous_index)
@@ -345,6 +291,8 @@ class _SdkRunHooks(SdkModelObservationHooks):
             raise _TransportStop(control.payload)
         self._on_iteration_start(iteration)
         await super().on_llm_start(context, agent, system_prompt, input_items)
+        if self._call is not None:
+            self._call.diagnostics.context_manifest = self._turn_control.latest_manifest
 
     async def on_llm_end(
         self,
@@ -357,7 +305,29 @@ class _SdkRunHooks(SdkModelObservationHooks):
         if reasoning_content and not self._runtime.streamed:
             self._transport.prepare_response_content("", reasoning_content)
         await super().on_llm_end(context, agent, response)
+        manifest = self._turn_control.latest_manifest
+        if manifest and response.usage.input_tokens:
+            estimated = manifest["estimated_input_tokens"]
+            actual_ratio = (
+                response.usage.input_tokens / max(1, estimated) * self._turn_control.estimate_ratio
+            )
+            # Calibrate conservatively; do not lower a safety bound within a turn.
+            self._turn_control.estimate_ratio = max(
+                self._turn_control.estimate_ratio, actual_ratio * 1.1
+            )
+            manifest["actual_input_tokens"] = response.usage.input_tokens
+            manifest["calibration_ratio"] = self._turn_control.estimate_ratio
+        available = {
+            definition["function"]["name"] for definition in self._active_tool_definitions()
+        }
+        self._turn_control.pending_tool_calls = sum(
+            isinstance(item, ResponseFunctionToolCall) and item.name in available
+            for item in response.output
+        )
         self._turn_control.completed_turns += 1
+
+    async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
+        self._turn_control.pending_tool_calls = max(0, self._turn_control.pending_tool_calls - 1)
 
     @staticmethod
     def _reasoning_content(response: ModelResponse) -> str:
@@ -368,506 +338,6 @@ class _SdkRunHooks(SdkModelObservationHooks):
             blocks.extend(part.text for part in item.summary if part.text)
             blocks.extend(part.text for part in item.content or [] if part.text)
         return "\n\n".join(blocks)
-
-
-class _SdkModelInputController:
-    """Expose turn budget and compact a repeated-tool loop inside SDK execution."""
-
-    _CHECKPOINT_MARKER = "Rhetorica context checkpoint v1"
-
-    def __init__(
-        self,
-        *,
-        runtime: AgentRuntimeInput[Any],
-        model: Model,
-        model_settings: ModelSettings,
-        turn_control: _SdkTurnControl,
-        run_config: RunConfig,
-        active_tool_definitions: Callable[[], list[dict[str, Any]]] | None = None,
-        response_schema: dict[str, Any] | None = None,
-        observer: SdkModelCallObserver | None = None,
-    ) -> None:
-        self._runtime = runtime
-        self._observer = observer or SdkModelCallObserver(runtime, logging.getLogger(__name__))
-        self._model = model
-        self._model_settings = model_settings
-        self._turn_control = turn_control
-        self._run_config = run_config
-        self._active_tool_definitions = active_tool_definitions or (lambda: [])
-        self._response_schema = response_schema
-        self._prompt_budget = LlmClient(runtime.llm_client.connection).build_prompt_budget_service()
-
-    async def __call__(self, data: CallModelData[Any]) -> ModelInputData:
-        model_input = list(data.model_data.input)
-        instructions = data.model_data.instructions or ""
-        if self._should_compact(
-            model_input=model_input,
-            instructions=instructions,
-        ):
-            checkpoint = await self._compact(current_view=model_input)
-            if checkpoint is not None:
-                raise _SdkCompactionRestart(checkpoint)
-
-        iteration = self._turn_control.current_iteration
-        budget_notice = loop_limit_notice_content(
-            iteration=iteration,
-            max_iterations=self._turn_control.max_turns,
-        )
-        if not self._turn_control.tools_enabled:
-            self._runtime.state.add_warning("llm_forced_finalization_requested")
-        endpoint = LlmClient._build_endpoint(
-            self._runtime.llm_client.connection.base_url,
-            self._runtime.llm_client.connection.endpoint_path,
-        )
-        configured_context_role = self._runtime.llm_client.connection.extra_settings.get(
-            "runtime_context_role"
-        )
-        context_role: Literal["developer", "user"]
-        if configured_context_role == "developer":
-            context_role = "developer"
-        elif configured_context_role == "user":
-            context_role = "user"
-        else:
-            context_role = (
-                "user"
-                if urlsplit(endpoint).path.rstrip("/").endswith("/chat/completions")
-                else "developer"
-            )
-        return ModelInputData(
-            input=[
-                *model_input,
-                {
-                    "role": context_role,
-                    "content": (
-                        "<runtime_context>\n"
-                        + PromptBuilder.build_time_context()
-                        + "Agent loop context:\n"
-                        + f"- current_iteration={iteration + 1}\n"
-                        + f"- max_iterations={self._turn_control.max_turns}\n"
-                        + f"- {budget_notice}"
-                        + "\nThis is runtime metadata, not a new task. Continue the preceding "
-                        "request and do not quote this block.\n</runtime_context>"
-                    ),
-                },
-            ],
-            instructions=instructions,
-        )
-
-    def _should_compact(
-        self,
-        *,
-        model_input: list[Any],
-        instructions: str,
-    ) -> bool:
-        settings = get_chat_settings()
-        if not settings.context_compaction_enabled:
-            return False
-        if self._runtime.state.force_context_compaction:
-            return True
-
-        latest_sequence = len(self._runtime.state.executed_tool_call_ledger)
-        if self._contains_checkpoint(model_input) and (
-            latest_sequence <= self._runtime.state.last_compacted_tool_call_sequence
-        ):
-            return False
-
-        messages: list[dict[str, Any]] = []
-        if instructions.strip():
-            messages.append({"role": "system", "content": instructions})
-        for item in model_input:
-            normalized = self._jsonable(item)
-            if isinstance(normalized, dict):
-                messages.append(normalized)
-            else:
-                messages.append({"role": "user", "content": normalized})
-        estimated_tokens = self._prompt_budget.estimate_request(
-            messages=messages,
-            tools=self._active_tool_definitions(),
-            response_schema=self._response_schema,
-        ).tokens
-        trigger_tokens = int(
-            self._prompt_budget.prompt_budget_tokens() * settings.context_compaction_trigger_ratio
-        )
-        return estimated_tokens >= trigger_tokens
-
-    async def _compact(
-        self,
-        *,
-        current_view: list[Any],
-    ) -> dict[str, Any] | None:
-        try:
-            summary = await self._summarize(current_view)
-        except Exception:
-            self._runtime.state.add_warning("context_compaction_failed")
-            return None
-        if not summary.strip():
-            self._runtime.state.add_warning("context_compaction_empty_summary")
-            return None
-
-        ledger = [
-            entry.model_dump(mode="json") for entry in self._runtime.state.executed_tool_call_ledger
-        ]
-        checkpoint = {
-            "role": "user",
-            "content": (
-                f"{self._CHECKPOINT_MARKER}\n\n"
-                "Continue the current user request from this compact checkpoint. "
-                "The summary preserves conversational continuity. The "
-                "executed_tool_calls ledger is authoritative for calls the backend "
-                "actually executed; do not claim a blocked call ran. Read an artifact "
-                "when exact prior output is needed.\n\n"
-                f"Summary:\n{summary.strip()}\n\n"
-                "executed_tool_calls:\n" + json.dumps(ledger, ensure_ascii=False, sort_keys=True)
-            ),
-        }
-        self._runtime.state.last_compacted_tool_call_sequence = len(ledger)
-        self._runtime.state.blocked_tool_call_turn_count = 0
-        self._runtime.state.force_context_compaction = False
-        self._runtime.state.add_warning("context_compacted")
-        return checkpoint
-
-    @classmethod
-    def _contains_checkpoint(cls, model_input: list[Any]) -> bool:
-        for item in model_input:
-            normalized = cls._jsonable(item)
-            if not isinstance(normalized, dict):
-                continue
-            content = normalized.get("content")
-            if isinstance(content, str) and content.startswith(cls._CHECKPOINT_MARKER):
-                return True
-        return False
-
-    async def _summarize(self, model_input: list[Any]) -> str:
-        serialized = json.dumps(
-            [self._jsonable(item) for item in model_input],
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        )
-        compactor = Agent[Any](
-            name="Rhetorica context compactor",
-            instructions=(
-                "Create a concise continuation checkpoint for the supplied conversation "
-                "prefix. Preserve the user's current goal, explicit constraints, "
-                "decisions, concrete facts, exact identifiers, exact SQL when present, "
-                "errors, unresolved questions and the next step. Do not call tools. Do "
-                "not invent facts. Do not reproduce bulky tool outputs. Return only the "
-                "checkpoint text."
-            ),
-            model=self._model,
-            model_settings=replace(
-                self._model_settings,
-                tool_choice="none",
-                parallel_tool_calls=False,
-                context_management=None,
-            ),
-            tools=[],
-            output_type=None,
-        )
-        try:
-            result = await Runner.run(
-                compactor,
-                input=[{"role": "user", "content": serialized}],
-                max_turns=1,
-                hooks=SdkModelObservationHooks(
-                    self._observer,
-                    phase="context_compaction",
-                    streamed=False,
-                ),
-                run_config=replace(
-                    self._run_config,
-                    workflow_name="Rhetorica context compaction",
-                    call_model_input_filter=None,
-                ),
-            )
-        except BaseException as error:
-            self._observer.finish(error)
-            raise
-        if not isinstance(result.final_output, str):
-            raise ModelBehaviorError("Context compactor returned non-text output")
-        return result.final_output
-
-    @staticmethod
-    def _jsonable(item: Any) -> Any:
-        if isinstance(item, dict):
-            return item
-        model_dump = getattr(item, "model_dump", None)
-        if callable(model_dump):
-            return model_dump(mode="json")
-        return str(item)
-
-
-class _FunctionToolRegistry:
-    """Expose existing Rhetorica tool definitions as dynamically enabled SDK tools."""
-
-    def __init__(
-        self,
-        *,
-        coordinator: Any,
-        runtime: AgentRuntimeInput[Any],
-        transport: AgentRuntimeTransport[Any, Any],
-        turn_control: _SdkTurnControl,
-        explicit_final_answer_enabled: bool = False,
-    ) -> None:
-        self._coordinator = coordinator
-        self._runtime = runtime
-        self._transport = transport
-        self._turn_control = turn_control
-        self._explicit_final_answer_enabled = explicit_final_answer_enabled
-        self._initial_names = set(self._tool_names(runtime.tools))
-        self._tools_by_name: dict[str, FunctionTool] = {}
-        self._definitions_by_name: dict[str, dict[str, Any]] = {}
-        self._results_by_call_id: dict[str, dict[str, Any]] = {}
-        self._tool_names_by_call_id: dict[str, str] = {}
-        self._current_model_turn = 0
-        self._blocked_noted_turn: int | None = None
-        self._lock = asyncio.Lock()
-        if explicit_final_answer_enabled:
-            self._register_final_answer_tool()
-        self.refresh()
-
-    @property
-    def tools(self) -> list[FunctionTool]:
-        return list(self._tools_by_name.values())
-
-    def active_definitions(self) -> list[dict[str, Any]]:
-        return [
-            definition
-            for name, definition in self._definitions_by_name.items()
-            if self._is_enabled(name)
-        ]
-
-    def begin_model_turn(self, iteration: int) -> None:
-        self._current_model_turn = iteration
-
-    def tool_result(self, call_id: str | None) -> dict[str, Any] | None:
-        if call_id is None:
-            return None
-        return self._results_by_call_id.get(call_id)
-
-    def tool_name(self, call_id: str | None) -> str | None:
-        if call_id is None:
-            return None
-        return self._tool_names_by_call_id.get(call_id)
-
-    def refresh(self, agent: Agent[Any] | None = None) -> None:
-        definitions = [
-            *self._runtime.tools,
-            *self._runtime.state.deferred_tool_definitions.values(),
-            *self._runtime.state.loaded_tool_definitions.values(),
-            *self._runtime.state.loaded_mcp_tool_definitions.values(),
-        ]
-        for definition in definitions:
-            parsed = self._parse_definition(definition)
-            if parsed is None:
-                continue
-            name, description, parameters = parsed
-            if name == SUBMIT_FINAL_ANSWER_TOOL_NAME or name in self._tools_by_name:
-                continue
-            self._definitions_by_name[name] = definition
-
-            def is_enabled(
-                _ctx: Any,
-                _agent: Any,
-                *,
-                tool_name: str = name,
-            ) -> bool:
-                return self._is_enabled(tool_name)
-
-            self._tools_by_name[name] = FunctionTool(
-                name=name,
-                description=description,
-                params_json_schema=parameters,
-                strict_json_schema=False,
-                is_enabled=is_enabled,
-                on_invoke_tool=self._invoke,
-            )
-        if agent is not None:
-            known = {tool.name for tool in agent.tools if isinstance(tool, FunctionTool)}
-            agent.tools.extend(
-                tool for name, tool in self._tools_by_name.items() if name not in known
-            )
-
-    def _register_final_answer_tool(self) -> None:
-        definition = final_response_tool_schema()
-        parsed = self._parse_definition(definition)
-        if parsed is None:
-            raise AgentsSdkCapabilityError("Invalid final answer tool definition")
-        name, description, parameters = parsed
-        self._definitions_by_name[name] = definition
-        self._tools_by_name[name] = FunctionTool(
-            name=name,
-            description=description,
-            params_json_schema=parameters,
-            strict_json_schema=True,
-            is_enabled=True,
-            on_invoke_tool=self._invoke_final_answer,
-        )
-
-    async def _invoke_final_answer(
-        self,
-        context: ToolContext[Any],
-        arguments_json: str,
-    ) -> str:
-        call_id = context.tool_call_id or "call_missing_id"
-        self._tool_names_by_call_id[call_id] = SUBMIT_FINAL_ANSWER_TOOL_NAME
-        try:
-            final_answer = ChatFinalResponseContractV1.model_validate_json(arguments_json)
-        except Exception as exc:
-            error_result = {
-                "ok": False,
-                "error_code": "llm_final_payload_invalid",
-                "can_continue": True,
-                "user_message": "submit_final_answer arguments violate the final contract.",
-                "validation_error": str(exc)[:2_000],
-            }
-            self._results_by_call_id[call_id] = error_result
-            return json.dumps(error_result, ensure_ascii=False, sort_keys=True)
-        # The SDK receives the final contract; stream events receive tool status.
-        self._results_by_call_id[call_id] = {"ok": True, "status": "succeeded"}
-        return final_answer.model_dump_json()
-
-    async def final_output_from_tools(
-        self,
-        _context: Any,
-        tool_results: list[FunctionToolResult],
-    ) -> ToolsToFinalOutputResult:
-        for tool_result in tool_results:
-            if tool_result.tool.name != SUBMIT_FINAL_ANSWER_TOOL_NAME:
-                continue
-            output = tool_result.output
-            if not isinstance(output, str):
-                return ToolsToFinalOutputResult(is_final_output=False)
-            try:
-                ChatFinalResponseContractV1.model_validate_json(output)
-            except Exception:
-                return ToolsToFinalOutputResult(is_final_output=False)
-            return ToolsToFinalOutputResult(is_final_output=True, final_output=output)
-        return ToolsToFinalOutputResult(is_final_output=False)
-
-    async def _invoke(self, context: ToolContext[Any], arguments_json: str) -> str:
-        try:
-            arguments = json.loads(arguments_json) if arguments_json else {}
-        except json.JSONDecodeError as exc:
-            call_id = context.tool_call_id or "call_missing_id"
-            error_result = {
-                "ok": False,
-                "error_code": "tool_arguments_json_invalid",
-                "can_continue": True,
-                "user_message": (
-                    f"Tool {context.tool_name} received invalid JSON arguments. "
-                    "Retry the call with one complete JSON object."
-                ),
-                "validation_error": exc.msg,
-            }
-            self._results_by_call_id[call_id] = error_result
-            self._tool_names_by_call_id[call_id] = context.tool_name
-            return json.dumps(error_result, ensure_ascii=False, sort_keys=True)
-        if not isinstance(arguments, dict):
-            raise ModelBehaviorError(f"Tool {context.tool_name} arguments must be a JSON object")
-
-        async with self._lock:
-            request = ToolCallRequest(
-                tool_name=context.tool_name,
-                arguments=arguments,
-                tool_call_id=context.tool_call_id,
-            )
-            args_json = json.dumps(arguments, sort_keys=True, ensure_ascii=False)
-            execution_plan = self._coordinator._tool_execution_policy.plan_tool_call(
-                state=self._runtime.state,
-                tool_name=request.tool_name,
-                args_json=args_json,
-                tool_call_id=request.tool_call_id or "call_missing_id",
-            )
-
-            if isinstance(execution_plan, ExecuteToolCallPlan):
-                self._runtime.state.tool_call_count += 1
-                tool_result = await asyncio.to_thread(
-                    self._runtime.tool_executor.execute_tool,
-                    tool_name=request.tool_name,
-                    arguments=request.arguments,
-                    request=self._runtime.request,
-                    db_connectors=self._runtime.db_connectors,
-                    state=self._runtime.state,
-                )
-                self._runtime.state.tool_call_results[execution_plan.call_signature] = tool_result
-                executed = True
-            elif isinstance(execution_plan, RejectRepeatedToolCallPlan):
-                tool_result = execution_plan.tool_result
-                executed = False
-                self._note_blocked_call()
-            else:
-                raise TypeError(f"Unsupported tool execution plan: {type(execution_plan).__name__}")
-            call_id = request.tool_call_id or "call_missing_id"
-            self._results_by_call_id[call_id] = tool_result
-            self._tool_names_by_call_id[call_id] = request.tool_name
-
-            prompt_tool_result = self._coordinator._tool_result_prompt_view(
-                tool_name=request.tool_name,
-                arguments=request.arguments,
-                tool_result=tool_result,
-                state=self._runtime.state,
-            )
-            if executed:
-                self._runtime.state.record_executed_tool_call(
-                    tool_call_id=request.tool_call_id or "call_missing_id",
-                    tool_name=request.tool_name,
-                    arguments=request.arguments,
-                    result=tool_result,
-                    prompt_result=prompt_tool_result,
-                )
-            prompt_artifact = self._coordinator._tool_result_prompt_serializer.serialize_envelope(
-                tool_name=request.tool_name,
-                tool_result=prompt_tool_result,
-            )
-            self._coordinator._log_prompt_artifact_diagnostics(prompt_artifact)
-            for warning in prompt_artifact.warnings:
-                self._runtime.state.add_warning(warning)
-
-            self.refresh(context.agent if isinstance(context.agent, Agent) else None)
-            return cast(str, prompt_artifact.stable_json())
-
-    def _note_blocked_call(self) -> None:
-        if self._blocked_noted_turn == self._current_model_turn:
-            return
-        self._blocked_noted_turn = self._current_model_turn
-        self._runtime.state.blocked_tool_call_turn_count += 1
-        if self._runtime.state.blocked_tool_call_turn_count >= 2:
-            self._runtime.state.force_context_compaction = True
-
-    def _is_enabled(self, name: str) -> bool:
-        if name == SUBMIT_FINAL_ANSWER_TOOL_NAME:
-            return self._explicit_final_answer_enabled
-        return self._turn_control.tools_enabled and (
-            name in self._initial_names
-            or name in self._runtime.state.loaded_tool_definitions
-            or name in self._runtime.state.loaded_mcp_tool_definitions
-        )
-
-    @staticmethod
-    def _parse_definition(
-        definition: dict[str, Any],
-    ) -> tuple[str, str, dict[str, Any]] | None:
-        if not isinstance(definition, dict) or definition.get("type") != "function":
-            return None
-        function = definition.get("function")
-        if not isinstance(function, dict):
-            return None
-        name = function.get("name")
-        parameters = function.get("parameters")
-        if not isinstance(name, str) or not name or not isinstance(parameters, dict):
-            raise AgentsSdkCapabilityError("Invalid function tool definition")
-        description = function.get("description")
-        return name, description if isinstance(description, str) else "", parameters
-
-    @staticmethod
-    def _tool_names(tools: list[dict[str, Any]]) -> list[str]:
-        names: list[str] = []
-        for definition in tools:
-            parsed = _FunctionToolRegistry._parse_definition(definition)
-            if parsed is not None:
-                names.append(parsed[0])
-        return names
 
 
 class AgentsSdkTurnRuntime(Generic[TState, TResult]):
@@ -931,7 +401,7 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
     ) -> TResult:
         connection = runtime.llm_client.connection
         endpoint = LlmClient._build_endpoint(connection.base_url, connection.endpoint_path)
-        base_url = self._sdk_base_url(endpoint)
+        base_url = sdk_models.sdk_base_url(endpoint)
         timeout = get_chat_settings().llm_request_timeout
         http_client = httpx2.AsyncClient(verify=connection.verify_tls, timeout=timeout)
         observer = SdkModelCallObserver(runtime, self._logger)
@@ -939,11 +409,7 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
             api_keys = list(connection.api_keys or [])
 
             def build_model(selected_index: int) -> Model:
-                api_key = (
-                    api_keys[selected_index]
-                    if api_keys
-                    else connection.api_key
-                )
+                api_key = api_keys[selected_index] if api_keys else connection.api_key
                 openai_client = AsyncOpenAI(
                     api_key=api_key or "not-configured",
                     base_url=base_url,
@@ -952,30 +418,48 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                     max_retries=0,
                     http_client=http_client,
                 )
-                return self._sdk_model(connection=connection, openai_client=openai_client)
+                return sdk_models.build_sdk_model(
+                    connection=connection, openai_client=openai_client
+                )
 
             if api_keys and connection.selected_api_key_index is not None:
+
+                def observe_credential(**fields: Any) -> None:
+                    observer.credential_attempt(**fields)
+                    self._emit_diagnostic_event("llm.credential.attempt", **fields)
+
                 retry_attempts = connection.extra_settings.get("llm_retry_attempts", 3)
                 retry_attempts = (
-                    int(retry_attempts)
-                    if isinstance(retry_attempts, int | float)
-                    else 3
+                    int(retry_attempts) if isinstance(retry_attempts, int | float) else 3
                 )
                 model: Model = _CredentialAwareSdkModel(
                     connection=connection,
                     model_factory=build_model,
                     max_attempts=min(max(1, retry_attempts), len(api_keys)),
-                    observe_credential=lambda **fields: self._emit_diagnostic_event(
-                        "llm.credential.attempt",
-                        **fields,
-                    ),
+                    observe_credential=observe_credential,
                 )
             else:
                 selected_index = secrets.randbelow(len(api_keys)) if api_keys else 0
                 model = build_model(selected_index)
             max_turns = get_max_iterations()
             turn_control = _SdkTurnControl(max_turns=max_turns)
-            model_settings = self._model_settings(connection)
+            turn_control.tool_mode = (
+                "dispatch" if get_chat_settings().tool_dispatch_enabled else "direct"
+            )
+            if runtime.agent_session is not None:
+                read_metadata = getattr(runtime.agent_session, "get_context_metadata", None)
+                if callable(read_metadata):
+                    metadata = await read_metadata()
+                    turn_control.projection.events = metadata.get("events", [])
+                    turn_control.tool_mode = metadata.get(
+                        "tool_mode",
+                        "dispatch" if get_chat_settings().tool_dispatch_enabled else "direct",
+                    )
+                    await runtime.agent_session.set_context_metadata({
+                        **metadata,
+                        "tool_mode": turn_control.tool_mode,
+                    })
+            model_settings = sdk_models.build_model_settings(connection)
             explicit_final_answer_enabled = LlmClient._explicit_final_answer_enabled(connection)
             if explicit_final_answer_enabled:
                 model_settings = replace(
@@ -983,6 +467,12 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                     tool_choice="required",
                     parallel_tool_calls=False,
                 )
+            capabilities = ProviderRuntimeCapabilities.from_settings(connection.extra_settings)
+            if (
+                get_chat_settings().certified_tool_concurrency_enabled
+                and capabilities.parallel_tool_calls
+            ):
+                model_settings = replace(model_settings, parallel_tool_calls=True)
             registry = _FunctionToolRegistry(
                 coordinator=self,
                 runtime=runtime,
@@ -998,6 +488,10 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                 structured_output_enabled=sdk_structured_output_enabled
             )
             instructions, input_items = self._instructions_and_input(runtime.messages)
+            if turn_control.tool_mode == "dispatch":
+                from ..llm.prompt_contract import DISPATCH_CONTRACT
+
+                instructions = DISPATCH_CONTRACT + "\n" + (instructions or "")
             agent: Agent[Any] = Agent(
                 name="Rhetorica Analytics Agent",
                 instructions=instructions,
@@ -1013,6 +507,7 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                 reset_tool_choice=not explicit_final_answer_enabled,
             )
             run_config = build_agent_run_config()
+            run_config.tool_execution = ToolExecutionConfig(max_function_tool_concurrency=4)
             response_schema = (
                 final_response_json_schema()
                 if structured_output_enabled or explicit_final_answer_enabled
@@ -1044,7 +539,8 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                         turn_control=turn_control,
                         run_config=run_config,
                         active_tool_definitions=registry.active_definitions,
-                        response_schema=response_schema,
+                        # Explicit finalization already carries the schema in its tool.
+                        response_schema=response_schema if sdk_structured_output_enabled else None,
                         observer=observer,
                     )
                     run_config.call_model_input_filter = input_controller
@@ -1061,7 +557,9 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                             streamed_result = Runner.run_streamed(agent, **streamed_kwargs)
                             cancelled = False
 
-                            async def cancel_on_signal(active_result: Any = streamed_result) -> None:
+                            async def cancel_on_signal(
+                                active_result: Any = streamed_result,
+                            ) -> None:
                                 nonlocal cancelled
                                 if runtime.cancel_event is None:
                                     return
@@ -1108,14 +606,26 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                             result = await Runner.run(agent, **run_kwargs)
                     except _SdkCompactionRestart as restart:
                         if runtime.agent_session is None:
-                            runner_input = [restart.checkpoint]
+                            runner_input = restart.items
                         else:
                             replace_items = getattr(runtime.agent_session, "replace_items", None)
                             if not callable(replace_items):
                                 raise AgentsSdkCapabilityError(
                                     "Persistent agent session cannot atomically store a compaction checkpoint"
                                 ) from restart
-                            await replace_items([restart.checkpoint])
+                            if get_chat_settings().context_harness_enabled and hasattr(
+                                runtime.agent_session, "set_context_metadata"
+                            ):
+                                await replace_items(
+                                    restart.items,
+                                    context_metadata={
+                                        "version": 2,
+                                        "events": [],
+                                        "tool_mode": turn_control.tool_mode,
+                                    },
+                                )
+                            else:
+                                await replace_items(restart.items)
                             runner_input = []
                         result = None
                 final_output = self._final_output_contract(
@@ -1127,10 +637,10 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
                 langfuse_trace_id = langfuse_turn.trace_id
             prepared = transport.prepare_response_content(final_output.answer_markdown, "")
             payload = self._build_final_payload_from_parsed(
-                    parsed_payload=final_output.to_payload(),
-                    fallback_answer=final_output.answer_markdown,
-                    state=runtime.state,
-                )
+                parsed_payload=final_output.to_payload(),
+                fallback_answer=final_output.answer_markdown,
+                state=runtime.state,
+            )
             if langfuse_trace_id:
                 runtime_context = payload.get("runtime_context")
                 if isinstance(runtime_context, dict):
@@ -1282,44 +792,6 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
         self._emit_diagnostic_event("llm.prompt_artifact.compacted", **fields)
 
     @staticmethod
-    def _sdk_base_url(endpoint: str) -> str:
-        parsed = urlsplit(endpoint)
-        normalized_path = parsed.path.rstrip("/")
-        suffix = next(
-            (
-                candidate
-                for candidate in ("/chat/completions", "/responses")
-                if normalized_path.endswith(candidate)
-            ),
-            None,
-        )
-        if suffix is None:
-            raise AgentsSdkCapabilityError(f"Unsupported Agents SDK endpoint: {endpoint}")
-        base_path = normalized_path[: -len(suffix)]
-        return urlunsplit((parsed.scheme, parsed.netloc, base_path, "", ""))
-
-    @staticmethod
-    def _sdk_model(*, connection: Any, openai_client: AsyncOpenAI) -> Model:
-        endpoint = LlmClient._build_endpoint(connection.base_url, connection.endpoint_path)
-        normalized_path = urlsplit(endpoint).path.rstrip("/")
-        if normalized_path.endswith("/responses"):
-            return OpenAIResponsesModel(
-                model=connection.model,
-                openai_client=openai_client,
-                model_is_explicit=True,
-            )
-        if normalized_path.endswith("/chat/completions"):
-            thinking_enabled = connection.extra_settings.get("chat_template_enable_thinking")
-            return OpenAIChatCompletionsModel(
-                model=connection.model,
-                openai_client=openai_client,
-                should_replay_reasoning_content=(
-                    _replay_provider_reasoning_content if thinking_enabled is True else None
-                ),
-            )
-        raise AgentsSdkCapabilityError(f"Unsupported Agents SDK endpoint: {endpoint}")
-
-    @staticmethod
     def _agent_output_type(*, structured_output_enabled: bool) -> AgentOutputSchema | None:
         if not structured_output_enabled:
             return None
@@ -1370,43 +842,3 @@ class AgentsSdkTurnRuntime(Generic[TState, TResult]):
         if not input_items:
             raise AgentsSdkCapabilityError("Agent turn has no user or assistant input")
         return ("\n\n".join(instructions) if instructions else None), input_items
-
-    @staticmethod
-    def _model_settings(connection: Any) -> ModelSettings:
-        extra_body: dict[str, Any] = {}
-        extra_args: dict[str, Any] = {}
-        if LlmClient._reasoning_split_enabled(connection):
-            extra_body["reasoning_split"] = True
-        enable_thinking = connection.extra_settings.get("chat_template_enable_thinking")
-        if isinstance(enable_thinking, bool):
-            extra_body["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
-        endpoint = LlmClient._build_endpoint(connection.base_url, connection.endpoint_path)
-        responses_endpoint = urlsplit(endpoint).path.rstrip("/").endswith("/responses")
-        use_max_completion_tokens = (
-            not responses_endpoint
-            and urlsplit(endpoint).path.rstrip("/").endswith("/chat/completions")
-            and connection.max_tokens_parameter == "max_completion_tokens"
-        )
-        if use_max_completion_tokens and connection.max_tokens is not None:
-            extra_args["max_completion_tokens"] = connection.max_tokens
-        reasoning = (
-            Reasoning(
-                effort=connection.reasoning_effort,
-                summary="auto" if responses_endpoint and enable_thinking else None,
-            )
-            if connection.reasoning_effort is not None or (responses_endpoint and enable_thinking)
-            else None
-        )
-        return ModelSettings(
-            temperature=connection.temperature,
-            top_p=connection.top_p,
-            max_tokens=None if use_max_completion_tokens else connection.max_tokens,
-            truncation="auto",
-            reasoning=reasoning,
-            context_management=None,
-            include_usage=True,
-            preserve_raw_usage=True,
-            timeout=get_chat_settings().llm_request_timeout,
-            extra_body=extra_body or None,
-            extra_args=extra_args or None,
-        )

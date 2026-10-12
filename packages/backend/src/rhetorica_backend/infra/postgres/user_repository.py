@@ -39,9 +39,11 @@ class UserAccountItem:
         created_at: datetime,
         updated_at: datetime,
         last_seen_at: datetime | None,
+        home_workspace_id: str | None = None,
     ) -> None:
         self.id = user_id
         self.workspace_id = workspace_id
+        self.home_workspace_id = home_workspace_id or workspace_id
         self.login = login
         self.password_hash = password_hash
         self.role = role
@@ -59,6 +61,27 @@ class UserAccountItem:
     @property
     def is_admin(self) -> bool:
         return self.role == ADMIN_ROLE
+
+    def for_workspace(self, workspace_id: str) -> UserAccountItem:
+        """Return an execution identity bound to an active workspace without mutating persistence."""
+        return UserAccountItem(
+            user_id=self.id,
+            workspace_id=workspace_id,
+            home_workspace_id=self.home_workspace_id,
+            login=self.login,
+            password_hash=self.password_hash,
+            role=self.role,
+            is_active=self.is_active,
+            auth_provider=self.auth_provider,
+            auth_subject=self.auth_subject,
+            email=self.email,
+            display_name=self.display_name,
+            api_rate_limit_per_hour=self.api_rate_limit_per_hour,
+            is_bootstrap_user=self.is_bootstrap_user,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            last_seen_at=self.last_seen_at,
+        )
 
 
 class UserAccountRepository:
@@ -158,6 +181,26 @@ class UserAccountRepository:
             ).scalar_one_or_none()
             return self._to_domain(row) if row is not None else None
 
+    def get_unique_local_by_login(self, *, login: str) -> UserAccountItem | None:
+        """Resolve a local identity only when its login is globally unambiguous."""
+        normalized_login = self.normalize_login(login)
+        with self._db.session() as session:
+            rows = (
+                session.execute(
+                    select(UserAccountOrm)
+                    .where(
+                        UserAccountOrm.auth_provider == LOCAL_AUTH_PROVIDER,
+                        UserAccountOrm.login == normalized_login,
+                    )
+                    .limit(2)
+                )
+                .scalars()
+                .all()
+            )
+        if len(rows) != 1:
+            return None
+        return self._to_domain(rows[0])
+
     def get_by_id(self, *, user_id: str) -> UserAccountItem | None:
         with self._db.session() as session:
             row = session.get(UserAccountOrm, user_id)
@@ -165,12 +208,29 @@ class UserAccountRepository:
 
     def list_by_workspace(self, *, workspace_id: str) -> list[UserAccountItem]:
         with self._db.session() as session:
-            rows = session.execute(
-                select(UserAccountOrm)
-                .where(UserAccountOrm.workspace_id == workspace_id)
-                .order_by(UserAccountOrm.created_at.asc(), UserAccountOrm.id.asc())
-            ).scalars()
-            return [self._to_domain(row) for row in rows]
+            rows = (
+                session.execute(
+                    select(UserAccountOrm)
+                    .where(UserAccountOrm.workspace_id == workspace_id)
+                    .order_by(UserAccountOrm.created_at.asc(), UserAccountOrm.id.asc())
+                )
+                .scalars()
+                .all()
+            )
+        return [self._to_domain(row) for row in rows]
+
+    def list_all(self, *, limit: int = 1000) -> list[UserAccountItem]:
+        with self._db.session() as session:
+            rows = (
+                session.execute(
+                    select(UserAccountOrm)
+                    .order_by(UserAccountOrm.login, UserAccountOrm.id)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+        return [self._to_domain(row) for row in rows]
 
     def create_local_user(
         self,

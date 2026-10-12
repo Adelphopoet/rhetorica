@@ -10,8 +10,8 @@ from typing import Any
 import httpx2
 from openai import AsyncOpenAI
 from rhetorica_backend.contracts.scenario_workflows import LlmNode
+from rhetorica_backend.domain.chat.llm import sdk_models
 from rhetorica_backend.domain.chat.llm.llm_client import LlmClient
-from rhetorica_backend.domain.chat.orchestration.agents_sdk_runtime import AgentsSdkTurnRuntime
 from rhetorica_backend.domain.scenarios.data_store import ScenarioDataStore
 from rhetorica_backend.domain.scenarios.errors import WorkflowError
 from rhetorica_backend.domain.scenarios.resources import ScenarioResourcePolicy
@@ -112,7 +112,7 @@ class ScenarioLlmStepRunner:
             )
         )
         endpoint = LlmClient._build_endpoint(connection.base_url, connection.endpoint_path)
-        settings = AgentsSdkTurnRuntime._model_settings(connection)
+        settings = sdk_models.build_model_settings(connection)
         role = f"llm-{context.operation_id}"
         response = (
             await asyncio.to_thread(
@@ -133,7 +133,7 @@ class ScenarioLlmStepRunner:
                         else connection.api_key
                     )
                     or "not-configured",
-                    base_url=AgentsSdkTurnRuntime._sdk_base_url(endpoint),
+                    base_url=sdk_models.sdk_base_url(endpoint),
                     default_headers=live.headers,
                     http_client=http,
                     timeout=settings.timeout,
@@ -143,9 +143,7 @@ class ScenarioLlmStepRunner:
                 agent = Agent(
                     name=node.title,
                     instructions=instructions,
-                    model=AgentsSdkTurnRuntime._sdk_model(
-                        connection=connection, openai_client=client
-                    ),
+                    model=sdk_models.build_sdk_model(connection=connection, openai_client=client),
                     model_settings=settings,
                     tools=[*tools] if tools else [],
                     output_type=schema if structured else None,

@@ -14,8 +14,13 @@ from rhetorica_backend.contracts.admin_integrations import (
     VictoriaMetricsProvider,
     VictoriaMetricsTemplateConfig,
 )
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.models import VictoriaMetricsConnectorConfigOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_resource_access import (
+    WorkspaceResourceAccess,
+    present_resource,
+)
 from rhetorica_backend.infra.secrets import SecretStore, SecretStoreError, get_secret_store
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -27,6 +32,11 @@ class VictoriaMetricsConnectorRepository:
     def __init__(self, db: DatabaseRuntime, secret_store: SecretStore | None = None):
         self._db = db
         self._secret_store = secret_store or get_secret_store()
+        self._resources = WorkspaceResourceAccess(
+            db,
+            kind=WorkspaceResourceKind.VICTORIAMETRICS_CONNECTOR,
+            model=VictoriaMetricsConnectorConfigOrm,
+        )
 
     def upsert(
         self,
@@ -80,18 +90,10 @@ class VictoriaMetricsConnectorRepository:
             return self._to_contract(row)
 
     def list(self, workspace_id: str, limit: int) -> list[VictoriaMetricsConnectorItem]:
-        with self._db.session() as session:
-            rows = (
-                session.execute(
-                    select(VictoriaMetricsConnectorConfigOrm)
-                    .where(VictoriaMetricsConnectorConfigOrm.workspace_id == workspace_id)
-                    .order_by(VictoriaMetricsConnectorConfigOrm.updated_at.desc())
-                    .limit(limit)
-                )
-                .scalars()
-                .all()
-            )
-        return [self._to_contract(row) for row in rows]
+        return [
+            present_resource(self._to_contract(resource.row), resource)
+            for resource in self._resources.list(workspace_id=workspace_id, limit=limit)
+        ]
 
     def get_connection(
         self,
@@ -100,24 +102,22 @@ class VictoriaMetricsConnectorRepository:
         *,
         visible_to_default_assistant: bool | None = None,
     ) -> VictoriaMetricsConnectionConfig | None:
-        with self._db.session() as session:
-            stmt = select(VictoriaMetricsConnectorConfigOrm).where(
-                VictoriaMetricsConnectorConfigOrm.workspace_id == workspace_id,
-                VictoriaMetricsConnectorConfigOrm.is_active.is_(True),
-            )
-            if name:
-                stmt = stmt.where(VictoriaMetricsConnectorConfigOrm.name == name)
-            if visible_to_default_assistant is not None:
-                stmt = stmt.where(
-                    VictoriaMetricsConnectorConfigOrm.visible_to_default_assistant.is_(
-                        visible_to_default_assistant
-                    )
+        resource = next(
+            (
+                item
+                for item in self._resources.list(workspace_id=workspace_id, limit=None)
+                if item.row.is_active
+                and (name is None or item.alias == name)
+                and (
+                    visible_to_default_assistant is None
+                    or item.row.visible_to_default_assistant is visible_to_default_assistant
                 )
-            stmt = stmt.order_by(VictoriaMetricsConnectorConfigOrm.updated_at.desc()).limit(1)
-            row = session.execute(stmt).scalar_one_or_none()
-        if row is None:
+            ),
+            None,
+        )
+        if resource is None:
             return None
-        return self._connection_from_row(row, include_secret=True)
+        return self._connection_from_row(resource.row, include_secret=True)
 
     def delete(self, connector_id: str, workspace_id: str) -> bool:
         with self._db.session() as session:

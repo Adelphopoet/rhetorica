@@ -21,6 +21,11 @@ type ExecutionHistoryItem = {
   row_count: number | null;
 };
 
+type WorkspaceAccessItem = {
+  workspace: { id: string; name: string };
+  membership: { role: "owner" | "analyst" | "viewer" };
+};
+
 async function fetchApi<T>(path: string, init?: RequestInit): Promise<T | null> {
   try {
     const response = await fetchBackend(path, {
@@ -50,20 +55,22 @@ async function loadBackendState(): Promise<{
   initialConversations: ConversationSummary[];
   initialScenarios: ScenarioDefinition[];
   initialAgents: AgentProfile[];
+  workspaces: Array<{ id: string; name: string; role: "owner" | "analyst" | "viewer" }>;
 }> {
   const session = await requireServerSession("/");
   const workspaceName = session.workspace_id;
-  const [health, executions, conversations, scenarios, agents] = await Promise.all([
+  const [health, executions, conversations, scenarios, agents, workspaces] = await Promise.all([
     fetchApi<HealthcheckResponse>("/healthz"),
     fetchApi<ExecutionHistoryItem[]>(`/v1/sql/executions?workspace_id=${workspaceName}&limit=8`),
-    fetchApi<ConversationSummary[]>(`/v1/chat/conversations?workspace_id=${workspaceName}&limit=24`),
+    fetchApi<ConversationSummary[]>(`/v1/chat/conversations?workspace_id=${workspaceName}&limit=25`),
     fetchApi<ScenarioDefinition[]>(`/v1/scenarios?workspace_id=${workspaceName}`),
     fetchApi<AgentProfile[]>(`/v1/agents?workspace_id=${workspaceName}`),
+    fetchApi<WorkspaceAccessItem[]>("/v1/workspaces"),
   ]);
 
   return {
     workspaceName,
-    canAccessAdmin: session.role === "admin",
+    canAccessAdmin: session.role === "admin" || session.workspace_role === "owner",
     apiStatus: health ? `${health.status} (${health.env})` : "offline",
     currentUser: {
       login: session.user.login,
@@ -75,6 +82,11 @@ async function loadBackendState(): Promise<{
     initialConversations: conversations ?? [],
     initialScenarios: scenarios ?? [],
     initialAgents: agents ?? [],
+    workspaces: (workspaces ?? []).map(({ workspace, membership }) => ({
+      id: workspace.id,
+      name: workspace.name,
+      role: membership.role,
+    })),
   };
 }
 
@@ -100,6 +112,7 @@ export default async function HomePage() {
       initialConversations={backend.initialConversations}
       initialScenarios={backend.initialScenarios}
       initialAgents={backend.initialAgents}
+      workspaces={backend.workspaces}
       initialComposerDock={composerDockCookie === "right" ? "right" : "bottom"}
       initialResultPanelOpen={resultPanelCookie === "1"}
       initialSidebarCollapsed={sidebarCollapsedCookie === "1"}

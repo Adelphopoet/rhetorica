@@ -191,6 +191,10 @@ class ToolResultArtifactStore:
             paths=paths,
             max_paths=bounded_max_paths,
         )
+        paths_truncated = len(paths) >= bounded_max_paths
+        while paths and len(self._serialize(paths)) > 12_000:
+            paths.pop()
+            paths_truncated = True
         return {
             "ok": True,
             "artifact_id": artifact.artifact_id,
@@ -199,7 +203,7 @@ class ToolResultArtifactStore:
             "char_count": artifact.char_count,
             "sha256": artifact.sha256,
             "paths": paths,
-            "paths_truncated": len(paths) >= bounded_max_paths,
+            "paths_truncated": paths_truncated,
         }
 
     def read(
@@ -209,6 +213,9 @@ class ToolResultArtifactStore:
         json_pointer: str | None = None,
         offset: int = 0,
         limit: int = 12_000,
+        format: str = "text",  # noqa: A002 - matches the public artifact reader argument
+        fields: list[str] | None = None,
+        parse_json: bool = False,
     ) -> dict[str, Any]:
         """Read a deterministic serialized chunk from a full artifact or subpath."""
         artifact = self._get_artifact(artifact_id)
@@ -227,10 +234,25 @@ class ToolResultArtifactStore:
                     "json_pointer": resolved_pointer,
                     "can_continue": True,
                 }
+        if format == "json":
+            return self._read_json_page(
+                artifact_id=artifact_id,
+                selected=selected,
+                json_pointer=resolved_pointer,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                parse_json=parse_json,
+            )
         serialized = self._serialize(selected)
         bounded_offset = self._bounded_int(offset, minimum=0, maximum=len(serialized))
         bounded_limit = self._bounded_int(limit, minimum=1, maximum=40_000)
         end = min(len(serialized), bounded_offset + bounded_limit)
+        while (
+            end > bounded_offset + 1
+            and len(self._serialize({"content": serialized[bounded_offset:end]})) > 12_000
+        ):
+            end = bounded_offset + max(1, (end - bounded_offset) // 2)
         return {
             "ok": True,
             "artifact_id": artifact.artifact_id,
@@ -243,6 +265,106 @@ class ToolResultArtifactStore:
             "next_offset": end if end < len(serialized) else None,
             "has_more": end < len(serialized),
         }
+
+    def _read_json_page(
+        self,
+        *,
+        artifact_id: str,
+        selected: Any,
+        json_pointer: str,
+        fields: list[str] | None,
+        offset: int,
+        limit: int,
+        parse_json: bool,
+    ) -> dict[str, Any]:
+        """Return complete JSON values, never a partially escaped JSON string."""
+        if parse_json:
+            for _ in range(3):
+                if not isinstance(selected, str):
+                    break
+                try:
+                    selected = json.loads(selected)
+                except ValueError:
+                    return {
+                        "ok": False,
+                        "error_code": "artifact_invalid_json",
+                        "artifact_id": artifact_id,
+                    }
+        if fields is not None and (
+            not isinstance(fields, list)
+            or len(fields) > 20
+            or any(not isinstance(key, str) for key in fields)
+        ):
+            return {
+                "ok": False,
+                "error_code": "artifact_invalid_fields",
+                "artifact_id": artifact_id,
+            }
+
+        def project(value: Any) -> Any:
+            if fields is not None and isinstance(value, dict):
+                return {key: value[key] for key in fields if key in value}
+            return value
+
+        base: dict[str, Any] = {
+            "ok": True,
+            "artifact_id": artifact_id,
+            "json_pointer": json_pointer,
+            "format": "json",
+            "has_more": False,
+            "next_offset": None,
+        }
+        if isinstance(selected, str):
+            start = self._bounded_int(offset, minimum=0, maximum=len(selected))
+            count = self._bounded_int(limit, minimum=1, maximum=8_000)
+            end = min(len(selected), start + count)
+            while end > start + 1 and len(self._serialize({"data": selected[start:end]})) > 10_000:
+                end = start + max(1, (end - start) // 2)
+            return {
+                **base,
+                "data": selected[start:end],
+                "offset": start,
+                "offset_unit": "characters",
+                "has_more": end < len(selected),
+                "next_offset": end if end < len(selected) else None,
+            }
+        if isinstance(selected, list):
+            start = self._bounded_int(offset, minimum=0, maximum=len(selected))
+            count = self._bounded_int(limit, minimum=1, maximum=100)
+            items: list[Any] = []
+            base.update({
+                "offset": start,
+                "offset_unit": "items",
+                "total_items": len(selected),
+                "data": items,
+            })
+            for item in selected[start : start + count]:
+                candidate = project(item)
+                if len(self._serialize({**base, "data": [*items, candidate]})) > 10_000:
+                    break
+                items.append(candidate)
+            if not items and start < len(selected):
+                base.update({
+                    "ok": False,
+                    "error_code": "artifact_item_exceeds_page_budget",
+                    "next_action_hint": "Select fewer fields or a deeper json_pointer.",
+                })
+            else:
+                end = start + len(items)
+                base.update({
+                    "has_more": end < len(selected),
+                    "next_offset": end if end < len(selected) else None,
+                })
+            return base
+        data = project(selected)
+        if len(self._serialize({"data": data})) > 10_000:
+            return {
+                **base,
+                "ok": False,
+                "error_code": "artifact_item_exceeds_page_budget",
+                "next_action_hint": "Select fewer fields or a deeper json_pointer.",
+            }
+        return {**base, "data": data}
 
     def find_text(
         self,
@@ -278,10 +400,13 @@ class ToolResultArtifactStore:
                 break
             snippet_start = max(0, index - bounded_context_chars)
             snippet_end = min(len(serialized), index + len(needle) + bounded_context_chars)
-            matches.append({
+            candidate = {
                 "offset": index,
                 "snippet": serialized[snippet_start:snippet_end],
-            })
+            }
+            if len(self._serialize([*matches, candidate])) > 12_000:
+                break
+            matches.append(candidate)
             start = index + max(1, len(needle))
         has_more = haystack.find(needle, start) >= 0
         return {

@@ -46,7 +46,7 @@ function Field({
 }) {
   return (
     <label className={fullWidth ? "md:col-span-2" : undefined}>
-      <span className="mb-2 block text-sm font-medium text-primary">{label}</span>
+      <span className="mb-1 block text-sm font-medium text-primary">{label}</span>
       {children}
     </label>
   );
@@ -105,7 +105,7 @@ export function ConnectorSheet({
       description="Настройки сохраняются, пока список обновляется оптимистично. Секреты остаются прежними, если их не заменить"
       keepMounted
     >
-      <div className="space-y-5">
+      <div className="space-y-3">
         <div className="flex flex-wrap gap-2">
           {(["database", "llm", "documentation", "gitlab", "mcp", "airflow", "kubernetes", "victoriametrics", "mattermost"] as ConnectorType[]).map((type) => (
             <button
@@ -138,11 +138,11 @@ export function ConnectorSheet({
             event.preventDefault();
             void onSubmit(new FormData(event.currentTarget));
           }}
-          className="space-y-5"
+          className="space-y-3"
         >
           <input type="hidden" name="connector_id" value={editingConnector?.id ?? ""} />
           <input type="hidden" name="connector_type" value={activeType} />
-          <div className="rounded-[18px] border border-border-strong bg-surface px-4 py-3">
+          <div className="rounded-lg border border-border-strong bg-surface px-4 py-3">
             <Switch
               name="is_active"
               defaultChecked={editingConnector?.is_active ?? true}
@@ -214,7 +214,7 @@ export function ConnectorSheet({
             />
           ) : null}
 
-          <div className="rounded-[24px] border border-border bg-surface/90 p-4">
+          <div className="rounded-lg border border-border bg-surface/90 p-4">
             <div className="flex items-center gap-2">
               <Badge variant="info">{isEdit ? "Обновление" : "Создание"}</Badge>
               <p className="text-sm text-primary">
@@ -223,7 +223,7 @@ export function ConnectorSheet({
             </div>
           </div>
 
-          <div className="flex items-center justify-end gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <Button
               type="button"
               variant="ghost"
@@ -285,7 +285,7 @@ function DatabaseConnectorFields({
   );
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input
           data-autofocus
@@ -406,7 +406,7 @@ function DatabaseConnectorFields({
       ) : null}
       {engine === "trino" ? (
         <div className="space-y-3 md:col-span-2">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium text-primary">Дополнительные учётные данные Trino</p>
               <p className="text-xs text-secondary">
@@ -540,6 +540,9 @@ function LlmConnectorFields({
     connector?.connection.extra_settings?.context_window_tokens ??
     connector?.connection.extra_settings?.context_window ??
     "";
+  const [nativeCompactionEnabled, setNativeCompactionEnabled] = React.useState(
+    connector?.connection.extra_settings?.native_compaction_enabled === true
+  );
   const [retainedKeyIndexes, setRetainedKeyIndexes] = React.useState<number[]>(() =>
     Array.from({ length: storedKeyCount }, (_, index) => index)
   );
@@ -551,7 +554,7 @@ function LlmConnectorFields({
   }, [storedKeyCount, connector?.id]);
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input
           data-autofocus
@@ -578,7 +581,7 @@ function LlmConnectorFields({
         />
       </Field>
       <div className="md:col-span-2">
-        <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
           <div>
             <span className="block text-sm font-medium text-primary">
               {isEdit ? "Ключи API (оставьте пустыми, чтобы сохранить имеющиеся)" : "Ключи API"}
@@ -598,7 +601,7 @@ function LlmConnectorFields({
             Добавить ключ
           </Button>
         </div>
-        <div className="grid gap-3">
+        <div className="grid min-w-0 gap-3">
           {isEdit && storedKeyCount > 0 ? (
             <div className="grid gap-2">
               {Array.from({ length: storedKeyCount }, (_, index) => {
@@ -606,7 +609,7 @@ function LlmConnectorFields({
                 return (
                   <div
                     key={index}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-primary"
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border-strong bg-surface px-3 py-2 text-sm text-primary"
                   >
                     {retained ? (
                       <input type="hidden" name="retained_api_key_indexes" value={index} />
@@ -730,6 +733,52 @@ function LlmConnectorFields({
           defaultValue={typeof contextWindow === "number" || typeof contextWindow === "string" ? contextWindow : ""}
         />
       </Field>
+      <Field label="Хранение ответов у провайдера (store)" fullWidth>
+        <NativeSelect
+          name="store"
+          aria-label="Хранение ответов у провайдера (store)"
+          defaultValue={typeof connector?.connection.extra_settings?.store === "boolean"
+            ? String(connector.connection.extra_settings.store)
+            : ""}
+        >
+          <option value="">По умолчанию провайдера</option>
+          <option value="false">Не сохранять (false)</option>
+          <option value="true">Сохранять (true)</option>
+        </NativeSelect>
+        <span className="mt-1 block text-xs text-secondary">
+          Передаёт параметр store в API, если провайдер его поддерживает. История диалогов Rhetorica сохраняется независимо от этого выбора
+        </span>
+      </Field>
+      <label className="md:col-span-2 flex items-start gap-3 rounded-2xl border border-border-strong bg-surface px-4 py-3 text-sm text-primary">
+        <input
+          aria-label="Нативное сжатие контекста"
+          name="native_compaction_enabled"
+          type="checkbox"
+          checked={nativeCompactionEnabled}
+          onChange={(event) => setNativeCompactionEnabled(event.target.checked)}
+          className="mt-1"
+        />
+        <span>
+          Нативное сжатие контекста
+          <span className="mt-1 block text-xs text-secondary">
+            Использовать сжатие на стороне провайдера через Responses API. Включайте только при поддержке провайдером
+          </span>
+        </span>
+      </label>
+      <Field label="Порог нативного сжатия (токены)" fullWidth>
+        <Input
+          type="number"
+          name="native_compaction_threshold_tokens"
+          min={1}
+          max={1000000}
+          step={1}
+          required={nativeCompactionEnabled}
+          disabled={!nativeCompactionEnabled}
+          defaultValue={Number.isInteger(connector?.connection.extra_settings?.native_compaction_threshold_tokens)
+            ? Number(connector?.connection.extra_settings?.native_compaction_threshold_tokens)
+            : ""}
+        />
+      </Field>
       <Field label="JSON HTTP-заголовков" fullWidth>
         <Textarea aria-label="JSON HTTP-заголовков" name="llm_headers_json" rows={3}
           defaultValue={JSON.stringify(connector?.connection.headers ?? {}, null, 2)} />
@@ -798,7 +847,7 @@ function DocumentationConnectorFields({
   isEdit: boolean;
 }) {
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input
           data-autofocus
@@ -946,7 +995,7 @@ function DocumentationConnectorFields({
         />
         Синхронизация по расписанию
       </label>
-      <div className="rounded-[18px] border border-border-strong bg-surface px-4 py-3">
+      <div className="rounded-lg border border-border-strong bg-surface px-4 py-3">
         <Switch
           name="visible_to_default_assistant"
           defaultChecked={connector?.visible_to_default_assistant ?? true}
@@ -973,7 +1022,7 @@ function GitLabConnectorFields({
   isEdit: boolean;
 }) {
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input
           data-autofocus
@@ -1035,6 +1084,15 @@ function GitLabConnectorFields({
           defaultValue={connector?.connection.read_max_tokens ?? 1600}
         />
       </Field>
+      <Field label="Максимум записей архива для Coding">
+        <Input
+          type="number"
+          name="coding_archive_max_files"
+          min={1}
+          max={100000}
+          defaultValue={connector?.connection.coding_archive_max_files ?? 20000}
+        />
+      </Field>
       <label className="flex items-center gap-3 rounded-2xl border border-border-strong bg-surface px-4 py-3 text-sm text-primary">
         <input
           name="verify_tls"
@@ -1056,7 +1114,7 @@ function McpConnectorFields({
 }) {
   const headerJson = JSON.stringify(connector?.connection.headers ?? {}, null, 2);
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input
           data-autofocus
@@ -1132,7 +1190,7 @@ function McpConnectorFields({
           placeholder="Для управляемого доступа к внешним инструментам из Jira, Confluence, GitLab или другого источника MCP"
         />
       </Field>
-      <div className="rounded-[18px] border border-border-strong bg-surface px-4 py-3 md:col-span-2">
+      <div className="rounded-lg border border-border-strong bg-surface px-4 py-3 md:col-span-2">
         <Switch
           name="visible_to_external_mcp"
           defaultChecked={connector?.visible_to_external_mcp ?? false}
@@ -1177,7 +1235,7 @@ function AirflowConnectorFields({
   isEdit: boolean;
 }) {
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input
           data-autofocus
@@ -1260,7 +1318,7 @@ function KubernetesConnectorFields({
   isEdit: boolean;
 }) {
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input data-autofocus name="name" defaultValue={connector?.name ?? ""} placeholder="k8s-prod" required />
       </Field>
@@ -1326,7 +1384,7 @@ function VictoriaMetricsConnectorFields({
 }) {
   const templateValue = JSON.stringify(connector?.connection.templates ?? [], null, 2);
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input data-autofocus name="name" defaultValue={connector?.name ?? ""} placeholder="vm-prod" required />
       </Field>
@@ -1403,7 +1461,7 @@ function MattermostConnectorFields({
 }) {
   const activeAgents = agents.filter((agent) => agent.is_active);
   return (
-    <div className="grid gap-4 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-2">
       <Field label="Название">
         <Input
           data-autofocus

@@ -59,6 +59,7 @@ class LlmCallDiagnostics:
     response_id: str | None = None
     provider_request_id: str | None = None
     error_type: str | None = None
+    context_manifest: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +273,8 @@ class LlmClient:
             "model": connection.model,
             "messages": messages,
         }
+        if connection.store is not None:
+            payload["store"] = connection.store
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
@@ -660,6 +663,8 @@ class LlmClient:
             "model": self._connection.model,
             "input": resolved_input,
         }
+        if self._connection.store is not None:
+            payload["store"] = self._connection.store
         if instructions:
             payload["instructions"] = instructions
         if previous_response_id:

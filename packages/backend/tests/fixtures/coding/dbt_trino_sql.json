@@ -1,0 +1,82 @@
+{
+  "allowed": [
+    {
+      "command": "parse",
+      "sql": "SELECT 1"
+    },
+    {
+      "command": "ls",
+      "sql": "SELECT table_catalog, table_schema, table_name, table_type FROM iceberg.information_schema.tables WHERE table_schema = 'analytics' ORDER BY table_name"
+    },
+    {
+      "command": "compile",
+      "sql": "SELECT column_name, data_type, ordinal_position FROM iceberg.information_schema.columns WHERE table_schema = 'analytics' AND table_name = 'orders' ORDER BY ordinal_position"
+    },
+    {
+      "command": "compile",
+      "sql": "SHOW SCHEMAS FROM iceberg LIKE 'analytics'"
+    },
+    {
+      "command": "show",
+      "sql": "WITH source AS (SELECT order_id, gross_revenue, discount FROM iceberg.analytics.orders) SELECT order_id, gross_revenue - discount AS net_revenue FROM source LIMIT 5"
+    },
+    {
+      "command": "data_test",
+      "sql": "SELECT COUNT(*) AS failures FROM (SELECT order_id FROM iceberg.analytics.orders WHERE order_id IS NULL) dbt_internal_test"
+    },
+    {
+      "command": "compile",
+      "sql": "DESCRIBE iceberg.analytics.orders"
+    },
+    {
+      "command": "compile",
+      "sql": "EXPLAIN (TYPE VALIDATE) SELECT order_id FROM iceberg.analytics.orders"
+    },
+    {
+      "command": "show",
+      "sql": "select to_hex(sha256(to_utf8(concat_ws('|', source_instance, published_batch_id, 'infcategory_database_fqn_snapshot_v1')))) as snapshot_row_id, cast(max(published_at) at time zone 'Europe/Moscow' as date) as snapshot_date, count(*) as schema_cnt from iceberg_dg.dg_gold.omd_infcategory_schema_snapshot group by source_instance, published_batch_id limit 10"
+    }
+  ],
+  "denied": [
+    {
+      "source": "run_query",
+      "sql": "DELETE FROM iceberg.analytics.orders"
+    },
+    {
+      "source": "hook",
+      "sql": "CREATE TABLE iceberg.analytics.pwned AS SELECT 1"
+    },
+    {
+      "source": "macro",
+      "sql": "CALL system.runtime.kill_query('query')"
+    },
+    {
+      "source": "prepared",
+      "sql": "PREPARE attack FROM SELECT 1"
+    },
+    {
+      "source": "prepared",
+      "sql": "EXECUTE attack"
+    },
+    {
+      "source": "explain_analyze",
+      "sql": "EXPLAIN ANALYZE SELECT * FROM iceberg.analytics.orders"
+    },
+    {
+      "source": "session",
+      "sql": "SET SESSION join_distribution_type = 'BROADCAST'"
+    },
+    {
+      "source": "passthrough",
+      "sql": "SELECT * FROM TABLE(system.query(query => 'DELETE FROM orders'))"
+    },
+    {
+      "source": "qualified_udf",
+      "sql": "SELECT analytics.secret_udf(order_id) FROM iceberg.analytics.orders"
+    },
+    {
+      "source": "unknown_function",
+      "sql": "SELECT definitely_unknown(order_id) FROM iceberg.analytics.orders"
+    }
+  ]
+}

@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import { AdminPageClient } from "./AdminPageClient";
 import type { AgentProfile } from "@/features/agents/agentsApi";
+import type { CodingTeamDetail } from "@/features/coding/codingApi";
 import type { ScenarioDefinition } from "@/features/scenarios/scenariosApi";
 import { fetchBackend } from "@/lib/backendAuth";
-import { requireAdminSession } from "@/lib/serverSession";
+import { requireWorkspaceManagerSession } from "@/lib/serverSession";
 import type {
   AirflowConnectorItem,
+  CodingEnvironmentProfile,
   DatabaseConnectorItem,
   DocumentationConnectorItem,
   GitLabConnectorItem,
@@ -16,7 +18,12 @@ import type {
   McpConnectorItem,
   RagInsightReviewItem,
   VictoriaMetricsConnectorItem,
+  WorkspaceAccessItem,
+  WorkspaceMembershipItem,
+  WorkspaceResourceGrantItem,
+  WorkspaceResourceOption,
   WorkspaceSkillItem,
+  WorkspaceUserItem,
 } from "./types";
 
 async function fetchApi<T>(path: string): Promise<T[]> {
@@ -109,8 +116,46 @@ async function fetchAgents(workspaceId: string): Promise<AgentProfile[]> {
   return fetchApi<AgentProfile>(`/v1/admin/agents?workspace_id=${workspaceId}&limit=200`);
 }
 
+async function fetchCodingEnvironments(): Promise<CodingEnvironmentProfile[]> {
+  return fetchApi<CodingEnvironmentProfile>("/v1/admin/coding-environments");
+}
+
+async function fetchCodingTeams(): Promise<CodingTeamDetail[]> {
+  return fetchApi<CodingTeamDetail>("/v1/coding-agent-teams");
+}
+
 async function fetchLocalUsers(): Promise<LocalUserItem[]> {
   return fetchApi<LocalUserItem>("/v1/admin/users");
+}
+
+async function fetchWorkspaces(): Promise<WorkspaceAccessItem[]> {
+  return fetchApi<WorkspaceAccessItem>("/v1/workspaces");
+}
+
+async function fetchWorkspaceMemberships(workspaceId: string): Promise<WorkspaceMembershipItem[]> {
+  return fetchApi<WorkspaceMembershipItem>(
+    `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/memberships`,
+  );
+}
+
+async function fetchWorkspaceResourceGrants(
+  workspaceId: string,
+): Promise<WorkspaceResourceGrantItem[]> {
+  return fetchApi<WorkspaceResourceGrantItem>(
+    `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/resource-grants`,
+  );
+}
+
+async function fetchWorkspaceUsers(): Promise<WorkspaceUserItem[]> {
+  return fetchApi<WorkspaceUserItem>("/v1/admin/workspaces/users");
+}
+
+async function fetchWorkspaceResourceOptions(
+  workspaceId: string,
+): Promise<WorkspaceResourceOption[]> {
+  return fetchApi<WorkspaceResourceOption>(
+    `/v1/admin/workspaces/${encodeURIComponent(workspaceId)}/local-resources`,
+  );
 }
 
 export const metadata: Metadata = {
@@ -118,9 +163,32 @@ export const metadata: Metadata = {
 };
 
 export default async function AdminPage() {
-  const session = await requireAdminSession("/admin");
+  const session = await requireWorkspaceManagerSession("/admin");
+  const isSystemAdmin = session.role === "admin";
   const workspaceId = session.workspace_id;
-  const [databaseConnectors, llmConnectors, documentationConnectors, gitlabConnectors, mcpConnectors, airflowConnectors, kubernetesConnectors, victoriametricsConnectors, mattermostConnectors, pendingInsights, scenarios, workspaceSkills, agents, localUsers] = await Promise.all([
+  const [
+    databaseConnectors,
+    llmConnectors,
+    documentationConnectors,
+    gitlabConnectors,
+    mcpConnectors,
+    airflowConnectors,
+    kubernetesConnectors,
+    victoriametricsConnectors,
+    mattermostConnectors,
+    pendingInsights,
+    scenarios,
+    workspaceSkills,
+    agents,
+    codingEnvironments,
+    codingTeams,
+    localUsers,
+    workspaces,
+    workspaceMemberships,
+    workspaceResourceGrants,
+    workspaceUsers,
+    workspaceResourceOptions,
+  ] = await Promise.all([
     fetchDatabaseConnectors(workspaceId),
     fetchLlmConnectors(workspaceId),
     fetchDocumentationConnectors(workspaceId),
@@ -130,15 +198,23 @@ export default async function AdminPage() {
     fetchKubernetesConnectors(workspaceId),
     fetchVictoriaMetricsConnectors(workspaceId),
     fetchMattermostConnectors(workspaceId),
-    fetchPendingRagInsights(workspaceId),
-    fetchScenarios(workspaceId),
+    isSystemAdmin ? fetchPendingRagInsights(workspaceId) : Promise.resolve([]),
+    isSystemAdmin ? fetchScenarios(workspaceId) : Promise.resolve([]),
     fetchWorkspaceSkills(workspaceId),
-    fetchAgents(workspaceId),
-    fetchLocalUsers(),
+    isSystemAdmin ? fetchAgents(workspaceId) : Promise.resolve([]),
+    isSystemAdmin ? fetchCodingEnvironments() : Promise.resolve([]),
+    isSystemAdmin ? fetchCodingTeams() : Promise.resolve([]),
+    isSystemAdmin ? fetchLocalUsers() : Promise.resolve([]),
+    isSystemAdmin ? fetchWorkspaces() : Promise.resolve([]),
+    isSystemAdmin ? fetchWorkspaceMemberships(workspaceId) : Promise.resolve([]),
+    isSystemAdmin ? fetchWorkspaceResourceGrants(workspaceId) : Promise.resolve([]),
+    isSystemAdmin ? fetchWorkspaceUsers() : Promise.resolve([]),
+    isSystemAdmin ? fetchWorkspaceResourceOptions(workspaceId) : Promise.resolve([]),
   ]);
 
   return (
     <AdminPageClient
+      isSystemAdmin={isSystemAdmin}
       databaseConnectors={databaseConnectors}
       llmConnectors={llmConnectors}
       documentationConnectors={documentationConnectors}
@@ -152,9 +228,16 @@ export default async function AdminPage() {
       scenarios={scenarios}
       workspaceSkills={workspaceSkills}
       agents={agents}
+      codingEnvironments={codingEnvironments}
+      codingTeams={codingTeams}
       localUsers={localUsers}
       currentUserId={session.user.id}
       workspaceId={workspaceId}
+      workspaces={workspaces}
+      workspaceMemberships={workspaceMemberships}
+      workspaceResourceGrants={workspaceResourceGrants}
+      workspaceUsers={workspaceUsers}
+      workspaceResourceOptions={workspaceResourceOptions}
     />
   );
 }

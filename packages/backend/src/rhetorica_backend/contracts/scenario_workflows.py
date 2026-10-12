@@ -93,6 +93,24 @@ class LlmNode(NodeBase):
     )
 
 
+class CodingTaskNode(NodeBase):
+    dbt_project_subdir: str = Field(default=".", max_length=1024)
+    type: Literal["coding_task"] = "coding_task"
+    root_agent_id: str = Field(default="", max_length=36)
+    developer_agent_id: str = Field(default="", max_length=36)
+    qa_agent_id: str = Field(default="", max_length=36)
+    gitlab_connector_id: str = Field(default="", max_length=36)
+    project_id: str = Field(default="", max_length=255)
+    target_branch: str = Field(default="", max_length=255)
+    database_connector_id: str | None = Field(default=None, max_length=36)
+    environment_profile_id: str = Field(default="", max_length=128)
+    outputs: dict[str, ValueSpec] = Field(default_factory=lambda: {
+        "run_id": ValueSpec(type="string"), "status": ValueSpec(type="string"),
+        "report": ValueSpec(type="json", required=False),
+        "candidate": ValueSpec(type="json", required=False), "mr_url": ValueSpec(type="string", required=False),
+    })
+
+
 class ConditionRule(WorkflowContract):
     input: str = Field(default="value", min_length=1, max_length=80)
     operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains", "is_empty"] = "eq"
@@ -130,6 +148,7 @@ ScenarioNode = Annotated[
     | SqlNode
     | PythonNode
     | LlmNode
+    | CodingTaskNode
     | ConditionNode
     | ParallelNode
     | JoinNode
@@ -146,7 +165,7 @@ class ScenarioEdge(WorkflowContract):
 
 
 class ScenarioWorkflowDefinition(WorkflowContract):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     parameters: dict[str, ValueSpec] = Field(default_factory=dict)
     nodes: list[ScenarioNode] = Field(default_factory=list, max_length=100)
     edges: list[ScenarioEdge] = Field(default_factory=list, max_length=500)

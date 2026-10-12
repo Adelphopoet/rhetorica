@@ -4,19 +4,26 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from rhetorica_backend.contracts.workspaces import (
+    UpsertWorkspaceMembershipRequest,
+    WorkspaceRole,
+)
 from rhetorica_backend.domain.rate_limits import RateLimitUnavailable
 from rhetorica_backend.infra.logging import get_logger
 from rhetorica_backend.infra.postgres.user_repository import (
     LOCAL_AUTH_PROVIDER,
     SUPPORTED_LOCAL_USER_ROLES,
+    UserAccountItem,
     UserAccountRepository,
 )
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 from rhetorica_backend.infra.security.passwords import hash_password
 from sqlalchemy.exc import IntegrityError
 
 from rhetorica_api.app.auth import AuthContext, require_admin_access
 from rhetorica_api.app.identity import get_db_runtime
 from rhetorica_api.app.rate_limits import api_rate_limit_service
+from rhetorica_api.app.settings import settings
 
 logger = get_logger(__name__)
 
@@ -51,7 +58,7 @@ def _repository() -> UserAccountRepository:
     return UserAccountRepository(db=get_db_runtime())
 
 
-def _to_response(user) -> LocalUserItem:
+def _to_response(user: UserAccountItem) -> LocalUserItem:
     return LocalUserItem(
         id=user.id,
         workspace_id=user.workspace_id,
@@ -71,7 +78,7 @@ def _to_response(user) -> LocalUserItem:
 def list_local_users(
     auth_context: Annotated[AuthContext, Depends(require_admin_access)],
 ) -> list[LocalUserItem]:
-    users = _repository().list_by_workspace(workspace_id=auth_context.workspace_id)
+    users = _repository().list_by_workspace(workspace_id=settings.auth_default_workspace_id)
     return [_to_response(user) for user in users if user.auth_provider == LOCAL_AUTH_PROVIDER]
 
 
@@ -84,7 +91,7 @@ def create_local_user(
         raise HTTPException(status_code=400, detail="unsupported_user_role")
     try:
         user = _repository().create_local_user(
-            workspace_id=auth_context.workspace_id,
+            workspace_id=settings.auth_default_workspace_id,
             login=payload.login,
             password_hash=hash_password(payload.password),
             role=payload.role,
@@ -92,6 +99,20 @@ def create_local_user(
         )
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="user_login_conflict") from exc
+    workspace_repository = WorkspaceRepository(
+        db=get_db_runtime(),
+        default_workspace_id=settings.auth_default_workspace_id,
+    )
+    workspace_repository.ensure_home_membership(user_id=user.id)
+    if auth_context.workspace_id != settings.auth_default_workspace_id:
+        workspace_repository.upsert_membership(
+            workspace_id=auth_context.workspace_id,
+            request=UpsertWorkspaceMembershipRequest(
+                user_id=user.id,
+                role=WorkspaceRole.OWNER if user.is_admin else WorkspaceRole.ANALYST,
+            ),
+            actor_user_id=auth_context.user_id,
+        )
     return _to_response(user)
 
 
@@ -124,11 +145,11 @@ def update_local_user_rate_limit(
     repository = _repository()
     _local_user_or_404(
         repository=repository,
-        workspace_id=auth_context.workspace_id,
+        workspace_id=settings.auth_default_workspace_id,
         user_id=user_id,
     )
     user = repository.update_api_rate_limit(
-        workspace_id=auth_context.workspace_id,
+        workspace_id=settings.auth_default_workspace_id,
         user_id=user_id,
         requests_per_hour=payload.requests_per_hour,
     )
@@ -145,11 +166,11 @@ async def disable_local_user_rate_limit(
     repository = _repository()
     user = _local_user_or_404(
         repository=repository,
-        workspace_id=auth_context.workspace_id,
+        workspace_id=settings.auth_default_workspace_id,
         user_id=user_id,
     )
     updated = repository.update_api_rate_limit(
-        workspace_id=auth_context.workspace_id,
+        workspace_id=settings.auth_default_workspace_id,
         user_id=user_id,
         requests_per_hour=None,
     )
@@ -177,7 +198,7 @@ async def reset_local_user_rate_limit(
     repository = _repository()
     user = _local_user_or_404(
         repository=repository,
-        workspace_id=auth_context.workspace_id,
+        workspace_id=settings.auth_default_workspace_id,
         user_id=user_id,
     )
     if user.api_rate_limit_per_hour is None:
@@ -202,11 +223,11 @@ async def delete_local_user(
     repository = _repository()
     user = _local_user_or_404(
         repository=repository,
-        workspace_id=auth_context.workspace_id,
+        workspace_id=settings.auth_default_workspace_id,
         user_id=user_id,
     )
     deleted = repository.delete_local_user(
-        workspace_id=auth_context.workspace_id,
+        workspace_id=settings.auth_default_workspace_id,
         user_id=user_id,
     )
     if not deleted:

@@ -184,7 +184,9 @@ class SqlResultExportService:
         if artifact_id:
             try:
                 existing = self._artifact_service.get_owned(
-                    artifact_id=artifact_id, owner_user_id=owner_user_id
+                    artifact_id=artifact_id,
+                    owner_user_id=owner_user_id,
+                    workspace_id=workspace_id,
                 )
             except ArtifactNotFoundError:
                 pass

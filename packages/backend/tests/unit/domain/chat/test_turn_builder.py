@@ -54,6 +54,16 @@ def _tool_names(prepared) -> set[str]:
     }
 
 
+def test_optimized_prompt_reports_the_version_actually_sent(monkeypatch):
+    from rhetorica_backend.domain.chat import settings
+    from rhetorica_backend.domain.chat.llm.prompt_contract import PROMPT_VERSION
+
+    monkeypatch.setattr(settings, "_settings", settings.ChatSettings(context_harness_enabled=True))
+    prepared = _builder().prepare_turn(request=ChatAskRequest(question="test"), db_connectors=[])
+    assert prepared.state.prompt_version == PROMPT_VERSION
+    assert f"prompt_version={prepared.state.prompt_version}" in prepared.messages[0]["content"]
+
+
 def test_prepare_turn_exposes_only_generic_mcp_discovery_initially() -> None:
     prepared = _builder().prepare_turn(
         request=ChatAskRequest(

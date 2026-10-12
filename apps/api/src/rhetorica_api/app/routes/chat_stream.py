@@ -15,6 +15,8 @@ from rhetorica_backend.contracts.chat import (
     AnalystChatAskRequest,
     ChatActorContext,
     ChatAskRequest,
+    DoneEvent,
+    ErrorEvent,
 )
 from rhetorica_backend.domain.files.policy import ArtifactRejectedError
 from rhetorica_backend.domain.files.service import ArtifactConflictError, ArtifactNotFoundError
@@ -43,6 +45,81 @@ class _ActiveChatRun:
 
 
 _active_chat_runs: dict[str, _ActiveChatRun] = {}
+
+
+async def _coding_event_generator(*, planner, payload, user, run_id):
+    cancel = asyncio.Event()
+    active = _ActiveChatRun(
+        cancel_event=cancel, current_user_id=user.id, workspace_id=user.workspace_id
+    )
+    _active_chat_runs[run_id] = active
+    stream = planner.stream(request=payload, user=user)
+    next_event = asyncio.create_task(anext(stream))
+    cancelled = asyncio.create_task(cancel.wait())
+    try:
+        while True:
+            ready, _ = await asyncio.wait(
+                [next_event, cancelled],
+                timeout=SSE_KEEPALIVE_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancelled in ready:
+                event = DoneEvent(
+                    answer="Обсуждение остановлено. Разработка не запускалась.",
+                    conversation_id=payload.conversation_id,
+                    cancelled=True,
+                )
+                yield f"event: done\ndata: {event.model_dump_json()}\n\n"
+                return
+            if not ready:
+                yield ": ping\n\n"
+                continue
+            try:
+                event = next_event.result()
+            except StopAsyncIteration:
+                return
+            yield f"event: {event.type.value}\ndata: {event.model_dump_json()}\n\n"
+            next_event = asyncio.create_task(anext(stream))
+    except Exception as exc:
+        from rhetorica_backend.domain.coding.errors import CodingRunError
+
+        code = exc.code if isinstance(exc, CodingRunError) else "coding_planning_failed"
+        # Upstream exceptions may contain credentials or repository bodies.
+        logger.error(  # noqa: TRY400 — deliberately exclude unsafe upstream exception bodies
+            "api.coding.planning.failed",
+            workspace_id=user.workspace_id,
+            conversation_id=payload.conversation_id,
+            run_id=run_id,
+            error_code=code,
+            error_type=type(exc).__name__,
+        )
+        messages = {
+            "coding_planning_iteration_limit_reached": (
+                "Исчерпан обычный лимит итераций чата при подготовке плана. "
+                "Разработка не запускалась; её бюджет не потрачен."
+            ),
+            "coding_planning_timeout": (
+                "Модель не ответила за отведённое время при подготовке плана. "
+                "Разработка не запускалась; повтори сообщение."
+            ),
+        }
+        event = ErrorEvent(
+            code=code,
+            message=messages.get(
+                code,
+                "Не удалось подготовить план. Разработка не запускалась; повтори сообщение.",
+            ),
+        )
+        yield f"event: error\ndata: {event.model_dump_json()}\n\n"
+    finally:
+        for pending in [next_event, cancelled]:
+            if not pending.done():
+                pending.cancel()
+                with suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await pending
+        await stream.aclose()
+        if _active_chat_runs.get(run_id) is active:
+            _active_chat_runs.pop(run_id, None)
 
 
 async def _stream_event_generator(
@@ -152,6 +229,12 @@ async def ask_chat_stream(payload: AnalystChatAskRequest, request: Request) -> S
     else:
         run_id = str(uuid4())
     current_user = resolve_current_user(payload.workspace_id)
+    if internal_request.coding_mode or internal_request.coding_resources is not None:
+        from .coding_runs import actor
+
+        actor()
+        if not internal_request.coding_mode:
+            raise HTTPException(status_code=422, detail="coding_mode_required")
     internal_request = internal_request.model_copy(
         update={
             "actor_context": ChatActorContext(
@@ -184,6 +267,7 @@ async def ask_chat_stream(payload: AnalystChatAskRequest, request: Request) -> S
         try:
             get_artifact_service().validate_turn_inputs(
                 artifact_ids=internal_request.attachment_ids,
+                workspace_id=internal_request.workspace_id,
                 conversation_id=internal_request.conversation_id,
                 owner_user_id=current_user.id,
             )
@@ -197,6 +281,21 @@ async def ask_chat_stream(payload: AnalystChatAskRequest, request: Request) -> S
         current_user_id=current_user.id,
         existing_conversation=existing_conversation,
     )
+
+    if internal_request.coding_mode:
+        from .coding_runs import actor, invoke, planning_service
+
+        user = actor()
+        planner = planning_service()
+        invoke(planner.selection, internal_request, user)
+
+        return StreamingResponse(
+            _coding_event_generator(
+                planner=planner, payload=internal_request, user=user, run_id=run_id
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return StreamingResponse(
         _stream_event_generator(

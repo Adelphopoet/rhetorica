@@ -1,5 +1,6 @@
 "use client";
 
+import { ScenarioCodingSettings } from "@/features/coding/ScenarioCodingSettings";
 import "./monaco";
 
 import { useState } from "react";
@@ -104,6 +105,7 @@ export function WorkflowNodeSettings({ node, graph, capabilities, update, update
       {!selectedAgent?.structured_output && <p className="text-xs text-warning">Выбранный коннектор не поддерживает структурированный ответ.</p>}
       <fieldset className="space-y-2"><legend className="mb-2 text-xs text-muted">Инструменты шага</legend>{capabilities.tools.map(tool => <label key={tool.name} className="flex items-start gap-2 text-xs"><input type="checkbox" checked={node.allowed_tools?.includes(tool.name) ?? false} onChange={event => update({ ...node, allowed_tools: event.target.checked ? [...(node.allowed_tools ?? []), tool.name] : node.allowed_tools?.filter(name => name !== tool.name) })} />{tool.description}</label>)}</fieldset>
     </>}
+    {node.type === "coding_task" && <ScenarioCodingSettings node={node} capabilities={capabilities} update={update} />}
     {node.type === "approval" && <label className={labelClass}>Запрос инициатору<Textarea value={node.message} onChange={event => update({ ...node, message: event.target.value })} /></label>}
     {node.type === "condition" && <div className="space-y-2"><select className={selectClass} aria-label="Соединение условий" value={node.match} onChange={event => update({ ...node, match: event.target.value as "all" | "any" })}><option value="all">Все условия</option><option value="any">Любое условие</option></select>{node.rules?.map((rule, index) => <div key={index} className="space-y-2 rounded-lg border border-border-strong p-2"><select aria-label="Вход условия" className={selectClass} value={rule.input} onChange={event => update({ ...node, rules: node.rules?.map((item, i) => i === index ? { ...item, input: event.target.value } : item) })}>{Object.keys(node.inputs).map(name => <option key={name}>{name}</option>)}</select><select aria-label="Оператор" className={selectClass} value={rule.operator} onChange={event => update({ ...node, rules: node.rules?.map((item, i) => i === index ? { ...item, operator: event.target.value as typeof rule.operator } : item) })}>{["eq", "ne", "gt", "gte", "lt", "lte", "contains", "is_empty"].map(operator => <option key={operator}>{operator}</option>)}</select><JsonField label="Сравнить со значением" value={rule.value} onChange={value => update({ ...node, rules: node.rules?.map((item, i) => i === index ? { ...item, value } : item) })} rows={2} /></div>)}<Button size="sm" variant="ghost" onClick={() => update({ ...node, rules: [...(node.rules ?? []), { input: Object.keys(node.inputs)[0] ?? "value", operator: "eq", value: true }] })}>Добавить условие</Button></div>}
     {node.type === "python" && <PythonOutputSettings node={node} update={update} />}

@@ -72,6 +72,8 @@ class CreatedApiTokenResponse(ApiTokenItemResponse):
 def _session_payload(auth_context) -> dict[str, object]:
     return {
         "workspace_id": auth_context.workspace_id,
+        "home_workspace_id": auth_context.home_workspace_id,
+        "workspace_role": auth_context.workspace_role,
         "role": auth_context.role,
         "expires_at": auth_context.expires_at.isoformat(),
         "user": {

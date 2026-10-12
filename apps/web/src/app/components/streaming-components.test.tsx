@@ -120,3 +120,17 @@ describe("CollapsibleThinking", () => {
     }
   });
 });
+
+it("does not offer empty JSON arguments and shows missing result instead of endless activity", () => {
+  render(<CollapsibleThinking defaultExpanded thinkingBlocks={[]} executionStatuses={[]} toolCalls={[{ id: "call", tool_name: "repository_run_command", arguments: {}, started_at: "2026-10-06T08:00:00Z" }]} />);
+  expect(screen.queryByText("Аргументы:")).not.toBeInTheDocument();
+  expect(screen.queryByText("Показать аргументы")).not.toBeInTheDocument();
+  expect(screen.getByText("Нет результата")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Скрыть журнал выполнения" })).toHaveAttribute("aria-expanded", "true");
+});
+
+it("shows command arguments and a zero-second duration", () => {
+  render(<CollapsibleThinking defaultExpanded thinkingBlocks={[]} executionStatuses={[]} toolCalls={[{ id: "call", tool_name: "repository_run_command", arguments: { argv: ["git", "status", "--short"] }, started_at: "2026-10-06T08:00:00Z", completed_at: "2026-10-06T08:00:00Z", success: true }]} />);
+  expect(screen.getByText(/git status --short/)).toBeInTheDocument();
+  expect(screen.getByText("0s")).toBeInTheDocument();
+});

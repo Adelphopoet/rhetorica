@@ -187,3 +187,24 @@ def test_streaming_transport_finalization_emits_error_for_missing_llm() -> None:
     assert result.events[0].code == "llm_connector_missing"
     assert result.terminal.terminal_kind == "error"
     assert result.diagnostics is None
+
+
+def test_stream_journal_is_saved_atomically_with_answer_before_done():
+    saved = []
+    def save_message(**kwargs):
+        saved.append(kwargs)
+        return SimpleNamespace(id="answer")
+    journal = [ThinkingEvent(content="Inspecting metadata").model_dump(mode="json")]
+    service = PostAssemblyTransportFinalizationService(
+        history_persistence_service=ChatHistoryPersistenceService(conversation_manager=SimpleNamespace(save_message=save_message)),
+        adapter=StreamingChatTransportAdapter(),
+    )
+    result = service.finalize(finalization_input=TransportFinalizationInput(
+        request=ChatAskRequest(question="Inspect"), conversation_id="conv", completion_kind="runtime_completed",
+        turn=_turn(), history_persistence=PersistConversationHistory(conversation_id="conv"),
+        journal_events=journal,
+    ))
+    assert saved[-1]["role"] == "assistant"
+    assert saved[-1]["journal_events"] == journal
+    assert result.events[-1].assistant_message_id == "answer"
+    assert len(result.events) == 1

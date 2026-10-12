@@ -66,8 +66,10 @@ class SessionFlowTransportFinalizationInputFactory:
         flow: CompletedSessionFlow,
     ) -> TransportFinalizationInput:
         transport_events: list[StreamEvent] = []
+        journal_events = None
         if isinstance(flow.transport_artifact, StreamingRuntimeTransportArtifact):
             transport_events = list(flow.transport_artifact.events)
+            journal_events = flow.transport_artifact.journal_events
         return TransportFinalizationInput(
             request=request,
             conversation_id=flow.session.conversation_id,
@@ -76,6 +78,7 @@ class SessionFlowTransportFinalizationInputFactory:
             llm_usages=flow.llm_usages,
             history_persistence=flow.history_persistence,
             transport_events=transport_events,
+            journal_events=journal_events,
             persisted_user_message_id=flow.persisted_user_message_id,
         )
 
@@ -159,6 +162,7 @@ class PostAssemblyTransportFinalizationService(Generic[TTransportResult]):
             conversation_id=decision.conversation_id,
             request=finalization_input.request,
             turn=finalization_input.turn,
+            journal_events=finalization_input.journal_events,
             persist_user_message=finalization_input.persisted_user_message_id is None,
             persisted_user_message_id=finalization_input.persisted_user_message_id,
         )

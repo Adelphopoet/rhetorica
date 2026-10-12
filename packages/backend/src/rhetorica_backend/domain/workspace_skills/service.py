@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,12 +12,15 @@ import httpx
 from rhetorica_backend.contracts.workspace_skills import (
     BaseUpsertWorkspaceSkillRequest,
     UpsertGithubWorkspaceSkillRequest,
+    UpsertGitLabWorkspaceSkillRequest,
     UpsertManualWorkspaceSkillRequest,
     UpsertWorkspaceSkillRequest,
     WorkspaceSkillAsset,
     WorkspaceSkillBundle,
     WorkspaceSkillItem,
 )
+from rhetorica_backend.domain.chat.gitlab.service import GitLabRequestError, GitLabService
+from rhetorica_backend.infra.postgres.gitlab_connector_repository import GitLabConnectorRepository
 from rhetorica_backend.infra.postgres.workspace_skill_repository import (
     WorkspaceSkillRepository,
 )
@@ -45,6 +49,7 @@ class ValidatedWorkspaceSkillPayload:
     content_markdown: str
     content_bundle: WorkspaceSkillBundle
     content_sha256: str
+    version_digest: str
     validation_status: str
     last_validated_at: datetime
 
@@ -62,9 +67,13 @@ class WorkspaceSkillService:
         repository: WorkspaceSkillRepository,
         *,
         http_client: httpx.Client | None = None,
+        gitlab_connector_repository: GitLabConnectorRepository | None = None,
+        gitlab_service: GitLabService | None = None,
     ) -> None:
         self._repository = repository
         self._http_client = http_client or httpx.Client(timeout=15.0, follow_redirects=True)
+        self._gitlab_connector_repository = gitlab_connector_repository
+        self._gitlab_service = gitlab_service or GitLabService()
 
     def list(self, workspace_id: str, limit: int) -> list[WorkspaceSkillItem]:
         return self._repository.list(workspace_id=workspace_id, limit=limit)
@@ -87,6 +96,7 @@ class WorkspaceSkillService:
             content_markdown=validated.content_markdown,
             content_bundle=validated.content_bundle.model_dump(mode="json"),
             content_sha256=validated.content_sha256,
+            version_digest=validated.version_digest,
             last_validated_at=validated.last_validated_at,
         )
 
@@ -115,6 +125,7 @@ class WorkspaceSkillService:
             content_markdown=validated.content_markdown,
             content_bundle=validated.content_bundle.model_dump(mode="json"),
             content_sha256=validated.content_sha256,
+            version_digest=validated.version_digest,
             last_validated_at=validated.last_validated_at,
         )
 
@@ -127,12 +138,149 @@ class WorkspaceSkillService:
     ) -> ValidatedWorkspaceSkillPayload:
         if isinstance(request, UpsertGithubWorkspaceSkillRequest):
             return self._validate_and_snapshot_github(request.source_url)
+        if isinstance(request, UpsertGitLabWorkspaceSkillRequest):
+            return self._validate_and_snapshot_gitlab(request)
         if isinstance(request, UpsertManualWorkspaceSkillRequest):
             return self._validate_and_snapshot_manual(
                 name=request.name,
                 markdown=request.content_markdown,
             )
         raise WorkspaceSkillValidationError("workspace_skill_unsupported_source_kind")
+
+    def _validate_and_snapshot_gitlab(
+        self,
+        request: UpsertGitLabWorkspaceSkillRequest,
+    ) -> ValidatedWorkspaceSkillPayload:
+        if self._gitlab_connector_repository is None:
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_connector_unavailable")
+        connection = self._gitlab_connector_repository.get_connection(
+            workspace_id=request.workspace_id,
+            name=request.connector_name,
+        )
+        if connection is None:
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_connector_not_found")
+        project_path = request.project_path.strip().strip("/")
+        bundle_path = self._safe_bundle_path(request.path)
+        if not project_path:
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_project_invalid")
+        if bundle_path is None:
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_path_invalid")
+        main_path = self._gitlab_main_path(bundle_path)
+        try:
+            commit_sha = self._gitlab_service.resolve_commit(
+                connection,
+                project_path=project_path,
+                ref=request.ref.strip(),
+            )
+            provenance_url = (
+                f"gitlab://{request.connector_name}/{project_path}@{commit_sha}/{bundle_path}"
+            )
+            tree = self._gitlab_service.list_tree(
+                connection,
+                project_path=project_path,
+                path=bundle_path or None,
+                ref=commit_sha,
+                recursive=True,
+                limit=self._MAX_BUNDLE_ASSETS,
+            )
+        except GitLabRequestError as exc:
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_import_failed") from exc
+        if tree.get("truncated"):
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_bundle_too_many_files")
+        assets: list[WorkspaceSkillAsset] = []
+        total_bytes = 0
+        for entry in tree.get("items", []):
+            if (
+                not isinstance(entry, dict)
+                or entry.get("type") != "blob"
+                or entry.get("mode") == "120000"
+            ):
+                continue
+            path = entry.get("path")
+            if not isinstance(path, str) or not path.lower().endswith((".md", ".txt")):
+                continue
+            relative_path = self._safe_bundle_path(path)
+            if relative_path is None or not self._is_within_bundle(
+                path=relative_path, bundle_path=bundle_path
+            ):
+                continue
+            try:
+                file = self._gitlab_service.read_file(
+                    connection,
+                    project_path=project_path,
+                    file_path=relative_path,
+                    ref=commit_sha,
+                    max_tokens=4000,
+                )
+            except GitLabRequestError as exc:
+                raise WorkspaceSkillValidationError("workspace_skill_gitlab_import_failed") from exc
+            if file.get("truncated"):
+                raise WorkspaceSkillValidationError("workspace_skill_gitlab_file_too_large")
+            markdown = file.get("content")
+            if not isinstance(markdown, str):
+                raise WorkspaceSkillValidationError("workspace_skill_gitlab_file_invalid")
+            encoded = markdown.encode("utf-8")
+            if total_bytes + len(encoded) > self._MAX_BUNDLE_BYTES:
+                raise WorkspaceSkillValidationError("workspace_skill_gitlab_bundle_too_large")
+            total_bytes += len(encoded)
+            assets.append(
+                self._build_asset(
+                    source_url=(
+                        file["url"]
+                        if isinstance(file.get("url"), str)
+                        else provenance_url
+                    ),
+                    path=relative_path,
+                    markdown=markdown,
+                    content=encoded,
+                    main_path=main_path,
+                    skill_dir=bundle_path,
+                )
+            )
+        if not assets:
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_bundle_empty")
+        main_asset = next((asset for asset in assets if asset.path == main_path), None)
+        if main_asset is None:
+            raise WorkspaceSkillValidationError("workspace_skill_gitlab_main_file_missing")
+        assets = [
+            main_asset,
+            *sorted((asset for asset in assets if asset.path != main_path), key=lambda asset: asset.path),
+        ]
+        bundle = WorkspaceSkillBundle(assets=assets)
+        title, summary = self._extract_title_and_summary(main_asset.content_markdown)
+        return ValidatedWorkspaceSkillPayload(
+            source_url=provenance_url,
+            title=title,
+            summary=summary,
+            content_markdown=main_asset.content_markdown,
+            content_bundle=bundle,
+            content_sha256=main_asset.content_sha256 or "",
+            version_digest=self._bundle_digest(bundle),
+            validation_status="valid",
+            last_validated_at=datetime.now(tz=UTC),
+        )
+
+    @staticmethod
+    def _safe_bundle_path(value: str) -> str | None:
+        candidate = value.strip().strip("/")
+        if not candidate:
+            return ""
+        if "\x00" in candidate:
+            return None
+        path = PurePosixPath(candidate)
+        if path.is_absolute() or ".." in path.parts or str(path) == ".":
+            return None
+        return str(path) if candidate else ""
+
+    @staticmethod
+    def _gitlab_main_path(bundle_path: str) -> str:
+        return f"{bundle_path}/SKILL.md" if bundle_path else "SKILL.md"
+
+    @staticmethod
+    def _is_within_bundle(*, path: str, bundle_path: str) -> bool:
+        if not bundle_path:
+            return True
+        return path == bundle_path or path.startswith(f"{bundle_path}/")
 
     @staticmethod
     def _normalized_engine_scope(request: BaseUpsertWorkspaceSkillRequest) -> str:
@@ -238,13 +386,15 @@ class WorkspaceSkillService:
             total_bundle_bytes += asset_bytes
 
         sha256 = hashlib.sha256(content).hexdigest()
+        bundle = WorkspaceSkillBundle(assets=bundle_assets)
         return ValidatedWorkspaceSkillPayload(
             source_url=source_url,
             title=title,
             summary=summary,
             content_markdown=markdown,
-            content_bundle=WorkspaceSkillBundle(assets=bundle_assets),
+            content_bundle=bundle,
             content_sha256=sha256,
+            version_digest=self._bundle_digest(bundle),
             validation_status="valid",
             last_validated_at=datetime.now(tz=UTC),
         )
@@ -264,16 +414,29 @@ class WorkspaceSkillService:
             raise WorkspaceSkillValidationError("workspace_skill_empty_content")
 
         asset = self._build_manual_asset(name=name, markdown=markdown, content=content)
+        bundle = WorkspaceSkillBundle(assets=[asset])
         return ValidatedWorkspaceSkillPayload(
             source_url=None,
             title=asset.title,
             summary=asset.summary,
             content_markdown=markdown,
-            content_bundle=WorkspaceSkillBundle(assets=[asset]),
+            content_bundle=bundle,
             content_sha256=hashlib.sha256(content).hexdigest(),
+            version_digest=self._bundle_digest(bundle),
             validation_status="valid",
             last_validated_at=datetime.now(tz=UTC),
         )
+
+    @staticmethod
+    def _bundle_digest(bundle: WorkspaceSkillBundle) -> str:
+        """Hash the complete persisted bundle, not only its primary markdown file."""
+        canonical = json.dumps(
+            bundle.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _resolve_related_assets(
         self,

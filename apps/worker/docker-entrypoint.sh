@@ -42,6 +42,9 @@ else
 fi
 
 # Start the worker
+if [ "${RHETORICA_WORKER_KIND:-celery}" = "coding" ]; then
+  exec uv run $UV_RUN_ARGS python -m rhetorica_worker.runtime.coding
+fi
 if [ "${RHETORICA_WORKER_KIND:-celery}" = "scenarios" ]; then
   exec uv run $UV_RUN_ARGS python -m rhetorica_worker.runtime.scenarios
 fi

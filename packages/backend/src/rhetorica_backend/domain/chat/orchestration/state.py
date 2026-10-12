@@ -10,6 +10,7 @@ from rhetorica_backend.contracts.chat import OptimizationTrace, SemanticGroundin
 from rhetorica_backend.contracts.execution import ExecuteSqlResponse
 from rhetorica_backend.contracts.files import FileArtifactRef
 from rhetorica_backend.contracts.visualization import VisualizationSpec
+from rhetorica_backend.contracts.workspace_skills import WorkspaceSkillVersionBinding
 from rhetorica_backend.domain.chat.orchestration.capability_registry import (
     RuntimeCapabilityState,
 )
@@ -104,6 +105,10 @@ class ToolOrchestrationState:
     capability_state: RuntimeCapabilityState = field(default_factory=RuntimeCapabilityState)
     llm_usages: list[LlmCallUsage] = field(default_factory=list)
     workspace_skills_read: list[dict[str, Any]] = field(default_factory=list)
+    workspace_skill_version_bindings: list[WorkspaceSkillVersionBinding] = field(
+        default_factory=list
+    )
+    workspace_skill_read_addresses: list[dict[str, Any]] = field(default_factory=list)
     discovered_metrics: list[dict[str, Any]] = field(default_factory=list)
     sandbox_session_id: str | None = None
     sandbox_input_artifact_ids: list[str] = field(default_factory=list)

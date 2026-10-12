@@ -94,7 +94,6 @@ class FinalPayloadBuilderService:
                 if getattr(state, "visualization_candidate", None) is not None
                 else None
             ),
-            "optimization_trace": state.optimization_trace.model_dump(mode="json"),
             "capability_trace": shared_kernel.build_capability_trace_from_state(
                 state=state,
                 metadata_sources=sorted(state.metadata_sources),

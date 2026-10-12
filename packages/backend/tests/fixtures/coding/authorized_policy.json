@@ -1,0 +1,65 @@
+{
+  "snapshot": {
+    "workspace_id": "analytics",
+    "root_agent_id": "manager",
+    "executing_agent_id": "developer",
+    "root_settings": {
+      "revision": 5,
+      "gitlab_write_scopes": [],
+      "allowed_subagent_ids": ["developer"],
+      "delegation_grants": [
+        {
+          "subagent_id": "developer",
+          "gitlab_write_scopes": [
+            {
+              "connector_id": "gitlab-1",
+              "project_id": "analytics/dbt",
+              "target_branches": ["main"],
+              "allowed_paths": ["models"]
+            }
+          ]
+        }
+      ],
+      "max_iterations": 100,
+      "max_runtime_seconds": 1200
+    },
+    "executing_settings": {
+      "revision": 2,
+      "gitlab_write_scopes": [
+        {
+          "connector_id": "gitlab-1",
+          "project_id": "analytics/dbt",
+          "target_branches": ["main"],
+          "allowed_paths": ["models"]
+        }
+      ],
+      "allowed_subagent_ids": [],
+      "delegation_grants": [],
+      "max_iterations": 100,
+      "max_runtime_seconds": 1200
+    },
+    "resource_connector_id": "gitlab-1",
+    "run_scope": {
+      "connector_id": "gitlab-1",
+      "project_id": "analytics/dbt",
+      "target_branches": ["main"],
+      "allowed_paths": ["models/marts"]
+    }
+  },
+  "decision": {
+    "allowed": true,
+    "reason_code": null,
+    "effective_scopes": [
+      {
+        "connector_id": "gitlab-1",
+        "project_id": "analytics/dbt",
+        "target_branches": ["main"],
+        "allowed_paths": ["models/marts"]
+      }
+    ],
+    "policy_revisions": {
+      "manager": 5,
+      "developer": 2
+    }
+  }
+}

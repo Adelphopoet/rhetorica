@@ -44,7 +44,7 @@ describe("chatCopy", () => {
     expect(serialized).toContain("Статус выполнения: running");
   });
 
-  it("includes optimizer trace entries when copying whole chat history", () => {
+  it("does not synthesize removed optimizer events when copying historical chat", () => {
     const messages: ChatMessageViewModel[] = [
       {
         id: "assistant-optimizer",
@@ -104,9 +104,8 @@ describe("chatCopy", () => {
 
     const serialized = serializeChatHistoryForCopy(messages, { userLabel: "Ada Lovelace" });
 
-    expect(serialized).toContain("Вызов инструмента: sql_optimization_advisor");
-    expect(serialized).toContain("Только рекомендации: 1 замечание");
-    expect(serialized).toContain("Push filters earlier");
+    expect(serialized).not.toContain("Вызов инструмента: sql_optimization_advisor");
+    expect(serialized).toContain("Optimizer inspected the query");
   });
 
   it("uses the profile name for user messages when copying whole chat history", () => {

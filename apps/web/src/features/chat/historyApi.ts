@@ -1,3 +1,5 @@
+import { applyStreamEvent, createEmptyIntermediateSteps, createInitialStreamingMessage } from "./streamingState";
+import type { StreamEvent } from "./streamingTypes";
 import type {
   ChatAskResponse,
   ChatMessageViewModel,
@@ -11,6 +13,7 @@ import type {
 import { parseAssistantContent } from "./assistantResponseParser";
 
 export type ConversationMessage = {
+  journal_events?: StreamEvent[] | null;
   id: string;
   conversation_id: string;
   role: "user" | "assistant";
@@ -192,15 +195,19 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
 
 export async function listConversations(
   workspaceId: string,
-  limit = 24
+  limit = 24,
+  options: { offset?: number; search?: string; signal?: AbortSignal } = {}
 ): Promise<ConversationSummary[]> {
   const params = new URLSearchParams({
     workspace_id: workspaceId,
     limit: String(limit),
+    offset: String(options.offset ?? 0),
+    search: options.search ?? "",
   });
 
   const response = await fetch(`/api/chat/conversations?${params.toString()}`, {
     cache: "no-store",
+    signal: options.signal,
   });
 
   return parseJsonResponse<ConversationSummary[]>(response);
@@ -355,9 +362,13 @@ function mapConversationToMessages(
     const storedThinkingBlocks = isAssistant
       ? buildStoredThinkingBlocks(message, parsedContent.thinkingBlocks)
       : [];
-    const cachedIntermediateSteps = isAssistant
-      ? getCachedIntermediateSteps(message.id)
-      : null;
+    let cachedIntermediateSteps = isAssistant ? getCachedIntermediateSteps(message.id) : null;
+    if (isAssistant && message.journal_events != null) {
+      const steps = createEmptyIntermediateSteps();
+      let state = createInitialStreamingMessage(() => message.id);
+      for (const event of message.journal_events) state = applyStreamEvent(state, event, steps);
+      cachedIntermediateSteps = steps;
+    }
 
     return {
       id: message.id,

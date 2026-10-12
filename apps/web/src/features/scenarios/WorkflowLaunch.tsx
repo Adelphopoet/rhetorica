@@ -1,9 +1,10 @@
 "use client";
 import { useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueries } from "@tanstack/react-query";
 import { Button, Input, Textarea } from "@rhetorica/ui";
 import { ArrowRight, CheckCircle2, Layers, ListChecks, LoaderCircle, Play, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { codingRequest, missingCodingSettings, type CodingResources } from "@/features/coding/codingApi";
 import { createConversation } from "@/features/chat/historyApi";
 import { deleteStagedFile, MAX_FILES_PER_TURN, uploadFile, validateSelectedFile, type FileArtifactRef } from "@/features/files/fileApi";
 import { artifactFiles, ScenarioFileParameter, scenarioFileError } from "./ScenarioFileParameter";
@@ -53,6 +54,17 @@ export function LaunchForm({ scenarioId, workspace, version }: { scenarioId: str
   const [uploading, setUploading] = useState<Record<string, boolean>>({});
   const [error, setError] = useState("");
   const [requestKey] = useState(() => crypto.randomUUID());
+  const codingNodes = version.workflow.nodes.filter(node => node.type === "coding_task");
+  const codingResources = useQueries({ queries: codingNodes.map(node => ({ queryKey: ["coding-resources", node.root_agent_id], queryFn: () => codingRequest<CodingResources>(`coding-capabilities?root_agent_id=${encodeURIComponent(node.root_agent_id ?? "")}`) })) });
+  const codingIssues = codingNodes.flatMap((node, index) => {
+    const resource = codingResources[index];
+    return [
+      ...(!node.root_agent_id ? ["Координатор"] : []),
+      ...missingCodingSettings({ dbt_project_subdir: node.dbt_project_subdir, root_agent_id: node.root_agent_id, developer_agent_id: node.developer_agent_id ?? "", qa_agent_id: node.qa_agent_id ?? "", gitlab_connector_id: node.gitlab_connector_id ?? "", project_id: node.project_id ?? "", target_branch: node.target_branch ?? "", environment_profile_id: node.environment_profile_id ?? "", database_connector_id: node.database_connector_id }, resource.data),
+      ...(resource.isPending ? ["Проверка ресурсов"] : []),
+      ...(resource.error ? [resource.error.message] : []),
+    ].map(issue => `${node.title}: ${issue}`);
+  });
   const busy = submitting || Object.values(uploading).some(Boolean);
   const missingFile = Object.entries(version.workflow.parameters).some(([name, spec]) => spec.required !== false && ["file", "files"].includes(spec.type) && !artifactFiles(inputs[name]).length);
   async function upload(name: string, selected: File[]) {
@@ -85,7 +97,7 @@ export function LaunchForm({ scenarioId, workspace, version }: { scenarioId: str
     finally { setUploading(value => ({ ...value, [name]: false })); }
   }
   const parameters = Object.entries(version.workflow.parameters);
-  return <form className="overflow-hidden rounded-2xl border border-border bg-surface" onSubmit={async event => { event.preventDefault(); if (busy || missingFile) return; setSubmitting(true); setError(""); try { const response = await startWorkflow(scenarioId, workspace, inputs, { version: version.version, conversation_id: conversationId }, requestKey); router.push(`/scenario-runs/${response.run_id}`); } catch (err) { setError(err instanceof Error ? err.message : "Ошибка запуска"); setSubmitting(false); } }}>
+  return <form className="overflow-hidden rounded-2xl border border-border bg-surface" onSubmit={async event => { event.preventDefault(); if (busy || missingFile || codingIssues.length) return; setSubmitting(true); setError(""); try { const response = await startWorkflow(scenarioId, workspace, inputs, { version: version.version, conversation_id: conversationId }, requestKey); router.push(`/scenario-runs/${response.run_id}`); } catch (err) { setError(err instanceof Error ? err.message : "Ошибка запуска"); setSubmitting(false); } }}>
     <div className="border-b border-border px-5 py-5 sm:px-6"><h2 className="font-semibold">Параметры запуска</h2><p className="mt-1.5 text-sm text-muted">{parameters.length ? "Заполните данные для этого запуска. Обязательные поля отмечены *" : "Всё готово. Для этого сценария не нужны входные параметры"}</p></div>
     <fieldset disabled={submitting} className="space-y-5 p-5 disabled:opacity-70 sm:p-6">
       {!parameters.length && <div className="flex items-center gap-3 rounded-xl border border-success-border/40 bg-success-subtle/20 p-4 text-sm text-success"><CheckCircle2 size={19} />Можно запускать сразу</div>}
@@ -101,8 +113,9 @@ export function LaunchForm({ scenarioId, workspace, version }: { scenarioId: str
       </>}</div>)}
     </fieldset>
     <div className="space-y-4 border-t border-border bg-elevated/40 p-5 sm:p-6">
+      {codingIssues.length > 0 && <p role="status" className="text-sm text-warning">Не настроено: {codingIssues.join(", ")}</p>}
       {error && <p role="alert" className="rounded-xl border border-danger-border/50 bg-danger-subtle/30 p-3 text-sm text-danger">{error}</p>}
-      <div className="flex flex-wrap items-center justify-between gap-4"><p className="max-w-xs text-xs leading-5 text-muted">{missingFile ? "Прикрепите обязательные файлы для запуска" : "После запуска откроется страница с прогрессом и результатами"}</p><Button className="min-h-11 w-full gap-2 sm:w-auto" disabled={busy || missingFile}>{busy ? <LoaderCircle size={16} className="animate-spin" /> : <Play size={16} />} {submitting ? "Запускаю…" : busy ? "Загружаю файлы…" : "Запустить"}{!busy && <ArrowRight size={16} />}</Button></div>
+      <div className="flex flex-wrap items-center justify-between gap-4"><p className="max-w-xs text-xs leading-5 text-muted">{missingFile ? "Прикрепите обязательные файлы для запуска" : "После запуска откроется страница с прогрессом и результатами"}</p><Button className="min-h-11 w-full gap-2 sm:w-auto" disabled={busy || missingFile || codingIssues.length > 0}>{busy ? <LoaderCircle size={16} className="animate-spin" /> : <Play size={16} />} {submitting ? "Запускаю…" : busy ? "Загружаю файлы…" : "Запустить"}{!busy && <ArrowRight size={16} />}</Button></div>
     </div>
   </form>;
 }

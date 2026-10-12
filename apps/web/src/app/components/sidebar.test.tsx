@@ -1,7 +1,8 @@
+import { selectOption } from "@/test/selectOption";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ToastProvider } from "@rhetorica/ui";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ConversationSummary } from "@/features/chat/historyApi";
 import { Sidebar } from "./sidebar";
@@ -15,6 +16,7 @@ function renderSidebar(
     activeConversationId: string | null;
     onSelectConversation: (conversationId: string) => void;
     onNewChat: () => void;
+    workspaces: Array<{ id: string; name: string; role: "owner" | "analyst" | "viewer" }>;
   }> = {}
 ) {
   return render(
@@ -25,6 +27,7 @@ function renderSidebar(
         collapsed={overrides.collapsed ?? false}
         onCollapseChange={overrides.onCollapseChange ?? vi.fn()}
         workspaceName="default"
+        workspaces={overrides.workspaces}
         apiStatus="ok (dev)"
         canAccessAdmin={canAccessAdmin}
         userLogin="analyst"
@@ -44,6 +47,10 @@ function renderSidebar(
     </ToastProvider>,
   );
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("Sidebar", () => {
   it("does not render logout in the sidebar anymore", () => {
@@ -151,5 +158,26 @@ describe("Sidebar", () => {
     expect(onCollapseChange).toHaveBeenNthCalledWith(1, false);
     expect(onCollapseChange).toHaveBeenNthCalledWith(2, false);
     expect(await screen.findByRole("menu", { name: "Меню профиля" })).toBeInTheDocument();
+  });
+
+  it("shows a retryable error when workspace switching fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSidebar(true, [], {
+      workspaces: [
+        { id: "default", name: "Default", role: "owner" },
+        { id: "analytics", name: "Analytics", role: "analyst" },
+      ],
+    });
+
+    const select = screen.getByRole("combobox", { name: "Workspace" });
+    await selectOption("Workspace", "Analytics");
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Не удалось переключить workspace. Повторите попытку",
+    );
+    expect(select).toBeEnabled();
+    expect(select).toHaveTextContent("Default");
+    expect(fetchMock).toHaveBeenCalledWith("/api/workspaces/analytics/select", { method: "POST" });
   });
 });

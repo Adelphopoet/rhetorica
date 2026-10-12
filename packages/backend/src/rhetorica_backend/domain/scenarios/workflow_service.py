@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import suppress
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from rhetorica_backend.contracts.scenario_workflows import (
     StartScenarioRunRequest,
     WorkflowValidationResult,
 )
+from rhetorica_backend.domain.coding.errors import CodingRunError
 from rhetorica_backend.domain.scenarios.authoring_assistant import (
     ProgressCallback,
     ScenarioAuthoringAssistant,
@@ -65,6 +67,7 @@ class ScenarioWorkflowService:
         llm: ScenarioLlmStepRunner,
         *,
         enabled: bool,
+        coding=None,
     ):
         self.authoring = authoring
         self.runs = runs
@@ -73,6 +76,24 @@ class ScenarioWorkflowService:
         self.data = data
         self.llm = llm
         self.enabled = enabled
+        self.coding = coding
+
+    def cancel(self, run_id: str, user: UserAccountItem, *, auth_kind: str) -> ScenarioRun:
+        from uuid import NAMESPACE_URL, uuid5
+
+        from rhetorica_backend.domain.coding.errors import CodingRunNotFound
+
+        node_ids = self.runs.coding_node_ids(run_id, user)
+        if node_ids and auth_kind != "session":
+            raise WorkflowError("channel_not_allowed", status_code=403)
+        result = self.runs.cancel(run_id, user)
+        if self.coding is not None:
+            for node_id in node_ids:
+                key = f"scenario:{run_id}:{node_id}"
+                child_id = str(uuid5(NAMESPACE_URL, f"coding/{user.workspace_id}/{user.id}/{key}"))
+                with suppress(CodingRunNotFound):
+                    self.coding.cancel(child_id, user, auth_kind=auth_kind)
+        return result
 
     def require_enabled(self) -> None:
         if not self.enabled:
@@ -87,7 +108,15 @@ class ScenarioWorkflowService:
         if validation.valid:
             try:
                 self.resources.snapshots(graph, user)
-            except WorkflowError as exc:
+                if self.coding:
+                    from rhetorica_backend.domain.scenarios.coding_step import request_for_node
+
+                    for node in graph.nodes:
+                        if node.type == "coding_task":
+                            self.coding.validate_resources(
+                                request_for_node(node, "Validate scenario configuration"), user
+                            )
+            except (WorkflowError, CodingRunError) as exc:
                 from rhetorica_backend.contracts.scenario_workflows import WorkflowValidationIssue
 
                 validation.issues.append(WorkflowValidationIssue(code=exc.code, message=str(exc)))
@@ -117,7 +146,13 @@ class ScenarioWorkflowService:
         return self.authoring.publish(scenario_id, user, revision)
 
     def start(
-        self, scenario_id: str, user: UserAccountItem, request: StartScenarioRunRequest, key: str
+        self,
+        scenario_id: str,
+        user: UserAccountItem,
+        request: StartScenarioRunRequest,
+        key: str,
+        *,
+        auth_kind: str | None = None,
     ) -> ScenarioRun:
         if not key or len(key) > 128:
             raise WorkflowError("idempotency_key_required")
@@ -128,6 +163,11 @@ class ScenarioWorkflowService:
         ).hexdigest()
         duplicate = self.runs.find_request(user, key, fingerprint)
         if duplicate:
+            if self.runs.coding_node_ids(duplicate.id, user):
+                if auth_kind != "session":
+                    raise WorkflowError("channel_not_allowed", status_code=403)
+                if self.coding is not None:
+                    self.coding.require_actor(user, auth_kind=auth_kind, write=True)
             return duplicate
         self.require_enabled()
         if request.version is not None and request.draft_revision is not None:
@@ -139,6 +179,13 @@ class ScenarioWorkflowService:
         version, kind, definition, graph, title = self.runs.resolve_definition(
             scenario_id, user, request
         )
+        has_coding = any(node.type == "coding_task" for node in graph.nodes)
+        if has_coding:
+            if self.coding is None:
+                raise WorkflowError("coding_disabled", status_code=503)
+            self.coding.require_actor(user, auth_kind=auth_kind or "unknown", write=True)
+            if not self.coding.enabled:
+                raise WorkflowError("coding_disabled", status_code=503)
         execution_graph = (
             isolated_step_definition(graph, request.test_node_id, request.test_inputs or {})
             if request.test_node_id
@@ -166,6 +213,8 @@ class ScenarioWorkflowService:
         snapshots = self.resources.snapshots(
             execution_graph, user, legacy=definition if kind == "legacy" else None
         )
+        if has_coding:
+            snapshots["_coding_auth"] = {"auth_kind": auth_kind, "entry_source": "web_scenario"}
         files = (
             artifact_ids(inputs)
             | artifact_ids(request.test_inputs)

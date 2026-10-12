@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import {
@@ -11,6 +11,9 @@ import {
 } from "@/features/chat/chatViewModel";
 import { serializeChatMessageBodyForCopy } from "@/features/chat/chatCopy";
 import { cn } from "@rhetorica/ui";
+import { buildChatTimeline } from "@/features/chat/chatTimeline";
+import { CodingRunChat } from "@/features/coding/CodingRunChat";
+import type { CodingRun } from "@/features/coding/codingApi";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatMessageComponent } from "./chat-message";
 import { ChatThreadSkeleton } from "./chat-thread-skeleton";
@@ -21,6 +24,8 @@ interface ChatThreadProps {
   chatWidth: ChatWidth;
   conversationId: string | null;
   messages: ChatMessageViewModel[];
+  codingRuns?: CodingRun[];
+  children?: ReactNode;
   userLabel?: string;
   loading: boolean;
   /** A saved conversation is being fetched; the thread must not fall back to the empty state. */
@@ -43,6 +48,8 @@ export function ChatThread({
   chatWidth,
   conversationId,
   messages,
+  codingRuns = [],
+  children,
   userLabel,
   loading,
   threadLoading = false,
@@ -54,6 +61,7 @@ export function ChatThread({
   onInspectResult,
 }: ChatThreadProps) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   const previousConversationIdRef = useRef(conversationId);
   const previousLastMessageIdRef = useRef<string | null>(null);
@@ -81,7 +89,18 @@ export function ChatThread({
     }
   }, [conversationId, lastMessage, loading]);
 
-  if (messages.length === 0) {
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const container = scrollContainerRef.current;
+      if (container && stickToBottomRef.current) container.scrollTop = container.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [conversationId, messages.length]);
+
+  if (messages.length === 0 && codingRuns.length === 0) {
     if (threadLoading) {
       return <ChatThreadSkeleton chatWidth={chatWidth} />;
     }
@@ -115,6 +134,7 @@ export function ChatThread({
       transition={{ duration: 0.25 }}
     >
       <div
+        ref={contentRef}
         className={cn(
           "mx-auto flex w-full flex-col gap-6",
           chatWidth === 1100 && "max-w-[1100px]",
@@ -122,7 +142,9 @@ export function ChatThread({
         )}
       >
         <AnimatePresence initial={false}>
-          {messages.map((message) => {
+          {buildChatTimeline(messages, codingRuns).map((item) => {
+            if (item.kind === "coding") return <CodingRunChat key={item.id} run={item.run} />;
+            const message = item.message;
             const mergedToolCalls = mergeToolCallsWithOptimizationTrace({
               toolCalls: message.toolCalls,
               payload: message.payload,
@@ -131,7 +153,7 @@ export function ChatThread({
 
             return (
               <ChatMessageComponent
-                key={message.id}
+                key={item.id}
                 id={message.backendMessageId}
                 role={message.role}
                 userLabel={message.role === "user" ? userLabel : undefined}
@@ -166,6 +188,7 @@ export function ChatThread({
           })}
           {loading ? <TypingIndicator key="typing-indicator" /> : null}
         </AnimatePresence>
+        {children}
       </div>
     </motion.div>
   );

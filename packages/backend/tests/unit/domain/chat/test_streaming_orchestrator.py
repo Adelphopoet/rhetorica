@@ -76,3 +76,26 @@ def test_stream_disconnect_does_not_cancel_detached_chat_turn() -> None:
         assert orchestrator._detached_producers == set()
 
     asyncio.run(scenario())
+
+
+def test_runtime_journal_captures_live_events_without_replaying_them():
+    from types import SimpleNamespace
+
+    from rhetorica_backend.contracts.chat import ToolCallEndEvent, ToolCallStartEvent
+
+    async def scenario():
+        orchestrator = object.__new__(StreamingChatOrchestrator)
+        start = ToolCallStartEvent(tool_name="read", tool_call_id="call", arguments={"path": "file"})
+        end = ToolCallEndEvent(tool_name="read", tool_call_id="call", success=True, result_summary="Read")
+        async def run(**kwargs):
+            kwargs["on_event"](start)
+            kwargs["on_event"](end)
+            kwargs["on_event"](ChunkEvent(content="Answer"))
+            return SimpleNamespace(payload={"answer": "Answer"}, events=[])
+        orchestrator._run_prepared_tool_loop_and_collect = run
+        emitted = []
+        result = await orchestrator._execute_stream_runtime_flow(runtime=None, cancel_event=None, emit=emitted.append)
+        assert len(emitted) == 3
+        assert result.transport_artifact.events == []
+        assert result.transport_artifact.journal_events == [start.model_dump(mode="json"), end.model_dump(mode="json")]
+    asyncio.run(scenario())

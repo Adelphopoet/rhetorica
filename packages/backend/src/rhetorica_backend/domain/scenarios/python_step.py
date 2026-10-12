@@ -69,7 +69,9 @@ class ScenarioPythonStepRunner:
             if isinstance(value, dict):
                 if isinstance(value.get("id"), str) and "filename" in value:
                     artifact = self.artifacts.get_owned(
-                        artifact_id=value["id"], owner_user_id=context.user.id
+                        artifact_id=value["id"],
+                        owner_user_id=context.user.id,
+                        workspace_id=context.user.workspace_id,
                     )
                     self.repository.pin_artifact(
                         context.run_id, artifact.id, context.node_id, role="input"

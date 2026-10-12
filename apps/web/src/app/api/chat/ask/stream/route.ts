@@ -14,6 +14,8 @@ function sanitizeChatAskPayload(body: unknown) {
     agent_id: payload.agent_id,
     attachment_ids: payload.attachment_ids,
     run_sql: payload.run_sql,
+    coding_mode: payload.coding_mode,
+    coding_resources: payload.coding_resources,
     selected_clarification_id: payload.selected_clarification_id,
     selected_clarification_value: payload.selected_clarification_value,
   };

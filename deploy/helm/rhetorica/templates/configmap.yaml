@@ -5,7 +5,7 @@
 {{- $qdrantUrl := .Values.config.qdrantUrl -}}
 {{- $s3Endpoint := .Values.config.s3Endpoint -}}
 {{- $s3Bucket := .Values.config.s3Bucket -}}
-{{- $sandboxUrl := .Values.config.sandboxUrl -}}
+{{- $executionRuntimeUrl := .Values.config.executionRuntimeUrl -}}
 {{- if .Values.infra.enabled -}}
 {{- if not $databaseUrl -}}
 {{- $databaseUrl = printf "postgresql+psycopg://%s:%s@%s:%v/%s" .Values.infra.postgres.username .Values.infra.postgres.password $infraService (.Values.infra.postgres.servicePort | int) .Values.infra.postgres.database -}}
@@ -23,8 +23,8 @@
 {{- $s3Bucket = .Values.infra.minio.bucket -}}
 {{- end -}}
 {{- end -}}
-{{- if and .Values.sandbox.enabled (not $sandboxUrl) -}}
-{{- $sandboxUrl = printf "http://%s-sandbox:%v" $fullname (.Values.sandbox.service.port | int) -}}
+{{- if and .Values.executionRuntime.enabled (not $executionRuntimeUrl) -}}
+{{- $executionRuntimeUrl = printf "http://%s-execution-runtime:%v" $fullname (.Values.executionRuntime.service.port | int) -}}
 {{- end -}}
 apiVersion: v1
 kind: ConfigMap
@@ -33,6 +33,20 @@ metadata:
   labels:
     {{- include "rhetorica.labels" . | nindent 4 }}
 data:
+  {{/* dig preserves explicit false and supplies new keys on --reuse-values upgrades. */}}
+  CHAT_CONTEXT_HARNESS_ENABLED: {{ dig "chatContextHarnessEnabled" true .Values.config | quote }}
+  CHAT_TOOL_OUTPUT_POLICY_ENABLED: {{ dig "chatToolOutputPolicyEnabled" true .Values.config | quote }}
+  CHAT_TOOL_DISPATCH_ENABLED: {{ dig "chatToolDispatchEnabled" false .Values.config | quote }}
+  CHAT_CERTIFIED_TOOL_CONCURRENCY_ENABLED: {{ dig "chatCertifiedToolConcurrencyEnabled" true .Values.config | quote }}
+  CHAT_MAX_ITERATIONS: {{ dig "chatMaxIterations" 100 .Values.config | int | quote }}
+  CHAT_CONTEXT_COMPACTION_ENABLED: {{ dig "chatContextCompactionEnabled" true .Values.config | quote }}
+  CHAT_CONTEXT_TRIM_TRIGGER_RATIO: {{ dig "chatContextTrimTriggerRatio" 0.7 .Values.config | quote }}
+  CHAT_CONTEXT_COMPACTION_TRIGGER_RATIO: {{ dig "chatContextCompactionTriggerRatio" 0.8 .Values.config | quote }}
+  CHAT_CONTEXT_TARGET_RATIO: {{ dig "chatContextTargetRatio" 0.5 .Values.config | quote }}
+  CHAT_CONTEXT_COMPACTION_MAX_CALLS: {{ dig "chatContextCompactionMaxCalls" 10 .Values.config | int | quote }}
+  CHAT_TOOL_ARTIFACT_MAX_CHARS: {{ dig "chatToolArtifactMaxChars" 16000000 .Values.config | int | quote }}
+  CHAT_TOOL_ARTIFACT_TTL_HOURS: {{ dig "chatToolArtifactTtlHours" 168 .Values.config | int | quote }}
+  CHAT_TOOL_ARTIFACT_MAX_RECORDS_PER_CONVERSATION: {{ dig "chatToolArtifactMaxRecordsPerConversation" 100 .Values.config | int | quote }}
   SCENARIO_WORKFLOWS_ENABLED: {{ .Values.scenarioWorkflows.enabled | quote }}
   TEMPORAL_ADDRESS: {{ include "rhetorica.temporalAddress" . | quote }}
   TEMPORAL_NAMESPACE: {{ .Values.scenarioWorkflows.temporal.namespace | quote }}
@@ -56,9 +70,7 @@ data:
   LANGFUSE_ANNOTATION_QUEUE_ID: {{ .Values.config.langfuseAnnotationQueueId | quote }}
   LANGFUSE_FEEDBACK_SCORE_NAME: {{ .Values.config.langfuseFeedbackScoreName | quote }}
   LANGFUSE_REVIEW_PRIORITY_SCORE_NAME: {{ .Values.config.langfuseReviewPriorityScoreName | quote }}
-  {{- if not .Values.database.existingSecret }}
   DATABASE_URL: {{ $databaseUrl | quote }}
-  {{- end }}
   REDIS_URL: {{ $redisUrl | quote }}
   RATE_LIMIT_REDIS_KEY_PREFIX: {{ .Values.config.rateLimitRedisKeyPrefix | quote }}
   CELERY_BROKER_URL: {{ default $redisUrl .Values.config.celeryBrokerUrl | quote }}
@@ -97,7 +109,14 @@ data:
   S3_BUCKET: {{ $s3Bucket | quote }}
   S3_REGION: {{ .Values.config.s3Region | quote }}
   S3_SECURE: {{ .Values.config.s3Secure | quote }}
-  SANDBOX_URL: {{ $sandboxUrl | quote }}
+  EXECUTION_RUNTIME_URL: {{ $executionRuntimeUrl | quote }}
+  CODING_RUNNER_IMAGE_DIGEST: {{ .Values.codingRunner.runner.imageDigest | quote }}
+  CODING_RUNNER_RUNTIME_CLASS_NAME: {{ .Values.codingRunner.runner.runtimeClassName | quote }}
+  CODING_RUNNER_SOFTWARE_MANIFEST_DIGEST: {{ .Values.codingRunner.runner.softwareManifestDigest | quote }}
+  CODING_ENABLED: {{ .Values.codingRunner.enabled | quote }}
+  {{- if .Values.codingRunner.runner.softwareManifest }}
+  CODING_RUNNER_SOFTWARE_MANIFEST_PATH: /etc/rhetorica/coding/software-manifest.json
+  {{- end }}
   FILE_MAX_INPUT_BYTES: {{ .Values.config.fileMaxInputBytes | quote }}
   FILE_MAX_FILES_PER_TURN: {{ .Values.config.fileMaxFilesPerTurn | quote }}
   FILE_MAX_TURN_BYTES: {{ .Values.config.fileMaxTurnBytes | quote }}

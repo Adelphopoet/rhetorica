@@ -25,7 +25,7 @@ export function formatShortDate(value: string) {
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }) ?? value;
+  }, "ru-RU") ?? value;
 }
 
 export function formatDateTime(value: string | null) {
@@ -36,7 +36,7 @@ export function formatDateTime(value: string | null) {
   return formatInMoscow(value, {
     dateStyle: "medium",
     timeStyle: "short",
-  }) ?? value;
+  }, "ru-RU") ?? value;
 }
 
 export function getConnectorTypeLabel(type: ConnectorType) {

@@ -10,19 +10,20 @@ from rhetorica_backend.domain.workspace_skills.service import (
     WorkspaceSkillService,
     WorkspaceSkillValidationError,
 )
+from rhetorica_backend.infra.postgres.gitlab_connector_repository import GitLabConnectorRepository
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from rhetorica_backend.infra.postgres.workspace_skill_repository import (
     WorkspaceSkillRepository,
 )
 from sqlalchemy.exc import IntegrityError
 
-from rhetorica_api.app.auth import require_admin_access
+from rhetorica_api.app.auth import require_workspace_owner_access
 from rhetorica_api.app.settings import settings
 
 router = APIRouter(
     prefix="/v1/admin/skills",
     tags=["workspace-skills"],
-    dependencies=[Depends(require_admin_access)],
+    dependencies=[Depends(require_workspace_owner_access)],
 )
 
 
@@ -30,7 +31,10 @@ router = APIRouter(
 def _service() -> WorkspaceSkillService:
     db_runtime = DatabaseRuntime(settings.database_url)
     db_runtime.create_schema()
-    return WorkspaceSkillService(WorkspaceSkillRepository(db=db_runtime))
+    return WorkspaceSkillService(
+        WorkspaceSkillRepository(db=db_runtime),
+        gitlab_connector_repository=GitLabConnectorRepository(db=db_runtime),
+    )
 
 
 @router.get("", response_model=list[WorkspaceSkillItem])

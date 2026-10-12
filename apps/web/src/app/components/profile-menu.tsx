@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Avatar, Button, cn, Tooltip, useToast } from "@rhetorica/ui";
-import { BookOpenText, ChevronDown, KeyRound, LoaderCircle, LogOut, ShieldCheck, User, Wifi, WifiOff } from "lucide-react";
+import { BookOpenText, Building2, ChevronDown, KeyRound, LoaderCircle, LogOut, ShieldCheck, User, Wifi, WifiOff } from "lucide-react";
 import { ApiTokenDialog } from "./api-token-dialog";
 
 const RHETORICA_DOCS_URL =
@@ -343,6 +343,17 @@ export function ProfileMenu({
                 Администрирование
               </Link>
             ) : null}
+
+            <Link
+              href="/workspaces"
+              role="menuitem"
+              data-profile-menu-item="true"
+              onClick={() => closeMenu(false)}
+              className="mt-2 flex w-full items-center gap-3 rounded-[18px] px-3 py-3 text-sm font-medium text-primary transition hover:bg-elevated hover:text-primary focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              <Building2 className="h-4 w-4 text-accent" />
+              Workspaces
+            </Link>
 
             <button
               type="button"

@@ -14,9 +14,15 @@ from rhetorica_backend.contracts.admin_integrations import (
     McpToolCatalogItem,
     UpsertMcpConnectorRequest,
 )
+from rhetorica_backend.contracts.workspaces import WorkspaceResourceKind
 from rhetorica_backend.infra.postgres.llm_connector_repository import LlmConnectorRepository
 from rhetorica_backend.infra.postgres.models import McpConnectorConfigOrm, McpToolCatalogOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.workspace_resource_access import (
+    AccessibleResource,
+    WorkspaceResourceAccess,
+    present_resource,
+)
 from rhetorica_backend.infra.secrets import SecretStore, SecretStoreError, get_secret_store
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -54,6 +60,11 @@ class McpConnectorRepository:
         self._llm_connector_repository = llm_connector_repository or LlmConnectorRepository(
             db=db,
             secret_store=self._secret_store,
+        )
+        self._resources = WorkspaceResourceAccess(
+            db,
+            kind=WorkspaceResourceKind.MCP_CONNECTOR,
+            model=McpConnectorConfigOrm,
         )
 
     def upsert(self, request: UpsertMcpConnectorRequest) -> McpConnectorItem:
@@ -175,39 +186,48 @@ class McpConnectorRepository:
             return self._to_contract(row, tool_count=self._tool_count(row.id))
 
     def list(self, workspace_id: str, limit: int | None) -> list[McpConnectorItem]:
+        resources = self._resources.list(workspace_id=workspace_id, limit=limit)
         with self._db.session() as session:
-            stmt = (
-                select(McpConnectorConfigOrm)
-                .where(McpConnectorConfigOrm.workspace_id == workspace_id)
-                .order_by(McpConnectorConfigOrm.updated_at.desc())
+            counts = self._tool_counts_by_connector(
+                session,
+                [resource.row.id for resource in resources],
             )
-            if limit is not None:
-                stmt = stmt.limit(limit)
-            rows = session.execute(stmt).scalars().all()
-            counts = self._tool_counts_by_connector(session, [row.id for row in rows])
-        return [self._to_contract(row, tool_count=counts.get(row.id, 0)) for row in rows]
+        return [
+            present_resource(
+                self._to_contract(resource.row, tool_count=counts.get(resource.row.id, 0)),
+                resource,
+            )
+            for resource in resources
+        ]
 
     def get_by_id(self, connector_id: str, workspace_id: str) -> McpConnectorItem | None:
-        with self._db.session() as session:
-            row = session.get(McpConnectorConfigOrm, connector_id)
-            if row is None or row.workspace_id != workspace_id:
-                return None
-            tool_count = self._tool_counts_by_connector(session, [row.id]).get(row.id, 0)
-            return self._to_contract(row, tool_count=tool_count)
+        resource = self._resources.by_id(
+            workspace_id=workspace_id,
+            resource_id=connector_id,
+        )
+        if resource is None:
+            return None
+        return present_resource(
+            self._to_contract(resource.row, tool_count=self._tool_count(resource.row.id)),
+            resource,
+        )
 
     def get_by_name(self, *, name: str, workspace_id: str) -> McpConnectorItem | None:
         """Resolve one connector by its exact workspace-local name."""
-        with self._db.session() as session:
-            row = session.execute(
-                select(McpConnectorConfigOrm).where(
-                    McpConnectorConfigOrm.workspace_id == workspace_id,
-                    McpConnectorConfigOrm.name == name,
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                return None
-            tool_count = self._tool_counts_by_connector(session, [row.id]).get(row.id, 0)
-            return self._to_contract(row, tool_count=tool_count)
+        resource = next(
+            (
+                item
+                for item in self._resources.list(workspace_id=workspace_id, limit=None)
+                if item.alias == name
+            ),
+            None,
+        )
+        if resource is None:
+            return None
+        return present_resource(
+            self._to_contract(resource.row, tool_count=self._tool_count(resource.row.id)),
+            resource,
+        )
 
     def get_runtime_connector(
         self,
@@ -216,19 +236,16 @@ class McpConnectorRepository:
         workspace_id: str,
         name: str | None = None,
     ) -> ResolvedMcpConnector | None:
-        with self._db.session() as session:
-            stmt = select(McpConnectorConfigOrm).where(
-                McpConnectorConfigOrm.workspace_id == workspace_id,
-                McpConnectorConfigOrm.is_active.is_(True),
+        if connector_id:
+            resource = self._resources.by_id(
+                workspace_id=workspace_id,
+                resource_id=connector_id,
             )
-            if connector_id:
-                stmt = stmt.where(McpConnectorConfigOrm.id == connector_id)
-            if name:
-                stmt = stmt.where(McpConnectorConfigOrm.name == name)
-            row = session.execute(stmt.limit(1)).scalar_one_or_none()
-        if row is None:
+        else:
+            resource = self._resources.first_active(workspace_id=workspace_id, name=name)
+        if resource is None or not resource.row.is_active:
             return None
-        return self._to_runtime(row)
+        return self._to_runtime(resource.row)
 
     def delete(self, connector_id: str, workspace_id: str) -> bool:
         with self._db.session() as session:
@@ -386,33 +403,37 @@ class McpConnectorRepository:
         limit: int | None,
         external_mcp_only: bool,
     ) -> list[McpToolCatalogItem]:
+        tools: list[McpToolCatalogItem] = []
+        resources = self._resources.list(workspace_id=workspace_id, limit=None)
         with self._db.session() as session:
-            stmt = (
-                select(McpToolCatalogOrm, McpConnectorConfigOrm.allowed_tool_names)
-                .join(
-                    McpConnectorConfigOrm,
-                    McpToolCatalogOrm.connector_id == McpConnectorConfigOrm.id,
+            for resource in resources:
+                connector = resource.row
+                if not connector.is_active or (
+                    external_mcp_only and not connector.visible_to_external_mcp
+                ):
+                    continue
+                rows = (
+                    session.execute(
+                        select(McpToolCatalogOrm)
+                        .where(
+                            McpToolCatalogOrm.connector_id == connector.id,
+                            McpToolCatalogOrm.workspace_id == connector.workspace_id,
+                            McpToolCatalogOrm.is_active.is_(True),
+                        )
+                        .order_by(McpToolCatalogOrm.remote_tool_name.asc())
+                    )
+                    .scalars()
+                    .all()
                 )
-                .where(
-                    McpToolCatalogOrm.workspace_id == workspace_id,
-                    McpToolCatalogOrm.is_active.is_(True),
-                    McpConnectorConfigOrm.is_active.is_(True),
+                tools.extend(
+                    self._present_tool(tool, resource)
+                    for tool in rows
+                    if self._is_tool_allowed(
+                        remote_tool_name=tool.remote_tool_name,
+                        allowed_tool_names=connector.allowed_tool_names,
+                    )
                 )
-                .order_by(
-                    McpToolCatalogOrm.connector_name.asc(), McpToolCatalogOrm.remote_tool_name.asc()
-                )
-            )
-            if external_mcp_only:
-                stmt = stmt.where(McpConnectorConfigOrm.visible_to_external_mcp.is_(True))
-            rows = session.execute(stmt).all()
-        tools = [
-            self._tool_to_contract(tool)
-            for tool, allowed_tool_names in rows
-            if self._is_tool_allowed(
-                remote_tool_name=tool.remote_tool_name,
-                allowed_tool_names=allowed_tool_names,
-            )
-        ]
+        tools.sort(key=lambda item: (item.connector_name, item.remote_tool_name))
         return tools if limit is None else tools[:limit]
 
     def list_active_tools_for_connector(
@@ -424,32 +445,29 @@ class McpConnectorRepository:
         limit: int | None = None,
     ) -> tuple[list[McpToolCatalogItem], int]:
         """List an exact active connector catalog after applying its tool allowlist."""
+        resource = self._resources.by_name(workspace_id=workspace_id, name=connector_name)
+        if resource is None or not resource.row.is_active:
+            return [], 0
         with self._db.session() as session:
-            rows = session.execute(
-                select(McpToolCatalogOrm, McpConnectorConfigOrm.allowed_tool_names)
-                .join(
-                    McpConnectorConfigOrm,
-                    McpToolCatalogOrm.connector_id == McpConnectorConfigOrm.id,
+            rows = (
+                session.execute(
+                    select(McpToolCatalogOrm)
+                    .where(
+                        McpToolCatalogOrm.connector_id == resource.row.id,
+                        McpToolCatalogOrm.workspace_id == resource.row.workspace_id,
+                        McpToolCatalogOrm.is_active.is_(True),
+                    )
+                    .order_by(McpToolCatalogOrm.remote_tool_name.asc())
                 )
-                .where(
-                    McpToolCatalogOrm.workspace_id == workspace_id,
-                    McpToolCatalogOrm.connector_name == connector_name,
-                    McpToolCatalogOrm.is_active.is_(True),
-                    McpConnectorConfigOrm.workspace_id == workspace_id,
-                    McpConnectorConfigOrm.name == connector_name,
-                    McpConnectorConfigOrm.is_active.is_(True),
-                )
-                .order_by(
-                    McpToolCatalogOrm.remote_tool_name.asc(),
-                    McpToolCatalogOrm.exposed_tool_name.asc(),
-                )
-            ).all()
+                .scalars()
+                .all()
+            )
         allowed_tools = [
-            self._tool_to_contract(tool)
-            for tool, allowed_tool_names in rows
+            self._present_tool(tool, resource)
+            for tool in rows
             if self._is_tool_allowed(
                 remote_tool_name=tool.remote_tool_name,
-                allowed_tool_names=allowed_tool_names,
+                allowed_tool_names=resource.row.allowed_tool_names,
             )
         ]
         total = len(allowed_tools)
@@ -463,13 +481,19 @@ class McpConnectorRepository:
         workspace_id: str,
         limit: int = 500,
     ) -> list[McpToolCatalogItem]:
+        resource = self._resources.by_id(
+            workspace_id=workspace_id,
+            resource_id=connector_id,
+        )
+        if resource is None:
+            return []
         with self._db.session() as session:
             rows = (
                 session.execute(
                     select(McpToolCatalogOrm)
                     .where(
-                        McpToolCatalogOrm.workspace_id == workspace_id,
-                        McpToolCatalogOrm.connector_id == connector_id,
+                        McpToolCatalogOrm.workspace_id == resource.row.workspace_id,
+                        McpToolCatalogOrm.connector_id == resource.row.id,
                         McpToolCatalogOrm.is_active.is_(True),
                     )
                     .order_by(McpToolCatalogOrm.remote_tool_name.asc())
@@ -478,7 +502,7 @@ class McpConnectorRepository:
                 .scalars()
                 .all()
             )
-        return [self._tool_to_contract(row) for row in rows]
+        return [self._present_tool(row, resource) for row in rows]
 
     def get_active_tool(
         self,
@@ -512,33 +536,18 @@ class McpConnectorRepository:
         exposed_tool_name: str,
         external_mcp_only: bool,
     ) -> McpToolCatalogItem | None:
-        with self._db.session() as session:
-            stmt = (
-                select(McpToolCatalogOrm, McpConnectorConfigOrm.allowed_tool_names)
-                .join(
-                    McpConnectorConfigOrm,
-                    McpToolCatalogOrm.connector_id == McpConnectorConfigOrm.id,
+        return next(
+            (
+                tool
+                for tool in self._list_active_tools(
+                    workspace_id=workspace_id,
+                    limit=None,
+                    external_mcp_only=external_mcp_only,
                 )
-                .where(
-                    McpToolCatalogOrm.workspace_id == workspace_id,
-                    McpToolCatalogOrm.exposed_tool_name == exposed_tool_name,
-                    McpToolCatalogOrm.is_active.is_(True),
-                    McpConnectorConfigOrm.is_active.is_(True),
-                )
-                .limit(1)
-            )
-            if external_mcp_only:
-                stmt = stmt.where(McpConnectorConfigOrm.visible_to_external_mcp.is_(True))
-            result = session.execute(stmt).one_or_none()
-        if result is None:
-            return None
-        row, allowed_tool_names = result
-        if not self._is_tool_allowed(
-            remote_tool_name=row.remote_tool_name,
-            allowed_tool_names=allowed_tool_names,
-        ):
-            return None
-        return self._tool_to_contract(row)
+                if tool.exposed_tool_name == exposed_tool_name
+            ),
+            None,
+        )
 
     def get_tool(
         self,
@@ -546,28 +555,49 @@ class McpConnectorRepository:
         workspace_id: str,
         exposed_tool_name: str,
     ) -> McpToolCatalogItem | None:
-        with self._db.session() as session:
-            result = session.execute(
-                select(McpToolCatalogOrm, McpConnectorConfigOrm.allowed_tool_names)
-                .join(
-                    McpConnectorConfigOrm,
-                    McpToolCatalogOrm.connector_id == McpConnectorConfigOrm.id,
+        for resource in self._resources.list(workspace_id=workspace_id, limit=None):
+            with self._db.session() as session:
+                rows = (
+                    session.execute(
+                        select(McpToolCatalogOrm).where(
+                            McpToolCatalogOrm.connector_id == resource.row.id,
+                            McpToolCatalogOrm.workspace_id == resource.row.workspace_id,
+                        )
+                    )
+                    .scalars()
+                    .all()
                 )
-                .where(
-                    McpToolCatalogOrm.workspace_id == workspace_id,
-                    McpToolCatalogOrm.exposed_tool_name == exposed_tool_name,
-                )
-                .limit(1)
-            ).one_or_none()
-        if result is None:
-            return None
-        row, allowed_tool_names = result
-        if not self._is_tool_allowed(
-            remote_tool_name=row.remote_tool_name,
-            allowed_tool_names=allowed_tool_names,
-        ):
-            return None
-        return self._tool_to_contract(row)
+            for row in rows:
+                tool = self._present_tool(row, resource)
+                if (
+                    tool.exposed_tool_name == exposed_tool_name
+                    and self._is_tool_allowed(
+                        remote_tool_name=row.remote_tool_name,
+                        allowed_tool_names=resource.row.allowed_tool_names,
+                    )
+                ):
+                    return tool
+        return None
+
+    def _present_tool(
+        self,
+        row: McpToolCatalogOrm,
+        resource: AccessibleResource[McpConnectorConfigOrm],
+    ) -> McpToolCatalogItem:
+        item = self._tool_to_contract(row)
+        if not resource.is_shared:
+            return item
+        return item.model_copy(
+            update={
+                "workspace_id": resource.requested_workspace_id,
+                "connector_name": resource.alias,
+                "exposed_tool_name": self.exposed_tool_name(
+                    connector_name=resource.alias,
+                    remote_tool_name=row.remote_tool_name,
+                    tool_name_prefix=None,
+                ),
+            }
+        )
 
     @staticmethod
     def exposed_tool_name(

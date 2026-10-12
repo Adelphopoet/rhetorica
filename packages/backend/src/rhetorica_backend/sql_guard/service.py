@@ -58,6 +58,24 @@ _ALLOWED_INTROSPECTION_PREFIXES = (
 )
 
 
+class SqlParserPrimitives:
+    """Shared SQLGlot parsing boundary for preview and strict coding policies."""
+
+    @staticmethod
+    def parse_statements(sql: str, *, dialect: str) -> list[exp.Expression | None]:
+        return parse(sql, read=dialect, error_level="raise")
+
+    @classmethod
+    def parse_single(cls, sql: str, *, dialect: str) -> exp.Expression:
+        statements = cls.parse_statements(sql, dialect=dialect)
+        if len(statements) != 1:
+            raise ValueError("single_statement_required")
+        statement = statements[0]
+        if statement is None:
+            raise ValueError("parse_error")
+        return statement
+
+
 class SqlRowLimitNormalizer:
     """Applies bounded row-limit policy without producing engine-invalid SQL."""
 
@@ -125,8 +143,13 @@ class SqlRowLimitNormalizer:
 class SqlGuardService:
     """Guards SQL statements before execution against read-only policy."""
 
-    def __init__(self, row_limit_normalizer: SqlRowLimitNormalizer | None = None) -> None:
+    def __init__(
+        self,
+        row_limit_normalizer: SqlRowLimitNormalizer | None = None,
+        parser: SqlParserPrimitives | None = None,
+    ) -> None:
         self._row_limit_normalizer = row_limit_normalizer or SqlRowLimitNormalizer()
+        self._parser = parser or SqlParserPrimitives()
 
     def guard(self, request: SqlGuardRequest) -> SqlGuardResponse:
         raw_sql = request.sql.strip()
@@ -142,7 +165,7 @@ class SqlGuardService:
             )
 
         try:
-            statements = parse(raw_sql, read=request.dialect)
+            statements = self._parser.parse_statements(raw_sql, dialect=request.dialect)
         except ParseError as exc:
             if self._is_allowed_introspection_sql(raw_sql):
                 return self._allow_introspection(request=request, sql=raw_sql)

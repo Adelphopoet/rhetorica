@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from rhetorica_backend.contracts.admin_integrations import GitLabConnectionConfig
-from rhetorica_backend.domain.chat.gitlab import GitLabService
+from rhetorica_backend.domain.chat.gitlab import WRITE_TOKEN_SCOPES, GitLabService
 
 
 def _connection() -> GitLabConnectionConfig:
@@ -72,7 +72,9 @@ def test_search_gitlab_content_returns_compact_refs_and_uses_private_token() -> 
 
 def test_search_gitlab_content_adds_path_filter_to_search_query() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["search"] == "dm_operations path:foodtech/operations/dm_operations"
+        assert (
+            request.url.params["search"] == "dm_operations path:foodtech/operations/dm_operations"
+        )
         return httpx.Response(200, json=[])
 
     results = _service(handler).search_content(
@@ -183,7 +185,9 @@ def test_list_gitlab_tree_returns_bounded_directory_items() -> None:
     assert payload["next_page"] == "2"
     assert payload["truncated"] is True
     assert payload["items"][0]["file_path"] == "src/app.py"
-    assert payload["items"][0]["url"] == "https://gitlab.example.com/group/app/-/blob/main/src/app.py"
+    assert (
+        payload["items"][0]["url"] == "https://gitlab.example.com/group/app/-/blob/main/src/app.py"
+    )
     assert payload["items"][1]["file_path"] is None
     assert payload["items"][1]["url"] == "https://gitlab.example.com/group/app/-/tree/main/src/jobs"
 
@@ -288,3 +292,98 @@ def test_get_gitlab_file_blame_returns_compact_commit_ranges() -> None:
     assert payload["ranges"][0]["author_name"] == "Ada"
     assert payload["ranges"][1]["start_line"] == 12
     assert payload["ranges"][1]["title"] == "Wire app"
+
+
+def test_gitlab_write_helpers_are_fenced_to_commit_and_draft_mr() -> None:
+    assert not hasattr(GitLabService, "merge_merge_request")
+    assert not hasattr(GitLabService, "delete_branch")
+    assert not hasattr(GitLabService, "protect_branch")
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        path = request.url.path
+        if path.endswith("/personal_access_tokens/self"):
+            return httpx.Response(200, json={"scopes": ["api"]})
+        if request.method == "GET" and "/repository/branches/" in path:
+            return httpx.Response(404, text="not found")
+        if request.method == "GET" and path.endswith("/repository/commits"):
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and path.endswith("/repository/commits"):
+            assert b'"start_sha"' in request.content
+            assert b"force" not in request.content
+            return httpx.Response(201, json={"id": "e" * 40, "parent_ids": ["b" * 40]})
+        if request.method == "POST" and path.endswith("/merge_requests"):
+            assert b'"draft": true' in request.content or b'"draft":true' in request.content
+            return httpx.Response(
+                201,
+                json={"web_url": "https://gitlab.example.com/analytics/dbt/-/merge_requests/7"},
+            )
+        return httpx.Response(500, text=path)
+
+    service = _service(handler)
+    connection = _connection()
+    assert service.get_access_token_info(connection) == {"scopes": ["api"]}
+    assert (
+        service.get_branch(
+            connection, project_path="analytics/dbt", branch="feature/rhetorica/run-1"
+        )
+        is None
+    )
+    commit = service.create_commit(
+        connection,
+        project_path="analytics/dbt",
+        branch="feature/rhetorica/run-1",
+        start_sha="b" * 40,
+        commit_message="msg",
+        actions=[{"action": "update", "file_path": "models/a.sql", "content": "select 1"}],
+    )
+    assert commit["id"] == "e" * 40
+    created = service.create_draft_merge_request(
+        connection,
+        project_path="analytics/dbt",
+        source_branch="feature/rhetorica/run-1",
+        target_branch="main",
+        title="Rhetorica coding run run-1",
+        description="body",
+    )
+    assert "merge_requests/7" in created["web_url"]
+    assert {item[0] for item in seen} <= {"GET", "POST"}
+    assert all("/merge_requests/merge" not in path for _, path in seen)
+    commits = service.list_commits(
+        connection, project_path="analytics/dbt", ref="feature/rhetorica/run-1"
+    )
+    assert commits == []
+
+
+def test_gitlab_publication_scope_requires_api() -> None:
+    assert frozenset({"api"}) == WRITE_TOKEN_SCOPES
+    assert "write_repository" not in WRITE_TOKEN_SCOPES
+
+
+def test_get_commit_diff_reads_every_page() -> None:
+    sha = "e" * 40
+    entries = [{"new_path": f"models/m{index}.sql", "new_file": True} for index in range(230)]
+    pages: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        per_page = int(request.url.params["per_page"])
+        page = int(request.url.params["page"])
+        pages.append((request.url.params["per_page"], request.url.params["page"]))
+        chunk = entries[(page - 1) * per_page : page * per_page]
+        has_next = page * per_page < len(entries)
+        return httpx.Response(
+            200,
+            json=chunk,
+            headers={"x-next-page": str(page + 1) if has_next else ""},
+        )
+
+    diff = _service(handler).get_commit_diff(_connection(), project_path="analytics/dbt", sha=sha)
+
+    assert [item["new_path"] for item in diff] == [item["new_path"] for item in entries]
+    assert pages == [("100", "1"), ("100", "2"), ("100", "3")]
+
+    with pytest.raises(ValueError, match="gitlab_commit_diff_too_large"):
+        _service(handler).get_commit_diff(
+            _connection(), project_path="analytics/dbt", sha=sha, max_pages=2
+        )

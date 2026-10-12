@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+from rhetorica_backend.infra.postgres import (
+    agent_session_models as _agent_session_models,  # noqa: F401
+)
 from rhetorica_backend.infra.postgres import chat_models as _chat_models  # noqa: F401
+from rhetorica_backend.infra.postgres import (
+    coding_policy_models as _coding_policy_models,  # noqa: F401
+)
+from rhetorica_backend.infra.postgres import (
+    coding_publication_models as _coding_publication_models,  # noqa: F401
+)
+from rhetorica_backend.infra.postgres import (
+    coding_run_models as _coding_run_models,  # noqa: F401
+)
+from rhetorica_backend.infra.postgres import (
+    coding_sandbox_models as _coding_sandbox_models,  # noqa: F401
+)
+from rhetorica_backend.infra.postgres import (
+    coding_team_models as _coding_team_models,  # noqa: F401
+)
 from rhetorica_backend.infra.postgres import file_models as _file_models  # noqa: F401
 from rhetorica_backend.infra.postgres import models as _models  # noqa: F401
 from rhetorica_backend.infra.postgres import scenario_models as _scenario_models  # noqa: F401
 from rhetorica_backend.infra.postgres import (
     scenario_workflow_models as _scenario_workflow_models,  # noqa: F401
 )
+from rhetorica_backend.infra.postgres import workspace_models as _workspace_models  # noqa: F401
 from rhetorica_backend.infra.postgres.base import Base
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker

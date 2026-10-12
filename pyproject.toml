@@ -1,7 +1,7 @@
 [tool.uv.workspace]
 members = [
   "apps/api",
-  "apps/sandbox",
+  "apps/coding-runner",
   "apps/worker",
   "packages/backend",
 ]
@@ -50,15 +50,17 @@ warn_return_any = true
 warn_unused_ignores = true
 warn_unused_configs = true
 show_error_codes = true
-files = ["apps/api/src", "apps/sandbox/src", "apps/worker/src", "packages/backend/src"]
+files = ["apps/api/src", "apps/coding-runner/src", "apps/worker/src", "packages/backend/src"]
 exclude = ["\\.venv", "node_modules"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-addopts = "-ra --import-mode=importlib"
+addopts = "-ra --import-mode=importlib -m 'not gitlab_live'"
+markers = [
+  "gitlab_live: live disposable GitLab publisher evidence (RHETORICA_GITLAB_LIVE_*)",
+]
 testpaths = [
   "apps/api/tests",
-  "apps/sandbox/tests",
   "apps/worker/tests",
   "packages/backend/tests",
   "tests",

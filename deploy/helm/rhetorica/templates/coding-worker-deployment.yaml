@@ -1,0 +1,96 @@
+{{- if and .Values.codingRunner.enabled .Values.codingRunner.worker.enabled }}
+{{- $_ := required "A Temporal frontend is required for the coding worker" (include "rhetorica.temporalAddress" .) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-coding-worker
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.codingRunner.worker.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: coding-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "rhetorica.labels" . | nindent 8 }}
+        app.kubernetes.io/component: coding-worker
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "rhetorica.tolerations" (dict "root" . "component" .Values.worker) | nindent 6 }}
+      {{- with .Values.worker.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: coding-worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag }}"
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          {{- with .Values.worker.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "rhetorica.fullname" . }}-config
+            - secretRef:
+                name: {{ include "rhetorica.fullname" . }}-secret
+            {{- with .Values.codingRunner.worker.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- with .Values.worker.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            - name: RHETORICA_WORKER_KIND
+              value: coding
+            {{- if .Values.scenarioWorkflows.temporal.tlsSecret }}
+            - name: TEMPORAL_TLS_CA
+              value: /etc/temporal-tls/ca.crt
+            - name: TEMPORAL_TLS_CERT
+              value: /etc/temporal-tls/tls.crt
+            - name: TEMPORAL_TLS_KEY
+              value: /etc/temporal-tls/tls.key
+            - name: TEMPORAL_TLS_SERVER_NAME
+              value: {{ .Values.scenarioWorkflows.temporal.serverName | quote }}
+            {{- end }}
+          {{- with .Values.codingRunner.worker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- if .Values.scenarioWorkflows.temporal.tlsSecret }}
+            - name: temporal-tls
+              mountPath: /etc/temporal-tls
+              readOnly: true
+            {{- end }}
+            - name: worker-tmp
+              mountPath: /tmp
+          {{- if .Values.extraCa.existingConfigMap }}
+            - name: extra-ca-certs
+              mountPath: {{ .Values.extraCa.mountPath | quote }}
+              readOnly: true
+          {{- end }}
+      volumes:
+        {{- if .Values.scenarioWorkflows.temporal.tlsSecret }}
+        - name: temporal-tls
+          secret:
+            secretName: {{ .Values.scenarioWorkflows.temporal.tlsSecret }}
+        {{- end }}
+        - name: worker-tmp
+          emptyDir:
+            sizeLimit: {{ .Values.worker.tempSizeLimit | quote }}
+      {{- if .Values.extraCa.existingConfigMap }}
+        - name: extra-ca-certs
+          configMap:
+            name: {{ .Values.extraCa.existingConfigMap }}
+      {{- end }}
+{{- end }}

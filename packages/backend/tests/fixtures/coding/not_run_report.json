@@ -1,0 +1,25 @@
+{
+  "id": "report-not-run",
+  "workspace_id": "analytics",
+  "run_id": "run-success",
+  "candidate_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "report_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "checks": [
+    {
+      "name": "dbt_compile",
+      "status": "passed",
+      "mandatory": true,
+      "reason": null,
+      "receipt_id": "command-1"
+    },
+    {
+      "name": "materialization",
+      "status": "not_run",
+      "mandatory": false,
+      "reason": "Read-only validation cannot materialize the changed model.",
+      "receipt_id": null
+    }
+  ],
+  "qa_agent_id": "qa",
+  "created_at": "2026-09-22T08:10:00Z"
+}

@@ -60,7 +60,7 @@ class AssembledChatTurn:
     claim_evidence_links: list[dict[str, Any]]
     uncertainty_flags: list[str]
     capability_trace: CapabilityTrace
-    optimization_trace: OptimizationTrace
+    optimization_trace: OptimizationTrace | None
     execution: ExecuteSqlResponse | None
     analysis_document: AnalysisDocument | None
     visualization: VisualizationSpec | None
@@ -142,6 +142,7 @@ class ChatHistoryPersistenceService:
         turn: AssembledChatTurn,
         persist_user_message: bool = True,
         persisted_user_message_id: str | None = None,
+        journal_events: list[dict[str, object]] | None = None,
     ) -> str | None:
         if not conversation_id:
             return None
@@ -159,13 +160,10 @@ class ChatHistoryPersistenceService:
                 content=request.question,
             )
 
-        if (
-            not persist_user_message
-            and user_message is not None
-            and request.attachment_ids
-        ):
+        if not persist_user_message and user_message is not None and request.attachment_ids:
             self._conversation_manager.attach_files_to_message(
                 artifact_ids=request.attachment_ids,
+                workspace_id=request.workspace_id,
                 message_id=user_message.id,
                 conversation_id=conversation_id,
                 relation="input",
@@ -194,6 +192,7 @@ class ChatHistoryPersistenceService:
             conversation_id=conversation_id,
             role="assistant",
             content=turn.answer,
+            journal_events=journal_events,
             generated_sql=turn.generated_sql,
             execution_id=(turn.execution.execution_id if turn.execution is not None else None),
             context_tables=turn.context_tables,
@@ -203,7 +202,11 @@ class ChatHistoryPersistenceService:
             claim_evidence_links=turn.claim_evidence_links,
             uncertainty_flags=turn.uncertainty_flags,
             capability_trace=capability_trace_payload,
-            optimization_trace=turn.optimization_trace.model_dump(mode="json"),
+            optimization_trace=(
+                turn.optimization_trace.model_dump(mode="json")
+                if turn.optimization_trace is not None
+                else None
+            ),
             selected_connector=turn.selected_database_connector,
             analysis_document=(
                 turn.analysis_document.model_dump(mode="json")
@@ -221,12 +224,17 @@ class ChatHistoryPersistenceService:
         if assistant_message is not None and turn.files:
             self._conversation_manager.attach_files_to_message(
                 artifact_ids=[item.id for item in turn.files],
+                workspace_id=request.workspace_id,
                 message_id=assistant_message.id,
                 conversation_id=conversation_id,
                 relation="output",
             )
         langfuse_trace_id = runtime_context.get("langfuse_trace_id")
-        if assistant_message is not None and isinstance(langfuse_trace_id, str) and langfuse_trace_id:
+        if (
+            assistant_message is not None
+            and isinstance(langfuse_trace_id, str)
+            and langfuse_trace_id
+        ):
             self._conversation_manager.save_answer_trace(
                 assistant_message_id=assistant_message.id,
                 conversation_id=conversation_id,
@@ -280,11 +288,13 @@ class ChatHistoryPersistenceService:
         if user_message is not None and request.attachment_ids:
             self._conversation_manager.attach_files_to_message(
                 artifact_ids=request.attachment_ids,
+                workspace_id=request.workspace_id,
                 message_id=user_message.id,
                 conversation_id=conversation_id,
                 relation="input",
             )
         return user_message
+
 
 class ChatResponseAssembler:
     """Builds final chat responses and persists them into conversation history."""
@@ -362,7 +372,7 @@ class ChatResponseAssembler:
                 warnings=turn_warnings,
                 execution=execution,
             ),
-            optimization_trace=self._extract_optimization_trace(llm_payload),
+            optimization_trace=None,
             execution=execution,
             analysis_document=analysis_document,
             visualization=primary_visualization,
@@ -490,16 +500,6 @@ class ChatResponseAssembler:
             degraded_capabilities=capability_surface.degraded_capabilities,
             policy_decisions=capability_surface.policy_decisions,
         )
-
-    @staticmethod
-    def _extract_optimization_trace(llm_payload: dict[str, Any]) -> OptimizationTrace:
-        payload = llm_payload.get("optimization_trace")
-        if isinstance(payload, dict):
-            try:
-                return OptimizationTrace.model_validate(payload)
-            except Exception:
-                return OptimizationTrace()
-        return OptimizationTrace()
 
     @staticmethod
     def _extract_optional_dict(value: Any) -> dict[str, Any] | None:

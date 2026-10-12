@@ -21,6 +21,7 @@ from rhetorica_backend.contracts.chat import (
 from rhetorica_backend.domain.chat.conversation.conversation_manager import (
     ConversationManager,
 )
+from rhetorica_backend.domain.chat.journal import ChatJournal
 from rhetorica_backend.domain.chat.llm.llm_client import LlmClient
 from rhetorica_backend.domain.chat.orchestration import shared_kernel
 from rhetorica_backend.domain.chat.orchestration.chat_runtime_orchestrator import (
@@ -236,6 +237,9 @@ class StreamingChatOrchestrator:
         Yields:
             StreamEvent instances for SSE.
         """
+        if request.coding_mode or request.coding_resources is not None:
+            from rhetorica_backend.domain.coding.errors import CodingRunError
+            raise CodingRunError("channel_not_allowed", status_code=403)
         queue: asyncio.Queue[StreamEvent | object] = asyncio.Queue()
         sentinel = object()
 
@@ -355,15 +359,24 @@ class StreamingChatOrchestrator:
         cancel_event: asyncio.Event | None,
         emit: Callable[[StreamEvent], None] | None,
     ) -> RuntimeExecutionResult:
+        journal = ChatJournal()
+
+        def record(event: StreamEvent) -> None:
+            journal.record(event)
+            self._emit(emit, event)
+
         runtime_result = await self._run_prepared_tool_loop_and_collect(
             runtime=runtime,
             cancel_event=cancel_event,
-            on_event=emit,
+            on_event=record if emit is not None else None,
         )
+        for event in runtime_result.events:
+            journal.record(event)
         return RuntimeExecutionResult(
             llm_payload=runtime_result.payload,
             transport_artifact=StreamingRuntimeTransportArtifact(
-                events=list(runtime_result.events)
+                events=list(runtime_result.events),
+                journal_events=journal.events,
             ),
         )
 

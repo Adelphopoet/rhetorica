@@ -5,14 +5,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
-from rhetorica_backend.contracts.chat import ChatAskRequest, OptimizationTrace
+from rhetorica_backend.contracts.chat import ChatAskRequest
 from rhetorica_backend.contracts.connectors import ConnectorItem
 from rhetorica_backend.contracts.execution import sql_dialect_for_engine
 from rhetorica_backend.domain.chat.error_contract import (
     ErrorCategory,
     build_tool_error,
 )
-from rhetorica_backend.domain.chat.sql.optimization import SqlOptimizationService
 from rhetorica_backend.domain.chat.sql.semantic_preflight import (
     SemanticSqlPreflightService,
     SqlPreflightResult,
@@ -158,21 +157,6 @@ class RunSqlPipelineSupport(Protocol):
         execution: Any,
     ) -> None: ...
 
-    def _emit_sql_optimizer_start(
-        self,
-        *,
-        selected_connector_name: str,
-        engine: str,
-        referenced_tables: list[str],
-    ) -> None: ...
-
-    def _emit_sql_optimizer_end(
-        self,
-        *,
-        trace: OptimizationTrace,
-    ) -> None: ...
-
-
 class RunSqlPipeline:
     """Orchestrates run_sql end-to-end while keeping ToolExecutor thin."""
 
@@ -188,14 +172,12 @@ class RunSqlPipeline:
         *,
         sql_router: SqlRouter,
         semantic_preflight_service: SemanticSqlPreflightService,
-        sql_optimization_service: SqlOptimizationService,
         support: RunSqlPipelineSupport,
         metric_registry_service: MetricRegistryService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._sql_router = sql_router
         self._semantic_preflight_service = semantic_preflight_service
-        self._sql_optimization_service = sql_optimization_service
         self._support = support
         self._metric_registry_service = metric_registry_service
         self._logger = logger or logging.getLogger(__name__)
@@ -549,53 +531,6 @@ class RunSqlPipeline:
             )
         state.preflight_pass += 1
         sql_for_execution_plan = sql
-        optimization_trace = state.optimization_trace
-
-        if self._sql_optimization_service.should_optimize(
-            workspace_id=request.workspace_id,
-            connection=connection,
-            selected_connector_name=selected_connector.name,
-        ):
-            self._support._emit_sql_optimizer_start(
-                selected_connector_name=selected_connector.name,
-                engine=connection.engine,
-                referenced_tables=preflight_result.referenced_tables,
-            )
-            optimization = self._sql_optimization_service.optimize(
-                workspace_id=request.workspace_id,
-                connection=connection,
-                sql=sql_for_execution_plan,
-                referenced_tables=preflight_result.referenced_tables,
-                semantic_preflight_service=self._semantic_preflight_service,
-                context_tables=state.context_tables,
-                metadata_table_columns=state.metadata_table_columns,
-                selected_connector_name=selected_connector.name,
-            )
-            optimization_trace = optimization.trace
-            state.optimization_trace = optimization_trace
-            self._support._emit_sql_optimizer_end(trace=optimization_trace)
-            if optimization_trace.optimizer_used:
-                state.capability_state.used_tools.append("sql_optimization_advisor")
-                provider_name = optimization_trace.optimizer_provider
-                if not provider_name:
-                    provider_resolver = getattr(
-                        self._sql_optimization_service,
-                        "provider_for_engine",
-                        None,
-                    )
-                    if callable(provider_resolver):
-                        provider_name = provider_resolver(connection.engine)
-                    else:
-                        provider_name = f"{connection.engine}_rule_advisor"
-                providers = [provider_name]
-                if optimization_trace.skills_used:
-                    providers.append("workspace_skill_advisor")
-                for provider in providers:
-                    if provider not in state.capability_state.used_providers:
-                        state.capability_state.used_providers.append(provider)
-            sql = optimization.sql_for_execution
-        else:
-            sql = sql_for_execution_plan
 
         try:
             execution = self._sql_router.execute_sql(
@@ -659,9 +594,6 @@ class RunSqlPipeline:
             "executed_sql": sql,
             "selected_database_connector": selected_connector.name,
             "preflight_status": preflight_status,
-            "optimizer_summary": self._build_optimizer_summary(optimization_trace),
-            "optimizer_hints": self._build_optimizer_hints(optimization_trace),
-            "optimization_trace": optimization_trace.model_dump(mode="json"),
             "execution": execution.model_dump(mode="json"),
             "prompt_row_limit": prompt_row_limit,
             "execution_row_limit": execution_row_limit,
@@ -713,35 +645,6 @@ class RunSqlPipeline:
             for warning in state.warnings
             if warning not in cls._RESOLVED_SUCCESS_WARNINGS
         ]
-
-    @staticmethod
-    def _build_optimizer_summary(trace: OptimizationTrace) -> str | None:
-        if not trace.optimizer_used:
-            return None
-        if trace.applied:
-            if trace.rules_triggered:
-                return f"Applied optimizer rewrite via {', '.join(trace.rules_triggered)}."
-            return "Applied optimizer rewrite before execution."
-        if trace.findings:
-            count = len(trace.findings)
-            suffix = "" if count == 1 else "s"
-            top_titles = "; ".join(
-                finding.title for finding in trace.findings[:2] if finding.title
-            )
-            if top_titles:
-                return f"Advisory only: {count} finding{suffix}. {top_titles}."
-            return f"Advisory only: {count} finding{suffix}."
-        return "SQL was inspected before execution."
-
-    @staticmethod
-    def _build_optimizer_hints(trace: OptimizationTrace) -> list[str]:
-        hints: list[str] = []
-        for finding in trace.findings:
-            hints.append(f"[{finding.severity}] {finding.title}: {finding.summary}")
-        for action in trace.recommended_actions:
-            status = "applied" if action.applied else "suggested"
-            hints.append(f"[{status}] {action.title}: {action.summary}")
-        return hints[:6]
 
     @staticmethod
     def _repairable_missing_tables(preflight_result: SqlPreflightResult) -> list[str]:

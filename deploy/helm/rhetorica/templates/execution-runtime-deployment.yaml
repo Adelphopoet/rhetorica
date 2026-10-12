@@ -1,0 +1,145 @@
+{{- if or .Values.executionRuntime.enabled .Values.codingRunner.enabled }}
+{{- $runtimeClass := required "executionRuntime.runtimeClassName is required" .Values.executionRuntime.runtimeClassName -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rhetorica.fullname" . }}-execution-controller
+  labels:
+    {{- include "rhetorica.labels" . | nindent 4 }}
+    app.kubernetes.io/component: execution-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: execution-controller
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "rhetorica.labels" . | nindent 8 }}
+        app.kubernetes.io/component: execution-controller
+    spec:
+      serviceAccountName: {{ include "rhetorica.fullname" . }}-execution-controller
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: execution-controller
+          image: "{{ .Values.executionRuntime.image.repository }}:{{ .Values.executionRuntime.image.tag }}"
+          imagePullPolicy: {{ .Values.executionRuntime.image.pullPolicy }}
+          command: ["uvicorn", "rhetorica_coding_runner.controller:app", "--host", "0.0.0.0", "--port", "8091"]
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8091
+          envFrom:
+            - configMapRef:
+                name: {{ include "rhetorica.fullname" . }}-config
+            - secretRef:
+                name: {{ include "rhetorica.fullname" . }}-secret
+          env:
+            - name: EXECUTION_CONTROLLER_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: EXECUTION_CONTROLLER_INSTANCE
+              value: {{ .Release.Name | quote }}
+            - name: EXECUTION_CONTROLLER_MAX_ACTIVE_JOBS
+              value: {{ .Values.executionRuntime.maxActiveJobs | quote }}
+            - name: EXECUTION_CONTROLLER_RECONCILE_INTERVAL_SECONDS
+              value: {{ .Values.executionRuntime.reconcileIntervalSeconds | quote }}
+            - name: EXECUTION_RUNTIME_ENABLED
+              value: {{ .Values.executionRuntime.enabled | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_RUNNER_IMAGE
+              value: "{{ .Values.executionRuntime.image.repository }}:{{ .Values.executionRuntime.image.tag }}"
+            - name: EXECUTION_CONTROLLER_FILE_RUNNER_SECRET_NAME
+              value: {{ printf "%s-secret" (include "rhetorica.fullname" .) | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_RUNNER_IMAGE_PULL_POLICY
+              value: {{ .Values.executionRuntime.image.pullPolicy | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_RUNTIME_CLASS_NAME
+              value: {{ $runtimeClass | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_NODE_SELECTOR_JSON
+              value: {{ toJson .Values.executionRuntime.nodeSelector | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_TOLERATIONS_JSON
+              value: {{ toJson .Values.executionRuntime.tolerations | quote }}
+            - name: EXECUTION_CONTROLLER_IMAGE_PULL_SECRETS_JSON
+              value: {{ toJson .Values.global.imagePullSecrets | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_STARTUP_TIMEOUT_SECONDS
+              value: {{ .Values.executionRuntime.startupTimeoutSeconds | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_WORKSPACE_SIZE_LIMIT
+              value: {{ .Values.executionRuntime.workspaceSizeLimit | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_CPU_REQUEST
+              value: {{ index .Values.executionRuntime.resources.requests "cpu" | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_MEMORY_REQUEST
+              value: {{ index .Values.executionRuntime.resources.requests "memory" | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_EPHEMERAL_STORAGE_REQUEST
+              value: {{ index .Values.executionRuntime.resources.requests "ephemeral-storage" | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_CPU_LIMIT
+              value: {{ index .Values.executionRuntime.resources.limits "cpu" | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_MEMORY_LIMIT
+              value: {{ index .Values.executionRuntime.resources.limits "memory" | quote }}
+            - name: EXECUTION_CONTROLLER_FILE_EPHEMERAL_STORAGE_LIMIT
+              value: {{ index .Values.executionRuntime.resources.limits "ephemeral-storage" | quote }}
+            - name: EXECUTION_RUNTIME_PROCESS_TIMEOUT_SECONDS
+              value: {{ .Values.executionRuntime.processTimeoutSeconds | quote }}
+            - name: EXECUTION_RUNTIME_SESSION_TTL_MINUTES
+              value: {{ .Values.executionRuntime.sessionTtlMinutes | quote }}
+            - name: EXECUTION_RUNTIME_CLEANUP_INTERVAL_SECONDS
+              value: {{ .Values.executionRuntime.cleanupIntervalSeconds | quote }}
+            - name: EXECUTION_RUNTIME_MAX_WORKSPACE_BYTES
+              value: {{ .Values.executionRuntime.maxWorkspaceBytes | quote }}
+            - name: EXECUTION_RUNTIME_MAX_LOG_BYTES
+              value: {{ .Values.executionRuntime.maxLogBytes | quote }}
+            - name: EXECUTION_RUNTIME_MAX_OUTPUT_FILES
+              value: {{ .Values.executionRuntime.maxOutputFiles | quote }}
+            - name: EXECUTION_RUNTIME_MAX_SESSION_OUTPUT_FILES
+              value: {{ .Values.executionRuntime.maxSessionOutputFiles | quote }}
+            - name: EXECUTION_RUNTIME_MEMORY_LIMIT_BYTES
+              value: {{ .Values.executionRuntime.memoryLimitBytes | quote }}
+            - name: EXECUTION_RUNTIME_PID_LIMIT
+              value: {{ .Values.executionRuntime.pidLimit | quote }}
+            - name: CODING_ENABLED
+              value: {{ .Values.codingRunner.enabled | quote }}
+            {{- if .Values.codingRunner.enabled }}
+            - name: CODING_CONTROLLER_NODE_SELECTOR_JSON
+              value: {{ toJson .Values.codingRunner.runner.nodeSelector | quote }}
+            - name: CODING_CONTROLLER_TOLERATIONS_JSON
+              value: {{ toJson .Values.codingRunner.runner.tolerations | quote }}
+            - name: CODING_CONTROLLER_RUNNER_IMAGE_DIGEST
+              value: {{ .Values.codingRunner.runner.imageDigest | quote }}
+            - name: CODING_CONTROLLER_RUNNER_RUNTIME_CLASS_NAME
+              value: {{ .Values.codingRunner.runner.runtimeClassName | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+          resources:
+            {{- toYaml .Values.executionRuntime.controller.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+{{- end }}

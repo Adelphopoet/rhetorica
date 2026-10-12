@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from rhetorica_backend.contracts.chat import ChatAskRequest
@@ -20,7 +19,6 @@ from rhetorica_backend.domain.chat.orchestration.tool_execution_runtime_support 
 from rhetorica_backend.domain.chat.orchestration.tool_execution_sql_schema_hydration_service import (
     ToolExecutionSqlSchemaHydrationService,
 )
-from rhetorica_backend.domain.chat.sql.optimization import SqlOptimizationService
 from rhetorica_backend.domain.chat.sql.semantic_preflight import (
     SemanticSqlPreflightService,
 )
@@ -37,14 +35,12 @@ class ToolExecutionSupportKernel(ToolExecutionRuntimeSupport):
         sql_router: SqlRouter,
         rag_retriever: RagInsightRetriever | None = None,
         semantic_preflight_service: SemanticSqlPreflightService | None = None,
-        sql_optimization_service: SqlOptimizationService | None = None,
     ) -> None:
         self._sql_router = sql_router
         self._rag_retriever = rag_retriever
         self._semantic_preflight_service = (
             semantic_preflight_service or SemanticSqlPreflightService()
         )
-        self._sql_optimization_service = sql_optimization_service
         self._metadata_state_context_service = self._metadata_context_service
         self._metadata_runtime_service = ToolExecutionMetadataRuntimeService(
             connector_scope_policy=self._connector_scope_policy,
@@ -63,8 +59,6 @@ class ToolExecutionSupportKernel(ToolExecutionRuntimeSupport):
             metadata_context_service=self._metadata_state_context_service,
             runtime_sql_policy=self._runtime_sql_policy,
         )
-        self._sql_optimizer_start: Callable[..., None] | None = None
-        self._sql_optimizer_end: Callable[..., None] | None = None
 
     @property
     def metadata_runtime_lookup_service(self) -> MetadataRuntimeLookupService:
@@ -73,19 +67,6 @@ class ToolExecutionSupportKernel(ToolExecutionRuntimeSupport):
     @property
     def semantic_preflight_service(self) -> SemanticSqlPreflightService:
         return self._semantic_preflight_service
-
-    @property
-    def sql_optimization_service(self) -> SqlOptimizationService | None:
-        return self._sql_optimization_service
-
-    def bind_sql_optimizer_hooks(
-        self,
-        *,
-        on_start: Callable[..., None],
-        on_end: Callable[..., None],
-    ) -> None:
-        self._sql_optimizer_start = on_start
-        self._sql_optimizer_end = on_end
 
     def _lookup_runtime_tables(
         self,
@@ -101,16 +82,6 @@ class ToolExecutionSupportKernel(ToolExecutionRuntimeSupport):
             search=search,
             limit=limit,
         )
-
-    def _emit_sql_optimizer_start(self, **kwargs: Any) -> None:
-        if self._sql_optimizer_start is None:
-            return
-        self._sql_optimizer_start(**kwargs)
-
-    def _emit_sql_optimizer_end(self, **kwargs: Any) -> None:
-        if self._sql_optimizer_end is None:
-            return
-        self._sql_optimizer_end(**kwargs)
 
     @staticmethod
     def _successful_usage_table_fqns(

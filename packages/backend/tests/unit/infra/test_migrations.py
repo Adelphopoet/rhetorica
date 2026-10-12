@@ -1,15 +1,21 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from rhetorica_backend.contracts.connectors import UpsertConnectorRequest
+from rhetorica_backend.contracts.execution import EngineConnectionConfig
 from rhetorica_backend.infra.postgres import chat_models as _chat_models  # noqa: F401
 from rhetorica_backend.infra.postgres import models as _models  # noqa: F401
 from rhetorica_backend.infra.postgres import scenario_models as _scenario_models  # noqa: F401
 from rhetorica_backend.infra.postgres.base import Base
+from rhetorica_backend.infra.postgres.connector_repository import ConnectorRepository
 from rhetorica_backend.infra.postgres.migrations import _has_managed_schema, get_alembic_config
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
+from rhetorica_backend.infra.postgres.user_repository import UserAccountRepository
+from rhetorica_backend.infra.secrets import InMemorySecretStore
 from sqlalchemy import create_engine, inspect, text
 
 
@@ -23,6 +29,141 @@ def test_alembic_revision_graph_has_single_head() -> None:
     heads = ScriptDirectory.from_config(get_alembic_config()).get_heads()
 
     assert len(heads) == 1, f"Expected one Alembic head, found: {heads}"
+
+
+def test_coding_lease_version_migration_upgrades_and_downgrades(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'coding_lease_version.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    runtime = DatabaseRuntime(database_url)
+    runtime.create_schema()
+    engine = runtime.engine
+    config = get_alembic_config()
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE coding_sandbox_lease DROP COLUMN version"))
+    command.stamp(config, "b7c8d9e0f1a2")
+
+    command.upgrade(config, "c8d9e0f1a2b3")
+
+    assert "version" in {
+        column["name"] for column in inspect(engine).get_columns("coding_sandbox_lease")
+    }
+
+    command.downgrade(config, "b7c8d9e0f1a2")
+
+    assert "version" not in {
+        column["name"] for column in inspect(engine).get_columns("coding_sandbox_lease")
+    }
+
+
+def test_coding_publication_ledger_migration_upgrades_and_downgrades(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'coding_publication.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    runtime = DatabaseRuntime(database_url)
+    runtime.create_schema()
+    engine = runtime.engine
+    config = get_alembic_config()
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE coding_publication_operation"))
+    command.stamp(config, "d9e0f1a2b3c4")
+
+    command.upgrade(config, "d8e9f0a1b2c3")
+
+    assert "coding_publication_operation" in inspect(engine).get_table_names()
+    columns = {
+        column["name"] for column in inspect(engine).get_columns("coding_publication_operation")
+    }
+    assert {
+        "id",
+        "workspace_id",
+        "run_id",
+        "state",
+        "branch_name",
+        "attempt",
+        "reason_code",
+        "detail",
+    } <= columns
+
+    command.downgrade(config, "d9e0f1a2b3c4")
+
+    assert "coding_publication_operation" not in inspect(engine).get_table_names()
+
+
+def test_durable_coding_run_migration_upgrades_and_downgrades(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'durable_coding_run.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    runtime = DatabaseRuntime(database_url)
+    runtime.create_schema()
+    engine = runtime.engine
+    config = get_alembic_config()
+    with engine.begin() as connection:
+        for table_name in (
+            "coding_run_outbox",
+            "coding_validation_report",
+            "coding_validation_evidence",
+            "coding_run_event",
+            "coding_iteration_reservation",
+            "coding_budget_ledger",
+            "coding_agent_task",
+            "coding_candidate",
+            "coding_run",
+        ):
+            connection.execute(text(f"DROP TABLE {table_name}"))
+    command.stamp(config, "d8e9f0a1b2c3")
+
+    command.upgrade(config, "e0f1a2b3c4d5")
+
+    table_names = set(inspect(engine).get_table_names())
+    assert {
+        "coding_run",
+        "coding_candidate",
+        "coding_agent_task",
+        "coding_budget_ledger",
+        "coding_iteration_reservation",
+        "coding_run_event",
+        "coding_validation_evidence",
+        "coding_validation_report",
+        "coding_run_outbox",
+    } <= table_names
+    run_columns = {column["name"] for column in inspect(engine).get_columns("coding_run")}
+    assert {
+        "workspace_id",
+        "owner_user_id",
+        "idempotency_key",
+        "input_digest",
+        "principal_json",
+        "policy_snapshot_json",
+        "environment_snapshot_json",
+        "deadline",
+    } <= run_columns
+    task_columns = {column["name"] for column in inspect(engine).get_columns("coding_agent_task")}
+    assert {"skill_version_bindings", "skill_read_addresses", "version"} <= task_columns
+    evidence_columns = {
+        column["name"] for column in inspect(engine).get_columns("coding_validation_evidence")
+    }
+    assert {"candidate_digest", "exit_code", "duration_ms", "artifact_id"} <= evidence_columns
+
+    command.downgrade(config, "d8e9f0a1b2c3")
+
+    assert not {
+        "coding_run",
+        "coding_candidate",
+        "coding_agent_task",
+        "coding_budget_ledger",
+        "coding_iteration_reservation",
+        "coding_run_event",
+        "coding_validation_evidence",
+        "coding_validation_report",
+        "coding_run_outbox",
+    } & set(inspect(engine).get_table_names())
 
 
 def test_get_alembic_config_uses_backend_root_and_env_override(monkeypatch) -> None:
@@ -194,12 +335,9 @@ def test_llm_credential_binding_migration_upgrades_and_downgrades(
 
     inspector = inspect(engine)
     assert "chat_llm_credential_binding" in inspector.get_table_names()
-    connector_columns = {
-        column["name"] for column in inspector.get_columns("llm_connector_config")
-    }
+    connector_columns = {column["name"] for column in inspector.get_columns("llm_connector_config")}
     binding_columns = {
-        column["name"]
-        for column in inspector.get_columns("chat_llm_credential_binding")
+        column["name"] for column in inspector.get_columns("chat_llm_credential_binding")
     }
     assert "credential_set_version" in connector_columns
     assert {
@@ -278,6 +416,164 @@ def test_connector_extra_credentials_migration_upgrades_and_downgrades(
     command.downgrade(config, "d3e4f5a6b7c8")
     downgraded_columns = {item["name"] for item in inspect(engine).get_columns("connector_config")}
     assert "extra_credential_secret_refs" not in downgraded_columns
+
+
+def test_workspace_migration_backfills_memberships_without_changing_resource_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'workspace_migration.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = get_alembic_config()
+    runtime = DatabaseRuntime(database_url)
+    runtime.create_schema()
+    users = UserAccountRepository(runtime)
+    admin, _ = users.ensure_local_admin(
+        workspace_id="legacy",
+        login="admin",
+        password_hash="hashed",
+    )
+    analyst = users.create_local_user(
+        workspace_id="legacy",
+        login="analyst",
+        password_hash="hashed",
+        role="analyst",
+    )
+    connector = ConnectorRepository(runtime, secret_store=InMemorySecretStore()).upsert(
+        UpsertConnectorRequest(
+            name="trino",
+            workspace_id="legacy",
+            connection=EngineConnectionConfig(
+                engine="trino",
+                host="trino.internal",
+                port=8443,
+                username="legacy",
+                password="secret",
+            ),
+        )
+    )
+    with runtime.engine.begin() as connection:
+        original_secret_ref = connection.execute(
+            text("SELECT password_secret_ref FROM connector_config WHERE id = :id"),
+            {"id": connector.id},
+        ).scalar_one()
+        connection.execute(text("DROP TABLE workspace_policy_audit_event"))
+        connection.execute(text("DROP TABLE workspace_resource_grant"))
+        connection.execute(text("DROP TABLE workspace_membership"))
+        connection.execute(text("DROP TABLE workspace"))
+
+    command.stamp(config, "e8f9a0b1c2d3")
+    command.upgrade(config, "f0a1b2c3d4e5")
+    command.upgrade(config, "f0a1b2c3d4e5")
+
+    with runtime.engine.connect() as connection:
+        memberships = connection.execute(
+            text(
+                "SELECT user_id, role FROM workspace_membership "
+                "WHERE workspace_id = 'legacy' ORDER BY role"
+            )
+        ).all()
+        current_connector = connection.execute(
+            text("SELECT id, password_secret_ref FROM connector_config WHERE id = :id"),
+            {"id": connector.id},
+        ).one()
+    assert memberships == [(analyst.id, "analyst"), (admin.id, "owner")]
+    assert current_connector == (connector.id, original_secret_ref)
+
+
+def test_default_workspace_membership_migration_restores_minimum_analyst_access(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'default_workspace_membership.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("AUTH_DEFAULT_WORKSPACE_ID", "default")
+    config = get_alembic_config()
+    runtime = DatabaseRuntime(database_url)
+    runtime.create_schema()
+    users = UserAccountRepository(runtime)
+    first = users.create_local_user(
+        workspace_id="legacy",
+        login="first",
+        password_hash="hashed",
+        role="analyst",
+    )
+    second = users.create_local_user(
+        workspace_id="legacy",
+        login="second",
+        password_hash="hashed",
+        role="analyst",
+    )
+    now = datetime.now(tz=UTC)
+    with runtime.engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO workspace "
+                "(id, name, is_active, metadata_json, created_at, updated_at) "
+                "VALUES ('default', 'Default', 0, '{}', :now, :now)"
+            ),
+            {"now": now},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO workspace_membership "
+                "(workspace_id, user_id, role, is_active, created_at, updated_at) "
+                "VALUES ('default', :user_id, 'viewer', 0, :now, :now)"
+            ),
+            {"user_id": first.id, "now": now},
+        )
+
+    command.stamp(config, "f0a1b2c3d4e5")
+    command.upgrade(config, "f1b2c3d4e5f6")
+
+    with runtime.engine.connect() as connection:
+        workspace_active = connection.execute(
+            text("SELECT is_active FROM workspace WHERE id = 'default'")
+        ).scalar_one()
+        memberships = connection.execute(
+            text(
+                "SELECT user_id, role, is_active FROM workspace_membership "
+                "WHERE workspace_id = 'default' ORDER BY user_id"
+            )
+        ).all()
+    assert bool(workspace_active) is True
+    assert memberships == sorted([
+        (first.id, "analyst", True),
+        (second.id, "analyst", True),
+    ])
+
+
+def test_local_identity_workspace_migration_preserves_home_binding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'local_identity_workspace.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("AUTH_DEFAULT_WORKSPACE_ID", "default")
+    config = get_alembic_config()
+    runtime = DatabaseRuntime(database_url)
+    runtime.create_schema()
+    users = UserAccountRepository(runtime)
+    legacy_user = users.create_local_user(
+        workspace_id="legacy",
+        login="legacy-user",
+        password_hash="hashed",
+        role="analyst",
+    )
+
+    command.stamp(config, "f0a1b2c3d4e5")
+    command.upgrade(config, "f2c3d4e5f6a7")
+
+    persisted = users.get_by_login(workspace_id="legacy", login="legacy-user")
+    assert persisted is not None
+    assert persisted.id == legacy_user.id
+    assert users.get_by_login(workspace_id="default", login="legacy-user") is None
+    with runtime.engine.connect() as connection:
+        workspace_id = connection.execute(
+            text("SELECT workspace_id FROM user_account WHERE id = :user_id"),
+            {"user_id": legacy_user.id},
+        ).scalar_one()
+    assert workspace_id == "legacy"
 
 
 def test_legacy_connector_cleanup_migration_removes_tables_columns_and_mapping_settings(
@@ -405,7 +701,9 @@ def test_llm_top_p_migration_preserves_rows(tmp_path: Path, monkeypatch) -> None
     database_url = f"sqlite:///{tmp_path / 'llm_top_p.db'}"
     engine = create_engine(database_url)
     with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE llm_connector_config (id TEXT PRIMARY KEY, model TEXT)"))
+        connection.execute(
+            text("CREATE TABLE llm_connector_config (id TEXT PRIMARY KEY, model TEXT)")
+        )
         connection.execute(text("INSERT INTO llm_connector_config VALUES ('existing', 'test')"))
     monkeypatch.setenv("DATABASE_URL", database_url)
     config = get_alembic_config()
@@ -420,3 +718,172 @@ def test_llm_top_p_migration_preserves_rows(tmp_path: Path, monkeypatch) -> None
     assert "top_p" not in {c["name"] for c in inspect(engine).get_columns("llm_connector_config")}
     with engine.connect() as connection:
         assert connection.execute(text("SELECT model FROM llm_connector_config")).scalar() == "test"
+
+
+def test_agent_policy_migration_backfills_closed_policies_and_downgrades(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'agent_policy.db'}"
+    engine = create_engine(database_url)
+    legacy_settings = {"run_sql_allowed": True, "temperature": 0.2}
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE user_account (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(
+            text("CREATE TABLE workspace (id VARCHAR(128) PRIMARY KEY, name VARCHAR(255))")
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE agent_profile ("
+                "id VARCHAR(36) PRIMARY KEY, workspace_id VARCHAR(128) NOT NULL, "
+                "created_by VARCHAR(36), settings JSON NOT NULL)"
+            )
+        )
+        connection.execute(text("INSERT INTO workspace VALUES ('analytics', 'Analytics')"))
+        connection.execute(
+            text(
+                "INSERT INTO agent_profile (id, workspace_id, created_by, settings) "
+                "VALUES ('agent-1', 'analytics', NULL, :settings)"
+            ),
+            {"settings": json.dumps(legacy_settings)},
+        )
+
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = get_alembic_config()
+    command.stamp(config, "a5c6d7e8f901")
+    command.upgrade(config, "f5c6d7e8f9a0")
+    command.upgrade(config, "f5c6d7e8f9a0")
+
+    inspector = inspect(engine)
+    assert {"agent_governed_policy", "default_assistant_policy"} <= set(inspector.get_table_names())
+    with engine.connect() as connection:
+        policy = connection.execute(
+            text("SELECT revision, policy_json FROM agent_governed_policy")
+        ).one()
+        default_policy = connection.execute(
+            text("SELECT revision, policy_json FROM default_assistant_policy")
+        ).one()
+        unchanged_settings = json.loads(
+            connection.execute(text("SELECT settings FROM agent_profile")).scalar_one()
+        )
+    assert policy.revision == 1
+    assert json.loads(policy.policy_json)["gitlab_write_scopes"] == []
+    assert default_policy.revision == 1
+    assert json.loads(default_policy.policy_json)["delegation_grants"] == []
+    assert unchanged_settings == legacy_settings
+
+    command.downgrade(config, "a5c6d7e8f901")
+    assert {"agent_governed_policy", "default_assistant_policy"}.isdisjoint(
+        inspect(engine).get_table_names()
+    )
+    with engine.connect() as connection:
+        assert (
+            json.loads(connection.execute(text("SELECT settings FROM agent_profile")).scalar_one())
+            == legacy_settings
+        )
+
+
+def test_coding_team_backfill_creates_default_team_for_legacy_presets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'coding_teams.db'}"
+    engine = create_engine(database_url)
+    legacy = {
+        "root_agent_id": "coordinator",
+        "developer_agent_id": "developer",
+        "qa_agent_id": "qa",
+        "gitlab_connector_id": "gitlab",
+        "project_id": "group/project",
+        "target_branch": "main",
+        "environment_profile_id": "env",
+    }
+    invalid = {**legacy, "qa_agent_id": "developer"}
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE coding_agent_task (id VARCHAR(36) PRIMARY KEY)"))
+        connection.execute(
+            text(
+                "CREATE TABLE workspace_coding_defaults (workspace_id VARCHAR(128) PRIMARY KEY, "
+                "revision INTEGER, resources_json JSON, updated_by VARCHAR(36), "
+                "updated_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE coding_agent_team (id VARCHAR(36) PRIMARY KEY, "
+                "workspace_id VARCHAR(128), name VARCHAR(120), active_revision_id VARCHAR(36), "
+                "latest_revision INTEGER, created_at DATETIME, updated_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE coding_agent_team_revision (id VARCHAR(36) PRIMARY KEY, "
+                "workspace_id VARCHAR(128), team_id VARCHAR(36), revision INTEGER, "
+                "coordinator_agent_profile_id VARCHAR(36), coordinator_instruction VARCHAR(12000), "
+                "members_json JSON, is_active BOOLEAN, created_by VARCHAR(36), created_at DATETIME)"
+            )
+        )
+        for workspace_id, resources in [
+            ("analytics", legacy),
+            ("broken", invalid),
+            ("empty", None),
+        ]:
+            connection.execute(
+                text(
+                    "INSERT INTO workspace_coding_defaults VALUES "
+                    "(:workspace_id, 1, :resources, 'owner', '2026-01-01')"
+                ),
+                {
+                    "workspace_id": workspace_id,
+                    "resources": json.dumps(resources) if resources else None,
+                },
+            )
+
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = get_alembic_config()
+    command.stamp(config, "5bc6d7e8f9a0")
+    command.upgrade(config, "6cd7e8f9a0b1")
+
+    with engine.connect() as connection:
+        team = connection.execute(
+            text("SELECT id, name, active_revision_id FROM coding_agent_team")
+        ).one()
+        revision = connection.execute(
+            text(
+                "SELECT id, coordinator_agent_profile_id, members_json, is_active "
+                "FROM coding_agent_team_revision"
+            )
+        ).one()
+        presets = {
+            row.workspace_id: json.loads(row.resources_json) if row.resources_json else None
+            for row in connection.execute(
+                text("SELECT workspace_id, resources_json FROM workspace_coding_defaults")
+            )
+        }
+    members = json.loads(revision.members_json)
+    assert team.name == "Default coding team"
+    assert team.active_revision_id == revision.id and revision.is_active
+    assert revision.coordinator_agent_profile_id == "coordinator"
+    assert [(m["agent_profile_id"], m["capability"]) for m in members] == [
+        ("developer", "candidate"),
+        ("qa", "review"),
+    ]
+    assert presets["analytics"] == {**legacy, "coding_team_id": team.id}
+    assert presets["broken"] == invalid
+    assert presets["empty"] is None
+    assert {"team_member_id", "team_member_label"} <= {
+        column["name"] for column in inspect(engine).get_columns("coding_agent_task")
+    }
+
+    command.downgrade(config, "5bc6d7e8f9a0")
+    with engine.connect() as connection:
+        restored = json.loads(
+            connection.execute(
+                text(
+                    "SELECT resources_json FROM workspace_coding_defaults "
+                    "WHERE workspace_id = 'analytics'"
+                )
+            ).scalar_one()
+        )
+    assert restored == legacy
+    assert "team_member_id" not in {
+        column["name"] for column in inspect(engine).get_columns("coding_agent_task")
+    }

@@ -6,6 +6,7 @@ import httpx
 import pytest
 from rhetorica_backend.contracts.workspace_skills import (
     UpsertGithubWorkspaceSkillRequest,
+    UpsertGitLabWorkspaceSkillRequest,
     UpsertManualWorkspaceSkillRequest,
     WorkspaceSkillItem,
 )
@@ -44,6 +45,46 @@ class _FailingHttpClient:
     def get(self, url: str) -> httpx.Response:
         _ = url
         raise AssertionError("manual workspace skills must not use HTTP")
+
+
+class _FakeGitLabConnectorRepository:
+    def get_connection(self, **_kwargs: object) -> object:
+        return object()
+
+
+class _FakeGitLabService:
+    def __init__(self) -> None:
+        self.read_refs: list[str] = []
+        self.resolve_calls = 0
+        self.list_tree_calls = 0
+
+    def resolve_commit(self, _connection: object, **_kwargs: object) -> str:
+        self.resolve_calls += 1
+        return "a" * 40
+
+    def list_tree(self, _connection: object, **_kwargs: object) -> dict[str, object]:
+        self.list_tree_calls += 1
+        return {
+            "truncated": False,
+            "items": [
+                {"type": "blob", "mode": "100644", "path": "skills/SKILL.md"},
+                {"type": "blob", "mode": "100755", "path": "skills/setup.sh"},
+                {"type": "blob", "mode": "120000", "path": "skills/linked.md"},
+                {"type": "blob", "mode": "100644", "path": "skills/rules.md"},
+            ],
+        }
+
+    def read_file(self, _connection: object, **kwargs: object) -> dict[str, object]:
+        ref = kwargs["ref"]
+        assert isinstance(ref, str)
+        self.read_refs.append(ref)
+        path = kwargs["file_path"]
+        assert isinstance(path, str)
+        return {
+            "content": "# Main\nPinned guidance\n" if path.endswith("SKILL.md") else "# Rules\n",
+            "truncated": False,
+            "url": f"https://gitlab.example/group/project/-/blob/{ref}/{path}",
+        }
 
 
 def test_create_normalizes_blob_url_and_snapshots_markdown() -> None:
@@ -134,6 +175,101 @@ def test_create_manual_chat_skill_snapshots_markdown_without_http() -> None:
     assert skill.content_sha256 is not None
     assert skill.content_bundle.assets[0].source_url is None
     assert repository.create_calls[0]["engine_scope"] == "any"
+
+
+def test_create_gitlab_bundle_pins_sha_and_skips_scripts_and_symlinks() -> None:
+    repository = _FakeRepository()
+    gitlab = _FakeGitLabService()
+    service = WorkspaceSkillService(
+        repository,
+        http_client=_FailingHttpClient(),
+        gitlab_connector_repository=_FakeGitLabConnectorRepository(),  # type: ignore[arg-type]
+        gitlab_service=gitlab,  # type: ignore[arg-type]
+    )
+
+    skill = service.create(
+        UpsertGitLabWorkspaceSkillRequest(
+            name="pinned-skill",
+            connector_name="internal",
+            project_path="group/project",
+            ref="main",
+            path="skills",
+        )
+    )
+
+    assert skill.source_url == f"gitlab://internal/group/project@{'a' * 40}/skills"
+    assert [asset.path for asset in skill.content_bundle.assets] == [
+        "skills/SKILL.md",
+        "skills/rules.md",
+    ]
+    assert [asset.kind for asset in skill.content_bundle.assets] == ["main", "doc"]
+    assert skill.content_markdown == "# Main\nPinned guidance\n"
+    assert gitlab.read_refs == ["a" * 40, "a" * 40]
+
+
+def test_create_gitlab_bundle_uses_skill_md_as_main_regardless_of_tree_order() -> None:
+    class _ReadmeFirstGitLabService(_FakeGitLabService):
+        def list_tree(self, _connection: object, **_kwargs: object) -> dict[str, object]:
+            self.list_tree_calls += 1
+            return {
+                "truncated": False,
+                "items": [
+                    {"type": "blob", "mode": "100644", "path": "skills/README.md"},
+                    {"type": "blob", "mode": "100644", "path": "skills/SKILL.md"},
+                ],
+            }
+
+        def read_file(self, _connection: object, **kwargs: object) -> dict[str, object]:
+            path = kwargs["file_path"]
+            assert isinstance(path, str)
+            return {
+                "content": "# Skill\nPrimary guidance\n" if path.endswith("SKILL.md") else "# Readme\nNot instructions\n",
+                "truncated": False,
+            }
+
+    gitlab = _ReadmeFirstGitLabService()
+    skill = WorkspaceSkillService(
+        _FakeRepository(),
+        http_client=_FailingHttpClient(),
+        gitlab_connector_repository=_FakeGitLabConnectorRepository(),  # type: ignore[arg-type]
+        gitlab_service=gitlab,  # type: ignore[arg-type]
+    ).create(
+        UpsertGitLabWorkspaceSkillRequest(
+            name="pinned-skill",
+            connector_name="internal",
+            project_path="group/project",
+            ref="main",
+            path="skills",
+        )
+    )
+
+    assert skill.content_markdown == "# Skill\nPrimary guidance\n"
+    assert [asset.kind for asset in skill.content_bundle.assets] == ["main", "doc"]
+
+
+@pytest.mark.parametrize("path", ["../skills", "skills/../private", "skills\x00private"])
+def test_create_gitlab_bundle_rejects_unsafe_path_before_gitlab_calls(path: str) -> None:
+    gitlab = _FakeGitLabService()
+    service = WorkspaceSkillService(
+        _FakeRepository(),
+        http_client=_FailingHttpClient(),
+        gitlab_connector_repository=_FakeGitLabConnectorRepository(),  # type: ignore[arg-type]
+        gitlab_service=gitlab,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(WorkspaceSkillValidationError, match="workspace_skill_gitlab_path_invalid"):
+        service.create(
+            UpsertGitLabWorkspaceSkillRequest(
+                name="unsafe-skill",
+                connector_name="internal",
+                project_path="group/project",
+                ref="main",
+                path=path,
+            )
+        )
+
+    assert gitlab.resolve_calls == 0
+    assert gitlab.list_tree_calls == 0
 
 
 def test_create_manual_skill_uses_frontmatter_use_when_as_compact_summary() -> None:

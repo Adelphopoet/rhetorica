@@ -850,3 +850,17 @@ describe("historyApi", () => {
     });
   });
 });
+
+it("restores the server journal without localStorage and prefers it to stale browser data", async () => {
+  installTestLocalStorage();
+  cacheMessageIntermediateSteps("durable-answer", { thinkingBlocks: [], toolCalls: [{ id: "stale", tool_name: "wrong" }], executionStatuses: [] });
+  fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: "durable", messages: [{
+    id: "durable-answer", conversation_id: "durable", role: "assistant", content: "Done", created_at: "2026-10-06T08:00:02Z",
+    journal_events: [
+      { type: "tool_call_start", tool_call_id: "read", tool_name: "repository_read", arguments: { path: "model.sql" }, timestamp: "2026-10-06T08:00:00Z" },
+      { type: "tool_call_end", tool_call_id: "read", tool_name: "repository_read", success: true, result_summary: "Read model", timestamp: "2026-10-06T08:00:01Z" },
+    ],
+  }] }), { status: 200 }));
+  const result = await loadConversationThread("durable");
+  expect(result.messages[0].toolCalls).toEqual([expect.objectContaining({ id: "read", arguments: { path: "model.sql" }, success: true, completed_at: "2026-10-06T08:00:01Z" })]);
+});

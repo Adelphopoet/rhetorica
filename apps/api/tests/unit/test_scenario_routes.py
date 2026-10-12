@@ -23,13 +23,14 @@ def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app())
 
 
-def test_scenario_routes_seed_create_and_archive_personal_scenario(tmp_path: Path) -> None:
+def test_scenario_routes_start_empty_then_create_and_archive_personal_scenario(
+    tmp_path: Path,
+) -> None:
     client = _client(tmp_path)
 
     list_response = client.get("/v1/scenarios?workspace_id=default")
     assert list_response.status_code == 200
-    seeded = list_response.json()
-    assert any(item["scope"] == "official" for item in seeded)
+    assert list_response.json() == []
 
     create_response = client.post(
         "/v1/scenarios",

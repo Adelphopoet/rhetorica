@@ -107,6 +107,77 @@ def test_llm_connector_rejects_unknown_max_tokens_parameter(tmp_path: Path) -> N
     assert response.status_code == 422
 
 
+def test_llm_connector_native_compaction_round_trip_and_validation(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    body = {
+        "name": "native-responses",
+        "connection": {
+            "base_url": "https://llm.example/v1",
+            "model": "test",
+            "endpoint_path": "/responses",
+            "extra_settings": {
+                "native_compaction_enabled": True,
+                "native_compaction_threshold_tokens": 1000,
+            },
+        },
+    }
+    created = client.post("/v1/admin/llm-connectors", json=body)
+    assert created.status_code == 200
+    connector_id = created.json()["id"]
+    listed = client.get("/v1/admin/llm-connectors?workspace_id=default").json()
+    assert all(
+        listed[0]["connection"]["extra_settings"][key] == value
+        for key, value in body["connection"]["extra_settings"].items()
+    )
+
+    body["connection"]["extra_settings"]["native_compaction_enabled"] = False
+    updated = client.put(f"/v1/admin/llm-connectors/{connector_id}?workspace_id=default", json=body)
+    assert updated.status_code == 200
+    assert updated.json()["connection"]["extra_settings"]["native_compaction_enabled"] is False
+
+    body["connection"]["extra_settings"]["native_compaction_enabled"] = True
+    for invalid in (None, 0, -1, 1.5, True, "1000"):
+        body["connection"]["extra_settings"]["native_compaction_threshold_tokens"] = invalid
+        assert client.post("/v1/admin/llm-connectors", json=body).status_code == 422
+    body["connection"]["extra_settings"]["native_compaction_threshold_tokens"] = 1000
+    body["connection"]["endpoint_path"] = "/chat/completions"
+    response = client.post("/v1/admin/llm-connectors", json=body)
+    assert response.status_code == 422
+    assert "native_compaction_requires_responses_endpoint" in response.text
+
+
+def test_llm_connector_store_round_trip_clear_and_validation(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    body = {
+        "name": "private-responses",
+        "connection": {
+            "base_url": "https://llm.example/v1",
+            "model": "test",
+            "extra_settings": {"store": False},
+        },
+    }
+    created = client.post("/v1/admin/llm-connectors", json=body)
+    assert created.status_code == 200
+    connector_id = created.json()["id"]
+    url = f"/v1/admin/llm-connectors/{connector_id}?workspace_id=default"
+    for store in (False, True):
+        body["connection"]["extra_settings"]["store"] = store
+        updated = client.put(url, json=body)
+        assert updated.status_code == 200
+        assert updated.json()["connection"]["extra_settings"]["store"] is store
+        listed = client.get("/v1/admin/llm-connectors?workspace_id=default").json()
+        assert listed[0]["connection"]["extra_settings"]["store"] is store
+    for invalid in ("false", "true", 0, 1, None):
+        body["connection"]["extra_settings"]["store"] = invalid
+        assert client.put(url, json=body).status_code == 422
+        listed = client.get("/v1/admin/llm-connectors?workspace_id=default").json()
+        assert listed[0]["connection"]["extra_settings"]["store"] is True
+    body["connection"]["extra_settings"] = {}
+    updated = client.put(url, json=body)
+    assert updated.status_code == 200
+    assert "store" not in updated.json()["connection"]["extra_settings"]
+
+
 def test_llm_connector_reasoning_effort_round_trip_and_validation(tmp_path: Path) -> None:
     client = _client(tmp_path)
     body = {
@@ -128,12 +199,12 @@ def test_llm_connector_reasoning_effort_round_trip_and_validation(tmp_path: Path
     assert llm_connector_routes._repository().get_connection("default", "any-provider").reasoning_effort == "high"
 
     body["connection"]["reasoning_effort"] = "unsupported"
-    invalid = client.put(f"/v1/admin/llm-connectors/{connector_id}?workspace_id=default", json=body)
-    assert invalid.status_code == 422
+    url = f"/v1/admin/llm-connectors/{connector_id}?workspace_id=default"
+    assert client.put(url, json=body).status_code == 422
     assert llm_connector_routes._repository().get_connection("default", "any-provider").reasoning_effort == "high"
 
     body["connection"]["reasoning_effort"] = None
-    cleared = client.put(f"/v1/admin/llm-connectors/{connector_id}?workspace_id=default", json=body)
+    cleared = client.put(url, json=body)
     assert cleared.status_code == 200
     assert cleared.json()["connection"]["reasoning_effort"] is None
 
@@ -336,9 +407,13 @@ def test_llm_sampling_round_trip_and_clear_preserves_keys(tmp_path: Path) -> Non
         "name": "sampling-test",
         "workspace_id": "default",
         "connection": {
-            "base_url": "https://llm.example/v1", "model": "test",
-            "api_key": "sampling-secret", "temperature": None, "max_tokens": None,
-            "top_p": 0.95, "headers": {"X-Client": "analytics"},
+            "base_url": "https://llm.example/v1",
+            "model": "test",
+            "api_key": "sampling-secret",
+            "temperature": None,
+            "max_tokens": None,
+            "top_p": 0.95,
+            "headers": {"X-Client": "analytics"},
             "extra_settings": {"chat_template_enable_thinking": False, "llm_retry_attempts": 2},
         },
     }
@@ -370,9 +445,15 @@ def test_llm_sampling_round_trip_and_clear_preserves_keys(tmp_path: Path) -> Non
 def test_llm_rejects_invalid_sampling_and_unsupported_overrides(tmp_path: Path) -> None:
     client = _client(tmp_path)
     for invalid in [{"top_p": -0.1}, {"top_p": 1.01}, {"phase_capable": {"tool_loop": False}}]:
-        response = client.post("/v1/admin/llm-connectors", json={
-            "name": "invalid-sampling", "connection": {
-                "base_url": "https://llm.example/v1", "model": "test", **invalid,
+        response = client.post(
+            "/v1/admin/llm-connectors",
+            json={
+                "name": "invalid-sampling",
+                "connection": {
+                    "base_url": "https://llm.example/v1",
+                    "model": "test",
+                    **invalid,
+                },
             },
-        })
+        )
         assert response.status_code == 422

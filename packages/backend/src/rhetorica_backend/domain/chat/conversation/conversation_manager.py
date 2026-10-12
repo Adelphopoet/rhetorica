@@ -39,6 +39,7 @@ class ConversationManager:
         self,
         *,
         artifact_ids: list[str],
+        workspace_id: str,
         message_id: str,
         conversation_id: str,
         relation: str,
@@ -52,6 +53,7 @@ class ConversationManager:
             message_id=message_id,
             conversation_id=conversation_id,
             owner_user_id=self._current_user_id,
+            workspace_id=workspace_id,
             relation=relation,
         )
 
@@ -146,6 +148,7 @@ class ConversationManager:
         agent_id: str | None = None,
         source_provider: str | None = None,
         source_message_id: str | None = None,
+        journal_events: list[dict[str, object]] | None = None,
     ) -> Any | None:
         """
         Save message to conversation.
@@ -187,6 +190,7 @@ class ConversationManager:
             agent_id=agent_id,
             source_provider=source_provider,
             source_message_id=source_message_id,
+            journal_events=journal_events,
         )
 
     def save_answer_trace(

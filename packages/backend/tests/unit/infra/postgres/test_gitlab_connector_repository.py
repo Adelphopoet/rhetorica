@@ -36,6 +36,7 @@ def test_gitlab_connector_upsert_masks_token_and_gets_connection(tmp_path: Path)
                 default_group_paths=["platform"],
                 search_limit=10,
                 read_max_tokens=900,
+                coding_archive_max_files=25_000,
             ),
         )
     )
@@ -45,6 +46,7 @@ def test_gitlab_connector_upsert_masks_token_and_gets_connection(tmp_path: Path)
     assert created.connection.base_url == "https://gitlab.example.com"
     assert created.connection.default_project_paths == ["group/app"]
     assert created.connection.search_limit == 10
+    assert created.connection.coding_archive_max_files == 25_000
 
     connection = repository.get_connection(workspace_id="ws-1", name="gitlab-main")
     assert connection is not None
@@ -52,7 +54,17 @@ def test_gitlab_connector_upsert_masks_token_and_gets_connection(tmp_path: Path)
     assert connection.use_when == "Use for read-only source lookup."
     assert connection.verify_tls is False
     assert connection.default_group_paths == ["platform"]
+    assert connection.coding_archive_max_files == 25_000
 
     deleted = repository.delete(connector_id=created.id, workspace_id="ws-1")
     assert deleted is True
     assert repository.get_connection(workspace_id="ws-1", name="gitlab-main") is None
+
+
+def test_gitlab_connector_uses_compatible_default_archive_limit() -> None:
+    connection = GitLabConnectionConfig(
+        base_url="https://gitlab.example.com",
+        use_when="Use for read-only source lookup.",
+    )
+
+    assert connection.coding_archive_max_files == 20_000

@@ -25,12 +25,15 @@ import type {
   WorkspaceSkillItem,
 } from "./types";
 import type { AgentProfile } from "@/features/agents/agentsApi";
+import { GovernedPolicyEditor } from "./GovernedPolicyEditor";
 import { useSessionState } from "./useSheetSession";
 
 type AgentSheetProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   editingAgent: AgentProfile | null;
+  workspaceId: string;
+  agents: AgentProfile[];
   databaseConnectors: DatabaseConnectorItem[];
   llmConnectors: LlmConnectorItem[];
   documentationConnectors: DocumentationConnectorItem[];
@@ -57,7 +60,7 @@ function Field({
 }) {
   return (
     <label className={fullWidth ? "md:col-span-2" : undefined}>
-      <span className="mb-2 block text-sm font-medium text-primary">{label}</span>
+      <span className="mb-1 block text-sm font-medium text-primary">{label}</span>
       {children}
     </label>
   );
@@ -76,13 +79,20 @@ function connectorNames<T extends { name: string; is_active: boolean }>(items: T
   return items
     .filter((item) => item.is_active)
     .map((item) => item.name)
-    .sort((left, right) => left.localeCompare(right));
+    .sort(compareStableText);
+}
+
+function compareStableText(left: string, right: string) {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 export function AgentSheet({
   open,
   onOpenChange,
   editingAgent,
+  workspaceId,
+  agents,
   databaseConnectors,
   llmConnectors,
   documentationConnectors,
@@ -121,7 +131,10 @@ export function AgentSheet({
             skill.status === "active" &&
             skill.validation_status === "valid"
         )
-        .sort((left, right) => right.priority - left.priority || left.name.localeCompare(right.name)),
+        .sort(
+          (left, right) =>
+            right.priority - left.priority || compareStableText(left.name, right.name),
+        ),
     [workspaceSkills]
   );
   const sessionKey = `${editingAgent?.id ?? "new-agent"}:${sessionNonce}`;
@@ -175,7 +188,7 @@ export function AgentSheet({
           event.preventDefault();
           void onSubmit(new FormData(event.currentTarget));
         }}
-        className="space-y-5"
+        className="space-y-3"
       >
         <input type="hidden" name="agent_id" value={editingAgent?.id ?? ""} />
         <HiddenValues name="database_connectors" values={databaseSelected} />
@@ -190,7 +203,7 @@ export function AgentSheet({
 
         {error ? <Alert variant="danger" title="Не удалось сохранить агента" description={error} /> : null}
 
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2">
           <Field label="Идентификатор">
             <Input data-autofocus name="slug" defaultValue={editingAgent?.slug ?? ""} required />
           </Field>
@@ -202,7 +215,7 @@ export function AgentSheet({
           </Field>
         </div>
 
-        <div className="rounded-[18px] border border-border-strong bg-surface p-4">
+        <div className="rounded-lg border border-border-strong bg-surface p-4">
           <p className="mb-3 text-sm font-medium text-primary">Подключение LLM</p>
           <SingleChoiceChips
             value={llmConnectorName}
@@ -213,10 +226,10 @@ export function AgentSheet({
         </div>
 
         <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-[18px] border border-border-strong bg-surface px-4 py-3">
+          <div className="rounded-lg border border-border-strong bg-surface px-4 py-3">
             <Switch name="is_active" defaultChecked={editingAgent?.is_active ?? true} label="Активен" />
           </div>
-          <div className="rounded-[18px] border border-border-strong bg-surface px-4 py-3">
+          <div className="rounded-lg border border-border-strong bg-surface px-4 py-3">
             <Switch
               name="run_sql_allowed"
               defaultChecked={editingAgent?.settings.run_sql_allowed ?? true}
@@ -225,7 +238,7 @@ export function AgentSheet({
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2">
           <Field label="Температура">
             <Input
               name="temperature"
@@ -247,7 +260,7 @@ export function AgentSheet({
           </Field>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2">
           <ConnectorAllowlist
             title="База данных"
             icon={<Database className="h-4 w-4" />}
@@ -309,7 +322,7 @@ export function AgentSheet({
           <TextArea name="admin_prompt" defaultValue={editingAgent?.admin_prompt ?? ""} />
         </Field>
 
-        <div className="rounded-[24px] border border-border bg-surface/90 p-4">
+        <div className="rounded-lg border border-border bg-surface/90 p-4">
           <div className="flex items-center gap-2">
             <Badge variant="info">{isEdit ? "Обновление" : "Создание"}</Badge>
             <p className="text-sm text-primary">
@@ -318,7 +331,7 @@ export function AgentSheet({
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <Button
             type="button"
             variant="ghost"
@@ -332,6 +345,20 @@ export function AgentSheet({
           </Button>
         </div>
       </form>
+      {editingAgent ? (
+        <div className="mt-6 border-t border-border pt-6">
+          <GovernedPolicyEditor
+            workspaceId={workspaceId}
+            target={{ kind: "agent", agent: editingAgent }}
+            agents={agents}
+            gitlabConnectors={gitlabConnectors}
+          />
+        </div>
+      ) : (
+        <p className="mt-6 rounded-xl border border-border bg-surface p-4 text-sm text-secondary">
+          По умолчанию политика запрещает публикацию кода. Её можно настроить после создания агента
+        </p>
+      )}
     </Sheet>
   );
 }
@@ -405,8 +432,8 @@ function ConnectorAllowlist({
   }
 
   return (
-    <div className="rounded-[18px] border border-border-strong bg-surface p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
+    <div className="rounded-lg border border-border-strong bg-surface p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-sm font-medium text-primary">
           {icon}
           {title}
@@ -461,8 +488,8 @@ function WorkspaceSkillAllowlist({
   }
 
   return (
-    <div className="rounded-[18px] border border-border-strong bg-surface p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
+    <div className="rounded-lg border border-border-strong bg-surface p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-sm font-medium text-primary">
           <BookText className="h-4 w-4" />
           Навыки для чата

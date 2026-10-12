@@ -1,4 +1,4 @@
-"""Read-only GitLab REST API helpers."""
+"""GitLab REST helpers: read tools plus a fenced commit/Draft-MR write surface."""
 
 from __future__ import annotations
 
@@ -55,11 +55,44 @@ class GitLabRequestError(RuntimeError):
         }
 
 
+# Commits and Merge Requests REST endpoints require `api`; `write_repository` is Git-over-HTTP only.
+WRITE_TOKEN_SCOPES = frozenset({"api"})
+COMMIT_DIFF_PAGE_SIZE = 100
+MAX_COMMIT_DIFF_PAGES = 100
+
+
 class GitLabService:
-    """Thin GitLab REST wrapper for bounded search and file reads."""
+    """Thin GitLab REST wrapper for bounded search, file reads, and fenced publication."""
 
     def __init__(self, client_factory: Callable[..., httpx.Client] = httpx.Client) -> None:
         self._client_factory = client_factory
+
+    def resolve_commit(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        ref: str,
+    ) -> str:
+        """Resolve an import ref once, so every imported asset has one SHA."""
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            payload = self._request_json(
+                client=client,
+                connection=connection,
+                path=(
+                    f"/api/v4/projects/{self._quote_path(project_path)}/repository/commits/"
+                    f"{self._quote_path(ref)}"
+                ),
+            )
+        commit_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(commit_id, str) or not commit_id:
+            raise GitLabRequestError(
+                status_code=502,
+                request_path="repository/commits",
+                request_params={"ref": ref},
+                response_body="commit SHA missing",
+            )
+        return commit_id
 
     def search_content(
         self,
@@ -72,7 +105,9 @@ class GitLabService:
         ref: str | None = None,
         path_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        bounded_limit = self._bounded_int(limit, default=connection.search_limit, minimum=1, maximum=10)
+        bounded_limit = self._bounded_int(
+            limit, default=connection.search_limit, minimum=1, maximum=10
+        )
         projects = self._normalized_scope(project_paths) or connection.default_project_paths
         groups = self._normalized_scope(group_paths) or connection.default_group_paths
         if not projects and not groups:
@@ -378,6 +413,271 @@ class GitLabService:
             ),
         }
 
+    def download_repository_archive(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        commit_sha: str,
+        max_bytes: int,
+    ) -> bytes:
+        """Download one commit-pinned archive without exposing connector credentials."""
+        self._require_commit_sha(commit_sha)
+        path = f"/api/v4/projects/{self._quote_path(project_path)}/repository/archive.tar.gz"
+        with (
+            self._client_factory(timeout=60.0, verify=connection.verify_tls) as client,
+            client.stream(
+                "GET",
+                f"{connection.base_url.rstrip('/')}{path}",
+                params={"sha": commit_sha},
+                headers=self._headers(connection),
+            ) as response,
+        ):
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise GitLabRequestError.from_response(
+                    response,
+                    request_path=path,
+                    request_params={"sha": commit_sha},
+                ) from exc
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError("gitlab_repository_archive_too_large")
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+    def get_branch(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        branch: str,
+    ) -> dict[str, Any] | None:
+        path = (
+            f"/api/v4/projects/{self._quote_path(project_path)}"
+            f"/repository/branches/{self._quote_path(branch)}"
+        )
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            return self._send_json(
+                client=client,
+                connection=connection,
+                method="GET",
+                path=path,
+                params={},
+                missing_ok=True,
+            )
+
+    def get_commit(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        sha: str,
+    ) -> dict[str, Any]:
+        self._require_commit_sha(sha)
+        path = (
+            f"/api/v4/projects/{self._quote_path(project_path)}"
+            f"/repository/commits/{self._quote_path(sha)}"
+        )
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            payload = self._send_json(
+                client=client,
+                connection=connection,
+                method="GET",
+                path=path,
+                params={},
+            )
+        if not isinstance(payload, dict):
+            raise TypeError("gitlab_commit_payload_invalid")
+        return payload
+
+    def get_commit_diff(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        sha: str,
+        max_pages: int = MAX_COMMIT_DIFF_PAGES,
+    ) -> list[dict[str, Any]]:
+        """Return every diff entry of a commit; truncation raises instead of a partial list."""
+        self._require_commit_sha(sha)
+        path = (
+            f"/api/v4/projects/{self._quote_path(project_path)}"
+            f"/repository/commits/{self._quote_path(sha)}/diff"
+        )
+        entries: list[dict[str, Any]] = []
+        page = "1"
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            for _ in range(max_pages):
+                payload, headers = self._send_json_with_headers(
+                    client=client,
+                    connection=connection,
+                    method="GET",
+                    path=path,
+                    params={"per_page": COMMIT_DIFF_PAGE_SIZE, "page": page},
+                )
+                if isinstance(payload, list):
+                    entries.extend(item for item in payload if isinstance(item, dict))
+                next_page = self._next_page(headers)
+                if not next_page:
+                    return entries
+                page = next_page
+        raise ValueError("gitlab_commit_diff_too_large")
+
+    def get_project(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+    ) -> dict[str, Any]:
+        path = f"/api/v4/projects/{self._quote_path(project_path)}"
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            payload = self._send_json(
+                client=client,
+                connection=connection,
+                method="GET",
+                path=path,
+                params={},
+            )
+        if not isinstance(payload, dict):
+            raise TypeError("gitlab_project_payload_invalid")
+        return payload
+
+    def list_commits(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        ref: str,
+        per_page: int = 20,
+    ) -> list[dict[str, Any]]:
+        bounded = self._bounded_int(per_page, default=20, minimum=1, maximum=100)
+        path = f"/api/v4/projects/{self._quote_path(project_path)}/repository/commits"
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            payload = self._send_json(
+                client=client,
+                connection=connection,
+                method="GET",
+                path=path,
+                params={"ref_name": ref, "per_page": bounded},
+            )
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def create_commit(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        branch: str,
+        start_sha: str,
+        commit_message: str,
+        actions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self._require_commit_sha(start_sha)
+        if not branch.strip() or not commit_message.strip() or not actions:
+            raise ValueError("gitlab_commit_request_invalid")
+        path = f"/api/v4/projects/{self._quote_path(project_path)}/repository/commits"
+        with self._client_factory(timeout=60.0, verify=connection.verify_tls) as client:
+            payload = self._send_json(
+                client=client,
+                connection=connection,
+                method="POST",
+                path=path,
+                params={},
+                json_body={
+                    "branch": branch.strip(),
+                    "start_sha": start_sha,
+                    "commit_message": commit_message,
+                    "actions": actions,
+                },
+            )
+        if not isinstance(payload, dict):
+            raise TypeError("gitlab_commit_payload_invalid")
+        return payload
+
+    def list_merge_requests(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        source_branch: str,
+        target_branch: str,
+    ) -> list[dict[str, Any]]:
+        path = f"/api/v4/projects/{self._quote_path(project_path)}/merge_requests"
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            payload = self._send_json(
+                client=client,
+                connection=connection,
+                method="GET",
+                path=path,
+                params={
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                    "state": "all",
+                    "per_page": 20,
+                },
+            )
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def create_draft_merge_request(
+        self,
+        connection: GitLabConnectionConfig,
+        *,
+        project_path: str,
+        source_branch: str,
+        target_branch: str,
+        title: str,
+        description: str,
+    ) -> dict[str, Any]:
+        draft_title = title if title.lower().startswith("draft:") else f"Draft: {title}"
+        path = f"/api/v4/projects/{self._quote_path(project_path)}/merge_requests"
+        with self._client_factory(timeout=30.0, verify=connection.verify_tls) as client:
+            payload = self._send_json(
+                client=client,
+                connection=connection,
+                method="POST",
+                path=path,
+                params={},
+                json_body={
+                    "source_branch": source_branch,
+                    "target_branch": target_branch,
+                    "title": draft_title,
+                    "description": description,
+                    "draft": True,
+                },
+            )
+        if not isinstance(payload, dict):
+            raise TypeError("gitlab_merge_request_payload_invalid")
+        return payload
+
+    def get_access_token_info(
+        self,
+        connection: GitLabConnectionConfig,
+    ) -> dict[str, Any] | None:
+        path = "/api/v4/personal_access_tokens/self"
+        with self._client_factory(timeout=20.0, verify=connection.verify_tls) as client:
+            payload = self._send_json(
+                client=client,
+                connection=connection,
+                method="GET",
+                path=path,
+                params={},
+                missing_ok=True,
+            )
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise TypeError("gitlab_token_info_payload_invalid")
+        return payload
+
     def _request_json(
         self,
         *,
@@ -402,19 +702,73 @@ class GitLabService:
         path: str,
         params: dict[str, Any],
     ) -> tuple[Any, httpx.Headers]:
-        response = client.get(
+        payload, headers = self._send_json_with_headers(
+            client=client,
+            connection=connection,
+            method="GET",
+            path=path,
+            params=params,
+        )
+        return payload, headers
+
+    def _send_json(
+        self,
+        *,
+        client: httpx.Client,
+        connection: GitLabConnectionConfig,
+        method: str,
+        path: str,
+        params: dict[str, Any],
+        json_body: dict[str, Any] | None = None,
+        missing_ok: bool = False,
+    ) -> Any:
+        payload, _headers = self._send_json_with_headers(
+            client=client,
+            connection=connection,
+            method=method,
+            path=path,
+            params=params,
+            json_body=json_body,
+            missing_ok=missing_ok,
+        )
+        return payload
+
+    def _send_json_with_headers(
+        self,
+        *,
+        client: httpx.Client,
+        connection: GitLabConnectionConfig,
+        method: str,
+        path: str,
+        params: dict[str, Any],
+        json_body: dict[str, Any] | None = None,
+        missing_ok: bool = False,
+    ) -> tuple[Any, httpx.Headers]:
+        verb = method.upper()
+        if verb not in {"GET", "POST"}:
+            raise ValueError("gitlab_http_method_not_allowed")
+        headers = self._headers(connection)
+        if json_body is not None:
+            headers = {**headers, "Content-Type": "application/json"}
+        response = client.request(
+            verb,
             f"{connection.base_url.rstrip('/')}{path}",
             params=params,
-            headers=self._headers(connection),
+            json=json_body,
+            headers=headers,
         )
+        if missing_ok and response.status_code == 404:
+            return None, response.headers
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise GitLabRequestError.from_response(
                 response,
                 request_path=path,
-                request_params=params,
+                request_params=params if json_body is None else {**params, "json": True},
             ) from exc
+        if not response.content:
+            return {}, response.headers
         return response.json(), response.headers
 
     def _request_text(
@@ -439,6 +793,13 @@ class GitLabService:
                 request_params=params,
             ) from exc
         return response.text
+
+    @staticmethod
+    def _require_commit_sha(commit_sha: str) -> None:
+        if not commit_sha or any(
+            character not in "0123456789abcdefABCDEF" for character in commit_sha
+        ):
+            raise ValueError("gitlab_commit_sha_invalid")
 
     @staticmethod
     def _headers(connection: GitLabConnectionConfig) -> dict[str, str]:

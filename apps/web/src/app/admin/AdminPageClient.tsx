@@ -1,5 +1,8 @@
 "use client";
 
+import { ResourceCard } from "./ResourceCard";
+import { adminLabel } from "./adminLabels";
+
 import { pluralize } from "@/lib/plural";
 import { ThemeSelector } from "@/features/theme/ThemeSelector";
 import { buildLlmExtraSettings, parseLlmHeaders } from "./llmSettings";
@@ -23,7 +26,7 @@ import {
   CardHeader,
   CardTitle,
   ConfirmDialog,
-  EmptyState,
+  EmptyState as BaseEmptyState,
   Input,
   Switch,
   useToast,
@@ -33,7 +36,6 @@ import {
   CheckCircle2,
   Clock3,
   Database,
-  Edit,
   GitBranch,
   MessageSquare,
   Plus,
@@ -50,8 +52,12 @@ import {
 } from "lucide-react";
 
 import { AgentSheet } from "./AgentSheet";
+import { GovernedPolicyEditor } from "./GovernedPolicyEditor";
+import { EnvironmentProfilesPanel } from "./EnvironmentProfilesPanel";
+import { CodingTeamsPanel } from "@/features/coding/CodingTeamsPanel";
 import { ConnectorSheet } from "./ConnectorSheet";
 import { SkillSheet } from "./SkillSheet";
+import { WorkspaceAccessPanel } from "./WorkspaceAccessPanel";
 import { UserRateLimitDialog } from "./UserRateLimitDialog";
 import { useSessionNonce } from "./useSheetSession";
 import {
@@ -564,10 +570,11 @@ function SectionBadge({
   tone,
   children,
 }: {
-  tone: "primary" | "success" | "warning" | "danger";
+  tone: "primary" | "success" | "warning" | "danger" | "neutral";
   children: React.ReactNode;
 }) {
   const map = {
+    neutral: "bg-elevated text-secondary border-border",
     primary: "bg-accent/[0.16] text-accent border-accent/[0.28]",
     success: "bg-success/[0.16] text-success border-success/[0.24]",
     warning: "bg-warning/[0.14] text-warning border-warning/[0.28]",
@@ -575,7 +582,7 @@ function SectionBadge({
   };
 
   return (
-    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${map[tone]}`}>
+    <span className={`inline-flex items-center shrink-0 rounded-md border px-2 py-0.5 text-[11px] font-medium ${map[tone]}`}>
       {children}
     </span>
   );
@@ -595,18 +602,18 @@ function SectionShell({
   children: React.ReactNode;
 }) {
   return (
-    <section className="grid gap-5">
-      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted">
+    <section className="grid min-w-0 gap-4">
+      <div className="flex flex-col gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted">
             {eyebrow}
           </p>
-          <h2 className="mt-2 text-2xl font-semibold tracking-[-0.03em] text-primary">
+          <h2 className="mt-1 text-lg font-semibold tracking-tight text-primary">
             {title}
           </h2>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-secondary">{description}</p>
+          <p className="mt-1 max-w-3xl text-sm leading-5 text-secondary">{description}</p>
         </div>
-        {actions ? <div className="flex flex-wrap gap-3">{actions}</div> : null}
+        {actions ? <div className="flex flex-wrap gap-2 [&>button]:h-8 [&>button]:px-3 [&>button]:text-xs [&>button]:shadow-none [&>a]:h-8 [&>a]:px-3 [&>a]:text-xs [&>a]:shadow-none">{actions}</div> : null}
       </div>
       {children}
     </section>
@@ -627,22 +634,22 @@ function MetricCard({
   caption: string;
 }) {
   const map = {
-    primary: "border-accent-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-accent)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-accent",
-    success: "border-success-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-success)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-success",
-    warning: "border-warning-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-warning)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-warning",
-    danger: "border-danger-border bg-[radial-gradient(circle_at_top_right,rgb(var(--color-danger)/0.16),transparent_34%),linear-gradient(180deg,rgb(var(--color-surface)/0.98),rgb(var(--color-surface)/0.98))] text-danger",
+    primary: "text-accent",
+    success: "text-success",
+    warning: "text-warning",
+    danger: "text-danger",
   };
 
   return (
-    <Card className={`border ${map[tone]} shadow-[0_18px_48px_rgb(var(--color-shadow)/calc(0.28*var(--shadow-opacity-scale)))]`}>
-      <CardContent className="flex items-start gap-4 p-5">
-        <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-current/20 bg-current/10">
+    <Card className={`min-w-0 rounded-lg border-border bg-none shadow-none ${map[tone]}`}>
+      <CardContent className="flex items-start gap-3 p-3">
+        <div className="mt-0.5 shrink-0">
           {icon}
         </div>
         <div className="space-y-1">
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">{title}</p>
-          <div className="text-3xl font-semibold tracking-[-0.04em] text-primary">{value}</div>
-          <p className="text-sm leading-6 text-secondary">{caption}</p>
+          <p className="text-xs font-medium text-secondary">{title}</p>
+          <div className="text-2xl font-semibold tabular-nums tracking-tight text-primary">{value}</div>
+          <p className="text-xs leading-5 text-secondary">{caption}</p>
         </div>
       </CardContent>
     </Card>
@@ -653,19 +660,31 @@ function InfoPanel({
   title,
   description,
   children,
+  className = "",
 }: {
   title: string;
   description?: string;
   children: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <Card className="min-w-0 overflow-hidden border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
-      <CardHeader className="min-w-0 border-b border-border">
-        <CardTitle className="min-w-0 break-words text-lg">{title}</CardTitle>
-        {description ? <CardDescription className="min-w-0 break-words">{description}</CardDescription> : null}
+    <Card className={`min-w-0 rounded-lg border-border bg-none shadow-none ${className}`}>
+      <CardHeader className="min-w-0 space-y-1 border-b border-border px-3 py-2.5">
+        <CardTitle className="min-w-0 break-words text-sm">{title}</CardTitle>
+        {description ? <CardDescription className="min-w-0 break-words text-xs leading-5">{description}</CardDescription> : null}
       </CardHeader>
-      <CardContent className="min-w-0 p-5">{children}</CardContent>
+      <CardContent className="min-w-0 p-3">{children}</CardContent>
     </Card>
+  );
+}
+
+// Admin-only density: shared empty states elsewhere keep their existing layout.
+function EmptyState(props: React.ComponentProps<typeof BaseEmptyState>) {
+  return (
+    <BaseEmptyState
+      {...props}
+      className={`flex-row flex-wrap items-center gap-3 rounded-lg border-0 bg-none p-2 [&>div:first-child]:h-auto [&>div:first-child]:w-auto [&>div:first-child]:shrink-0 [&>div:first-child]:border-0 [&>div:nth-child(2)]:min-w-0 [&>div:nth-child(2)]:flex-1 [&>div:nth-child(2)]:basis-40 [&_h3]:text-sm [&_p]:text-xs [&_p]:leading-5 ${props.className ?? ""}`}
+    />
   );
 }
 
@@ -678,6 +697,7 @@ function ReviewTag({ children }: { children: React.ReactNode }) {
 }
 
 export function AdminPageClient({
+  isSystemAdmin = true,
   databaseConnectors: initialDb,
   llmConnectors: initialLlm,
   documentationConnectors: initialDocumentation,
@@ -691,13 +711,22 @@ export function AdminPageClient({
   scenarios: initialScenarios,
   workspaceSkills: initialWorkspaceSkills,
   agents: initialAgents = [],
+  codingEnvironments: initialCodingEnvironments = [],
+  codingTeams: initialCodingTeams = [],
   localUsers: initialLocalUsers,
   currentUserId,
   workspaceId,
+  workspaces,
+  workspaceMemberships,
+  workspaceResourceGrants,
+  workspaceUsers,
+  workspaceResourceOptions,
 }: AdminPageData) {
   const { addToast } = useToast();
 
-  const [activeSection, setActiveSection] = useState<AdminSectionId>("overview");
+  const [activeSection, setActiveSection] = useState<AdminSectionId>(
+    isSystemAdmin ? "overview" : "setup",
+  );
   const [databaseConnectors, setDatabaseConnectors] = useState(initialDb);
   const [llmConnectors, setLlmConnectors] = useState(initialLlm);
   const [documentationConnectors, setDocumentationConnectors] = useState(initialDocumentation);
@@ -714,6 +743,9 @@ export function AdminPageClient({
   const [workspaceSkills, setWorkspaceSkills] = useState(sortSkills(initialWorkspaceSkills));
   const [agents, setAgents] = useState(initialAgents);
   const [localUsers, setLocalUsers] = useState(sortUsers(initialLocalUsers));
+  const availableSections = isSystemAdmin
+    ? SECTION_META
+    : SECTION_META.filter((section) => section.id === "setup" || section.id === "governance");
 
   const [setupSearch, setSetupSearch] = useState("");
   const deferredSetupSearch = useDeferredValue(setupSearch);
@@ -738,6 +770,7 @@ export function AdminPageClient({
   const [agentSaving, setAgentSaving] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [agentSessionNonce, bumpAgentSessionNonce] = useSessionNonce();
+  const [defaultPolicyEditorOpen, setDefaultPolicyEditorOpen] = useState(false);
 
   const [userSaving, setUserSaving] = useState(false);
   const [userError, setUserError] = useState<string | null>(null);
@@ -1053,6 +1086,9 @@ export function AdminPageClient({
                 default_group_paths: splitCommaList(formData.get("default_group_paths")),
                 search_limit: Number(String(formData.get("search_limit") ?? "5")),
                 read_max_tokens: Number(String(formData.get("read_max_tokens") ?? "1600")),
+                coding_archive_max_files: Number(
+                  String(formData.get("coding_archive_max_files") ?? "20000")
+                ),
                 extra_settings: {},
               },
             }),
@@ -1271,7 +1307,7 @@ export function AdminPageClient({
     const skillId = String(formData.get("skill_id") ?? "").trim();
     const sourceKind = String(formData.get("source_kind") ?? "github_markdown_url");
     const capabilityFamily = String(
-      formData.get("capability_family") ?? "sql_optimization_advisor"
+      formData.get("capability_family") ?? "chat_instruction"
     );
     const manualMarkdown = String(formData.get("content_markdown") ?? "");
     const manualUseWhen = String(formData.get("use_when") ?? "").trim();
@@ -1303,12 +1339,15 @@ export function AdminPageClient({
           ? formData.get("visible_to_default_assistant") !== null
           : true,
       ...(sourceKind === "manual_markdown"
-        ? {
-            content_markdown: manualContentMarkdown,
-          }
-        : {
-            source_url: String(formData.get("source_url") ?? "").trim(),
-          }),
+        ? { content_markdown: manualContentMarkdown }
+        : sourceKind === "gitlab_bundle"
+          ? {
+              connector_name: String(formData.get("connector_name") ?? "").trim(),
+              project_path: String(formData.get("project_path") ?? "").trim(),
+              ref: String(formData.get("ref") ?? "").trim(),
+              path: String(formData.get("path") ?? "").trim(),
+            }
+          : { source_url: String(formData.get("source_url") ?? "").trim() }),
     };
 
     try {
@@ -1982,82 +2021,76 @@ export function AdminPageClient({
 
   return (
     <>
-      <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,rgb(var(--color-accent)/0.18),transparent_28%),radial-gradient(circle_at_20%_0%,rgb(var(--color-hover)/0.32),transparent_30%),linear-gradient(180deg,rgb(var(--color-page))_0%,rgb(var(--color-page))_100%)] px-4 py-5 text-primary md:px-6 lg:px-8">
-        <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-6">
-          <header className="relative rounded-2xl border border-border bg-surface/[0.92] px-4 py-4 shadow-[0_18px_52px_rgb(var(--color-shadow)/calc(0.24*var(--shadow-opacity-scale)))] md:px-5">
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <SectionBadge tone={readiness.blockers.length === 0 ? "success" : "warning"}>
-                    {readiness.blockers.length === 0 ? "готов" : `блокеров: ${readiness.blockers.length}`}
-                  </SectionBadge>
-                  <span className="min-w-0 truncate text-sm text-secondary">Рабочее пространство `{workspaceId}`</span>
-                </div>
-                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                  <div className="min-w-0">
-                    <h1 className="mt-6 text-2xl font-semibold text-primary md:text-3xl">Администрирование</h1>
-                    <p className="mt-2 max-w-2xl text-sm leading-6 text-secondary">
-                      Настройка выполнения, управление, доступ и проверка — в одном месте.
-                    </p>
-                  </div>
-                </div>
+      <main className="min-h-screen bg-page px-3 py-3 text-primary md:px-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-4">
+          <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-semibold tracking-tight text-primary">
+                  {isSystemAdmin ? "Администрирование" : "Ресурсы рабочего пространства"}
+                </h1>
+                <SectionBadge tone={readiness.blockers.length === 0 ? "success" : "warning"}>
+                  {readiness.blockers.length === 0 ? "готов" : `блокеров: ${readiness.blockers.length}`}
+                </SectionBadge>
               </div>
-
-              <div className="flex flex-wrap justify-end gap-2">
-                <ThemeSelector />
-                <Button onClick={() => startSectionTransition(() => setActiveSection("setup"))}>
-                  Исправить настройки
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => startSectionTransition(() => setActiveSection("review"))}
-                >
+              <p className="mt-1 text-xs leading-5 text-secondary">
+                Рабочее пространство <span className="font-medium text-primary">{workspaceId}</span>
+                <span className="mx-2 text-muted">/</span>
+                {isSystemAdmin
+                  ? "Настройка выполнения, управление, доступ и проверка"
+                  : "Подключения и навыки рабочего пространства"}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <ThemeSelector />
+              <Button size="sm" variant="outline" className="shadow-none" onClick={() => startSectionTransition(() => setActiveSection("setup"))}>
+                Исправить настройки
+              </Button>
+              {isSystemAdmin ? (
+                <Button size="sm" variant="ghost" onClick={() => startSectionTransition(() => setActiveSection("review"))}>
                   Очистить очередь проверки
                 </Button>
-              </div>
+              ) : null}
               <Link
                 href="/"
                 aria-label="Перейти в рабочее пространство"
                 title="Перейти в рабочее пространство"
-                className="absolute right-4 top-4 z-10 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-accent/50 bg-elevated text-primary shadow-[0_10px_28px_rgb(var(--color-accent)/0.14)] transition hover:bg-border-strong md:right-5"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-secondary transition hover:bg-elevated hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
               >
                 <X className="h-4 w-4" />
               </Link>
             </div>
           </header>
 
-          <div className="flex flex-wrap gap-2 rounded-xl border border-border bg-surface/70 p-2">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
             <CompactSummaryStat label="Оценка готовности" value={`${readiness.readinessScore}%`} />
-            <CompactSummaryStat
-              label="Защищено"
-              value={`${readiness.totalSecureConnections}/${readiness.totalConnections}`}
-            />
-            <CompactSummaryStat label="Проверка" value={pendingInsights.length} />
+            <CompactSummaryStat label="Защищено" value={`${readiness.totalSecureConnections}/${readiness.totalConnections}`} />
+            {isSystemAdmin ? <CompactSummaryStat label="Проверка" value={pendingInsights.length} /> : null}
           </div>
 
-          <div className="sticky top-4 z-20 rounded-2xl border border-border bg-surface/90 p-1.5 backdrop-blur-xl">
-            <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-5">
-              {SECTION_META.map((section) => {
+          <nav aria-label="Разделы администрирования" className="sticky top-0 z-20 -mx-1 border-b border-border bg-page/95 px-1 backdrop-blur-xl">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {availableSections.map((section) => {
                 const isActive = section.id === activeSection;
                 return (
                   <button
                     key={section.id}
                     type="button"
                     aria-pressed={isActive}
+                    title={section.description}
                     onClick={() => startSectionTransition(() => setActiveSection(section.id))}
-                    className={`rounded-xl px-3 py-2.5 text-left transition ${
+                    className={`min-h-10 border-b-2 px-1 py-2 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                       isActive
-                        ? "bg-elevated text-primary shadow-[0_10px_28px_rgb(var(--color-accent)/0.16)]"
-                        : "bg-transparent text-secondary hover:bg-surface hover:text-primary"
+                        ? "border-accent text-primary"
+                        : "border-transparent text-secondary hover:border-border-strong hover:text-primary"
                     }`}
                   >
-                    <div className="text-sm font-medium">{section.label}</div>
-                    <div className="mt-1 hidden text-xs leading-5 opacity-80 xl:block">{section.description}</div>
+                    {section.label}
                   </button>
                 );
               })}
             </div>
-          </div>
+          </nav>
 
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
@@ -2066,15 +2099,15 @@ export function AdminPageClient({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -12 }}
               transition={{ duration: 0.2, ease: "easeOut" }}
-              className="grid gap-6 pb-8"
+              className="grid min-w-0 gap-4 pb-4"
             >
-              {activeSection === "overview" ? (
+              {isSystemAdmin && activeSection === "overview" ? (
                 <SectionShell
                   eyebrow="Обзор"
-                  title="Управляйте рабочим пространством, а не страницей"
-                  description="Сначала готовность и разбор, ниже дополнительные счётчики"
+                  title="Состояние рабочего пространства"
+                  description="Готовность, блокеры и ресурсы"
                 >
-                  <div className="grid gap-4 xl:grid-cols-4">
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     <MetricCard
                       icon={<Sparkles className="h-5 w-5" />}
                       title="Готовность"
@@ -2105,7 +2138,7 @@ export function AdminPageClient({
                     />
                   </div>
 
-                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
+                  <div className="grid items-start gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
                     <InfoPanel
                       title="Критические блокеры"
                       description="Эти пункты снижают готовность и обычно мешают аналитикам"
@@ -2115,11 +2148,11 @@ export function AdminPageClient({
                           {readiness.blockers.map((blocker) => (
                             <div
                               key={blocker}
-                              className="rounded-[22px] border border-danger-border bg-purple-subtle px-4 py-4"
+                              className="rounded-lg border border-danger-border bg-danger-subtle px-3 py-2"
                             >
                               <div className="flex items-start gap-3">
                                 <XCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-danger" />
-                                <p className="text-sm leading-6 text-danger">{blocker}</p>
+                                <p className="text-sm leading-5 text-danger">{blocker}</p>
                               </div>
                             </div>
                           ))}
@@ -2129,7 +2162,7 @@ export function AdminPageClient({
                           icon={<CheckCircle2 className="h-5 w-5" />}
                           title="Блокеров нет"
                           description="Настройки в порядке. Держите очередь проверки и слой управления под контролем"
-                          className="border-success-border bg-[linear-gradient(180deg,rgb(var(--color-cyan-subtle)/0.92),rgb(var(--color-cyan-subtle)/0.98))]"
+                          className="bg-success-subtle"
                         />
                       )}
                     </InfoPanel>
@@ -2138,7 +2171,7 @@ export function AdminPageClient({
                       title="Состояние системы"
                       description="Быстрый взгляд на важные части"
                     >
-                      <div className="grid gap-3">
+                      <div className="grid gap-0">
                         <SummaryRow label="Подключения к базам данных" value={databaseConnectors.length} />
                         <SummaryRow label="Подключения LLM" value={llmConnectors.length} />
                         <SummaryRow label="Подключения документации" value={documentationConnectors.length} />
@@ -2198,11 +2231,12 @@ export function AdminPageClient({
                     </>
                   }
                 >
-                  <Card className="border-border bg-surface/[0.92]">
-                    <CardContent className="grid gap-4 p-5 lg:grid-cols-[minmax(260px,1fr)_auto] lg:items-center">
+                  <Card className="rounded-lg border-border bg-surface bg-none shadow-none">
+                    <CardContent className="grid gap-3 p-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
                       <div className="relative">
                         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                         <Input
+                          aria-label="Поиск подключений"
                           value={setupSearch}
                           onChange={(event) => setSetupSearch(event.target.value)}
                           placeholder="Поиск по названию подключения, хосту, модели, URL или сервису"
@@ -2215,7 +2249,7 @@ export function AdminPageClient({
                             key={filter}
                             type="button"
                             onClick={() => setSetupStatus(filter)}
-                            className={`rounded-full border px-3 py-2 text-sm transition ${
+                            className={`rounded-md border px-3 py-1.5 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                               setupStatus === filter
                                 ? "border-accent/40 bg-accent/[0.16] text-primary"
                                 : "border-border-strong bg-surface text-secondary hover:border-border-strong hover:text-primary"
@@ -2228,7 +2262,7 @@ export function AdminPageClient({
                     </CardContent>
                   </Card>
 
-                  <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     <ConnectorTypeSummaryCard
                       title="База данных"
                       count={databaseConnectors.length}
@@ -2294,7 +2328,7 @@ export function AdminPageClient({
                     />
                   </div>
 
-                  <div className="grid gap-4">
+                  <div className="grid items-start gap-3 lg:grid-cols-2">
                     {(
                       [
                         ["database", filteredConnectorCollections.database],
@@ -2310,12 +2344,13 @@ export function AdminPageClient({
                     ).map(([type, items]) => (
                       <InfoPanel
                         key={type}
+                        className={items.length > 2 ? "lg:col-span-2" : undefined}
                         title={`Подключения: ${getConnectorTypeLabel(type)}`}
-                        description={`${items.length} записей соответствуют фильтрам`}
+                        description={`${items.length} ${pluralize(items.length, ["подключение", "подключения", "подключений"])}`}
                       >
                         {items.length > 0 ? (
                           <LayoutGroup>
-                            <div className="grid gap-4 xl:grid-cols-2">
+                            <div className="grid items-start gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr))]">
                               {items.map((connector) => (
                                 <motion.div key={connector.id} layout>
                                   <ConnectorCard
@@ -2362,6 +2397,9 @@ export function AdminPageClient({
                       </InfoPanel>
                     ))}
                   </div>
+                  {isSystemAdmin ? (
+                    <EnvironmentProfilesPanel initialProfiles={initialCodingEnvironments} />
+                  ) : null}
                 </SectionShell>
               ) : null}
 
@@ -2372,14 +2410,18 @@ export function AdminPageClient({
                   description="Официальные сценарии и навыки рабочего пространства работают вместе. Первые задают процесс, вторые — правила выполнения"
                   actions={
                     <>
-                      <Button onClick={openCreateAgentSheet}>
-                        <Plus className="h-4 w-4" />
-                        Добавить агента
-                      </Button>
-                      <Link href="/scenarios/new?scope=official" className={buttonVariants({ variant: "outline" })}>
-                        <Plus className="h-4 w-4" />
-                        Добавить официальный сценарий
-                      </Link>
+                      {isSystemAdmin ? (
+                        <>
+                          <Button onClick={openCreateAgentSheet}>
+                            <Plus className="h-4 w-4" />
+                            Добавить агента
+                          </Button>
+                          <Link href="/scenarios/new?scope=official" className={buttonVariants({ variant: "outline" })}>
+                            <Plus className="h-4 w-4" />
+                            Добавить официальный сценарий
+                          </Link>
+                        </>
+                      ) : null}
                       <Button variant="outline" onClick={openCreateSkillSheet}>
                         <Plus className="h-4 w-4" />
                         Добавить навык
@@ -2387,73 +2429,118 @@ export function AdminPageClient({
                     </>
                   }
                 >
-                  <InfoPanel
-                    title="Агенты"
-                    description="Профили чата для разных пользователей со списками разрешённых подключений и дополнительными подсказками промпта"
-                  >
-                    {agents.length > 0 ? (
-                      <div className="grid gap-3 lg:grid-cols-2">
-                        {agents.map((agent) => (
-                          <AgentCard
-                            key={agent.id}
-                            agent={agent}
-                            onEdit={() => openEditAgentSheet(agent)}
-                            onDelete={() => setDeleteIntent({ kind: "agent", agent })}
+                  {isSystemAdmin ? (
+                    <div className="grid gap-4">
+                      <CodingTeamsPanel initialTeams={initialCodingTeams} agents={agents} skills={workspaceSkills} />
+                      <InfoPanel
+                        title="Агенты"
+                        description="Профили чата для разных пользователей со списками разрешённых подключений и дополнительными подсказками промпта"
+                      >
+                        {agents.length > 0 ? (
+                          <div className="grid items-start gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr))]">
+                            {agents.map((agent) => (
+                              <AgentCard
+                                key={agent.id}
+                                agent={agent}
+                                onEdit={() => openEditAgentSheet(agent)}
+                                onDelete={() => setDeleteIntent({ kind: "agent", agent })}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <EmptyState
+                            icon={<Sparkles className="h-5 w-5" />}
+                            title="Нет агентов"
+                            description="Создайте первый управляемый профиль чата"
+                            action={
+                              <Button size="sm" onClick={openCreateAgentSheet}>
+                                Добавить агента
+                              </Button>
+                            }
                           />
-                        ))}
-                      </div>
-                    ) : (
-                      <EmptyState
-                        icon={<Sparkles className="h-5 w-5" />}
-                        title="Нет агентов"
-                        description="Создайте первый управляемый профиль чата"
-                        action={
-                          <Button size="sm" onClick={openCreateAgentSheet}>
-                            Добавить агента
-                          </Button>
-                        }
-                      />
-                    )}
-                  </InfoPanel>
-
-                  <div className="grid gap-4 xl:grid-cols-2">
-                    <InfoPanel
-                      title="Официальные сценарии"
-                      description="Опубликованные процессы, видимые аналитикам, с ожидаемым поведением"
-                    >
-                      {officialScenarios.length > 0 ? (
-                        <div className="grid gap-4">
-                          {officialScenarios.map((scenario) => (
-                            <ScenarioCard
-                              key={scenario.id}
-                              scenario={scenario}
-                              onEdit={() => {
-                                window.location.assign(`/scenarios/${scenario.id}`);
-                              }}
-                              onArchive={() => setDeleteIntent({ kind: "scenario", scenario })}
+                        )}
+                      </InfoPanel>
+                      <InfoPanel
+                        title="Политика выполнения кода для ассистента по умолчанию"
+                        description="Границы прямой и делегированной публикации в GitLab для чатов без выбранного агента"
+                      >
+                        {defaultPolicyEditorOpen ? (
+                          <div className="space-y-3">
+                            <div className="flex justify-end">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setDefaultPolicyEditorOpen(false)}
+                              >
+                                Закрыть редактор политики
+                              </Button>
+                            </div>
+                            <GovernedPolicyEditor
+                              workspaceId={workspaceId}
+                              target={{ kind: "default-assistant" }}
+                              agents={agents}
+                              gitlabConnectors={gitlabConnectors}
                             />
-                          ))}
-                        </div>
-                      ) : (
-                        <EmptyState
-                          icon={<Workflow className="h-5 w-5" />}
-                          title="Официальных сценариев нет"
-                          description="Без доверенных процессов у аналитиков управление остаётся только на бумаге"
-                          action={
-                            <Link href="/scenarios/new?scope=official" className={buttonVariants({ size: "sm" })}>
-                              Создать сценарий
-                            </Link>
-                          }
-                        />
-                      )}
-                    </InfoPanel>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <p className="text-sm text-secondary">
+                              По умолчанию редактор закрыт. Данные загружаются явно и не кешируются
+                            </p>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => setDefaultPolicyEditorOpen(true)}
+                            >
+                              Редактировать политику по умолчанию
+                            </Button>
+                          </div>
+                        )}
+                      </InfoPanel>
+                    </div>
+                  ) : null}
+
+                  <div className="grid gap-4">
+                    {isSystemAdmin ? (
+                      <InfoPanel
+                        title="Официальные сценарии"
+                        description="Опубликованные процессы, видимые аналитикам, с ожидаемым поведением"
+                      >
+                        {officialScenarios.length > 0 ? (
+                          <div className="grid items-start gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr))]">
+                            {officialScenarios.map((scenario) => (
+                              <ScenarioCard
+                                key={scenario.id}
+                                scenario={scenario}
+                                onEdit={() => {
+                                  window.location.assign(`/scenarios/${scenario.id}`);
+                                }}
+                                onArchive={() => setDeleteIntent({ kind: "scenario", scenario })}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <EmptyState
+                            icon={<Workflow className="h-5 w-5" />}
+                            title="Официальных сценариев нет"
+                            description="Без доверенных процессов у аналитиков управление остаётся только на бумаге"
+                            action={
+                              <Link href="/scenarios/new?scope=official" className={buttonVariants({ size: "sm" })}>
+                                Создать сценарий
+                              </Link>
+                            }
+                          />
+                        )}
+                      </InfoPanel>
+                    ) : null}
 
                     <InfoPanel
                       title="Навыки рабочего пространства"
-                      description="Playbooks оптимизации и рекомендации по настройке, привязанные к выполнению рабочего пространства"
+                      description="Инструкции по оптимизации и рекомендации по настройке, привязанные к выполнению рабочего пространства"
                     >
                       {workspaceSkills.length > 0 ? (
-                        <div className="grid max-h-[min(70vh,48rem)] gap-4 overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]">
+                        <div className="grid items-start gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr))] max-h-[min(70vh,48rem)] overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]">
                           {workspaceSkills.map((skill) => (
                             <SkillCard
                               key={skill.id}
@@ -2486,13 +2573,22 @@ export function AdminPageClient({
                 </SectionShell>
               ) : null}
 
-              {activeSection === "access" ? (
+              {isSystemAdmin && activeSection === "access" ? (
                 <SectionShell
                   eyebrow="Доступ"
                   title="Локальные учётные записи и роли"
                   description="Создавайте локальных пользователей и проверяйте права без поиска по карточкам"
                 >
                   <div className="grid gap-4">
+                    <WorkspaceAccessPanel
+                      activeWorkspaceId={workspaceId}
+                      workspaces={workspaces}
+                      initialMemberships={workspaceMemberships}
+                      initialGrants={workspaceResourceGrants}
+                      users={workspaceUsers}
+                      resources={workspaceResourceOptions}
+                    />
+
                     <InfoPanel
                       title="Создание локального пользователя"
                       description="Роль по умолчанию — аналитик. Повышайте осознанно"
@@ -2524,7 +2620,7 @@ export function AdminPageClient({
                             <option value="admin">администратор</option>
                           </select>
                         </label>
-                        <Input label="Отображаемое имя" name="display_name" placeholder="Platform Admin" />
+                        <Input label="Отображаемое имя" name="display_name" placeholder="Администратор платформы" />
 
                         {userError ? (
                           <div className="lg:col-span-5">
@@ -2567,7 +2663,7 @@ export function AdminPageClient({
                 </SectionShell>
               ) : null}
 
-              {activeSection === "review" ? (
+              {isSystemAdmin && activeSection === "review" ? (
                 <SectionShell
                   eyebrow="Проверка"
                   title="Очередь проверки инсайтов"
@@ -2578,7 +2674,7 @@ export function AdminPageClient({
                   ) : null}
 
                   {pendingInsights.length > 0 && selectedReview ? (
-                    <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+                    <div className="grid items-start gap-3 xl:grid-cols-[300px_minmax(0,1fr)]">
                       <InfoPanel
                         title="Очередь"
                         description={`Ожидает проверки: ${pendingInsights.length} ${pluralize(pendingInsights.length, ["инсайт", "инсайта", "инсайтов"])}`}
@@ -2593,7 +2689,7 @@ export function AdminPageClient({
                                   layout
                                   type="button"
                                   onClick={() => setSelectedReviewId(item.id)}
-                                  className={`rounded-[22px] border px-4 py-4 text-left transition ${
+                                  className={`rounded-lg border px-3 py-3 text-left transition ${
                                     isSelected
                                       ? "border-accent bg-elevated"
                                       : "border-border-strong bg-surface hover:border-border-strong hover:bg-surface"
@@ -2645,7 +2741,7 @@ export function AdminPageClient({
                             <TagList title="Источники метаданных" items={selectedReview.metadata_sources} />
                             <TagList title="Ключевые слова" items={selectedReview.keywords} />
                             <InfoPanel title="Связи">
-                              <div className="grid gap-3 text-sm text-primary">
+                              <div className="grid gap-0 text-sm text-primary">
                                 <SummaryRow label="Диалог" value={selectedReview.conversation_id} monospace />
                                 <SummaryRow label="Сообщение" value={selectedReview.message_id} monospace />
                                 <SummaryRow label="Исполнение" value={selectedReview.execution_id ?? "—"} monospace />
@@ -2688,7 +2784,7 @@ export function AdminPageClient({
         </div>
       </main>
 
-      <AgentSheet
+      {isSystemAdmin ? <AgentSheet
         open={agentSheetOpen}
         onOpenChange={(open) => {
           if (!agentSaving) {
@@ -2700,6 +2796,8 @@ export function AdminPageClient({
           }
         }}
         editingAgent={editingAgent}
+        workspaceId={workspaceId}
+        agents={agents}
         sessionNonce={agentSessionNonce}
         databaseConnectors={databaseConnectors}
         llmConnectors={llmConnectors}
@@ -2713,7 +2811,7 @@ export function AdminPageClient({
         onSubmit={handleAgentSubmit}
         saving={agentSaving}
         error={agentError}
-      />
+      /> : null}
 
       <ConnectorSheet
         open={connectorSheetOpen}
@@ -2838,9 +2936,9 @@ function SummaryRow({
   monospace?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-border bg-surface px-3 py-3">
-      <span className="text-sm text-secondary">{label}</span>
-      <span className={`min-w-0 break-words text-right text-sm font-medium text-primary ${monospace ? "font-mono text-[13px]" : ""}`}>
+    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] items-baseline gap-2 border-b border-border/60 py-1 last:border-b-0">
+      <span className="min-w-0 break-words text-xs leading-4 text-secondary">{label}</span>
+      <span title={typeof value === "string" || typeof value === "number" ? String(value) : undefined} className={`min-w-0 text-right text-xs leading-4 text-primary [overflow-wrap:anywhere] ${monospace ? "font-mono" : "font-medium"}`}>
         {value}
       </span>
     </div>
@@ -2849,17 +2947,17 @@ function SummaryRow({
 
 function SummaryStat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-[22px] border border-border bg-surface px-4 py-4">
-      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">{label}</p>
-      <div className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-primary">{value}</div>
+    <div className="rounded-lg border border-border bg-surface px-3 py-2.5">
+      <p className="text-xs font-medium text-secondary">{label}</p>
+      <div className="mt-1 text-xl font-semibold tabular-nums text-primary">{value}</div>
     </div>
   );
 }
 
 function CompactSummaryStat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="inline-flex min-w-[120px] items-center justify-between gap-3 rounded-lg border border-border bg-surface px-3 py-2">
-      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">{label}</span>
+    <div className="inline-flex items-center gap-2">
+      <span className="text-xs text-secondary">{label}</span>
       <span className="text-sm font-semibold text-primary">{value}</span>
     </div>
   );
@@ -2869,7 +2967,7 @@ function DetailBlock({ title, content }: { title: string; content: string }) {
   return (
     <div className="grid gap-2">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">{title}</p>
-      <div className="rounded-[22px] border border-border bg-surface px-4 py-4 text-sm leading-7 text-primary">
+      <div className="rounded-lg border border-border bg-surface px-3 py-3 text-sm leading-7 text-primary">
         {content}
       </div>
     </div>
@@ -2880,7 +2978,7 @@ function DetailCodeBlock({ title, content }: { title: string; content: string })
   return (
     <div className="grid gap-2">
       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">{title}</p>
-      <pre className="overflow-x-auto rounded-[22px] border border-border bg-surface px-4 py-4 text-xs leading-6 text-primary">
+      <pre className="overflow-x-auto rounded-lg border border-border bg-surface px-3 py-3 text-xs leading-6 text-primary">
         {content}
       </pre>
     </div>
@@ -2922,14 +3020,14 @@ function LocalUsersTable({
         <table className="min-w-[760px] w-full border-collapse text-left text-sm">
           <thead className="bg-surface text-xs uppercase tracking-[0.14em] text-muted">
             <tr>
-              <th className="px-4 py-3 font-semibold">Пользователь</th>
-              <th className="px-4 py-3 font-semibold">Роль</th>
-              <th className="px-4 py-3 font-semibold">Статус</th>
-              <th className="px-4 py-3 font-semibold">Лимит API</th>
-              <th className="px-4 py-3 font-semibold">Провайдер</th>
-              <th className="px-4 py-3 font-semibold">Субъект</th>
-              <th className="px-4 py-3 font-semibold">Создан</th>
-              <th className="px-4 py-3 text-right font-semibold">Действия</th>
+              <th className="px-3 py-2 font-semibold">Пользователь</th>
+              <th className="px-3 py-2 font-semibold">Роль</th>
+              <th className="px-3 py-2 font-semibold">Статус</th>
+              <th className="px-3 py-2 font-semibold">Лимит API</th>
+              <th className="px-3 py-2 font-semibold">Провайдер</th>
+              <th className="px-3 py-2 font-semibold">Субъект</th>
+              <th className="px-3 py-2 font-semibold">Создан</th>
+              <th className="px-3 py-2 text-right font-semibold">Действия</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border bg-surface">
@@ -2937,35 +3035,35 @@ function LocalUsersTable({
               const isCurrentUser = user.id === currentUserId;
               return (
                 <tr key={user.id} className="transition hover:bg-surface">
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-2">
                     <div className="max-w-[220px]">
                       <p className="truncate font-medium text-primary">{user.login}</p>
                       <p className="mt-1 truncate text-xs text-secondary">{user.display_name ?? "-"}</p>
                     </div>
                   </td>
-                  <td className="px-4 py-3">
-                    <SectionBadge tone={user.role === "admin" ? "warning" : "primary"}>{user.role}</SectionBadge>
+                  <td className="px-3 py-2">
+                    <SectionBadge tone={user.role === "admin" ? "warning" : "primary"}>{adminLabel(user.role)}</SectionBadge>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-2">
                     <SectionBadge tone={user.is_active ? "success" : "danger"}>
                       {user.is_active ? "активен" : "отключён"}
                     </SectionBadge>
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-primary">
+                  <td className="whitespace-nowrap px-3 py-2 text-primary">
                     {user.api_rate_limit_per_hour == null
                       ? "Без ограничений"
                       : `${user.api_rate_limit_per_hour} / час`}
                   </td>
-                  <td className="px-4 py-3 text-primary">{user.auth_provider}</td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-2 text-primary">{user.auth_provider}</td>
+                  <td className="px-3 py-2">
                     <code className="block max-w-[220px] truncate rounded-md bg-page px-2 py-1 text-xs text-primary">
                       {user.auth_subject}
                     </code>
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-primary">
+                  <td className="whitespace-nowrap px-3 py-2 text-primary">
                     {formatShortDate(user.created_at)}
                   </td>
-                  <td className="px-4 py-3 text-right">
+                  <td className="px-3 py-2 text-right">
                     <div className="flex justify-end gap-2">
                       <Button
                         type="button"
@@ -3019,183 +3117,66 @@ function ConnectorTypeSummaryCard({
   onAdd: () => void;
 }) {
   return (
-    <Card className="min-w-0 border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
-      <CardContent className="grid gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border-strong bg-surface text-accent">
-              {icon}
-            </div>
-            <div className="min-w-0">
-              <p className="break-words text-base font-medium text-primary">{title}</p>
-              <p className="text-sm text-secondary">{readyCount}/{count} готово</p>
-            </div>
-          </div>
-          <SectionBadge tone={count > 0 && readyCount === count ? "success" : count > 0 ? "warning" : "danger"}>
-            {count}
-          </SectionBadge>
-        </div>
-        <Button size="sm" variant="outline" onClick={onAdd} className="w-full min-w-0">
-          <Plus className="h-4 w-4" />
-          <span className="min-w-0 truncate">Добавить подключение</span>
-        </Button>
-      </CardContent>
-    </Card>
+    <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2">
+      <span className="shrink-0 text-muted [&>svg]:h-4 [&>svg]:w-4">{icon}</span>
+      <div className="min-w-0 flex-1">
+        <p className="break-words text-xs font-medium text-primary">{title}</p>
+        <p className="text-[11px] text-secondary">{readyCount}/{count} готово</p>
+      </div>
+      <SectionBadge tone={count > 0 && readyCount === count ? "success" : count > 0 ? "warning" : "neutral"}>
+        {count}
+      </SectionBadge>
+      <Button size="sm" variant="ghost" onClick={onAdd} className="h-8 w-8 shrink-0 px-0" aria-label={`Добавить подключение: ${title}`} title={`Добавить подключение: ${title}`}>
+        <Plus className="h-4 w-4" />
+      </Button>
+    </div>
   );
 }
 
-function ConnectorCard({
-  connector,
-  type,
-  statusPending,
-  onToggleActive,
-  onEdit,
-  onDelete,
-  onSync,
-  syncPending = false,
-}: {
-  connector: AnyConnectorItem;
-  type: ConnectorType;
-  statusPending: boolean;
-  onToggleActive: (isActive: boolean) => void;
-  onEdit: () => void;
-  onDelete: () => void;
-  onSync?: () => void;
-  syncPending?: boolean;
+function ConnectorCard({ connector, type, statusPending, onToggleActive, onEdit, onDelete, onSync, syncPending = false }: {
+  connector: AnyConnectorItem; type: ConnectorType; statusPending: boolean;
+  onToggleActive: (isActive: boolean) => void; onEdit: () => void; onDelete: () => void;
+  onSync?: () => void; syncPending?: boolean;
 }) {
   const health = getConnectorHealth(connector, type);
-  const healthTone = connector.is_active ? (health === "ready" ? "success" : "warning") : "danger";
-
   return (
-    <Card className="border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
-      <CardContent className="grid gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-base font-medium text-primary">{connector.name}</p>
-            <p className="mt-1 text-sm text-secondary">{getConnectorSubtitle(connector, type)}</p>
-          </div>
-          <div className="flex flex-col items-end gap-2">
-            <SectionBadge tone={healthTone}>{connector.is_active ? health : "неактивно"}</SectionBadge>
-            <Switch
-              aria-label={`${connector.name}: активность`}
-              checked={connector.is_active}
-              disabled={statusPending}
-              onChange={(event) => onToggleActive(event.currentTarget.checked)}
-              label={connector.is_active ? "Активно" : "Неактивно"}
-            />
-          </div>
-        </div>
-        <div className="grid gap-3 text-sm text-primary">
-          {getConnectorDetailRows(connector, type).map((row) => (
-            <SummaryRow key={row.label} label={row.label} value={row.value} monospace={row.monospace} />
-          ))}
-        </div>
-        <div className="flex flex-wrap justify-between gap-3 border-t border-border pt-4">
-          <span className="text-xs uppercase tracking-[0.16em] text-muted">
-            Обновлено {formatShortDate(connector.updated_at)}
-          </span>
-          <div className="flex gap-2">
-            {onSync ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={onSync}
-                disabled={syncPending}
-                className="border border-border-strong bg-surface text-primary hover:bg-elevated"
-              >
-                <Clock3 className="h-4 w-4" />
-                Синхронизировать
-              </Button>
-            ) : null}
-            <Button size="sm" variant="ghost" onClick={onEdit} className="border border-border-strong bg-surface text-primary hover:bg-elevated">
-              <Edit className="h-4 w-4" />
-              Редактировать
-            </Button>
-            <Button size="sm" variant="danger" onClick={onDelete}>
-              <Trash2 className="h-4 w-4" />
-              Удалить
-            </Button>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <ResourceCard title={connector.name} description={getConnectorSubtitle(connector, type)} icon={<Database />}
+      status={<SectionBadge tone={connector.is_active ? (health === "ready" ? "success" : "warning") : "danger"}>{connector.is_active ? (health === "ready" ? "готово" : "требует внимания") : "неактивно"}</SectionBadge>}
+      controls={<Switch aria-label={`${connector.name}: активность`} checked={connector.is_active} disabled={statusPending} onChange={event => onToggleActive(event.currentTarget.checked)} />}
+      onEdit={onEdit} onDelete={onDelete} onSync={onSync} syncPending={syncPending}>
+      {getConnectorDetailRows(connector, type).map(row => <SummaryRow key={row.label} {...row} />)}
+      <SummaryRow label="Обновлено" value={formatShortDate(connector.updated_at)} />
+    </ResourceCard>
   );
 }
 
-function ScenarioCard({
-  scenario,
-  onEdit,
-  onArchive,
-}: {
-  scenario: ScenarioDefinition;
-  onEdit: () => void;
-  onArchive: () => void;
-}) {
+function ScenarioCard({ scenario, onEdit, onArchive }: { scenario: ScenarioDefinition; onEdit: () => void; onArchive: () => void }) {
   return (
-    <Card className="border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
-      <CardContent className="grid gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-base font-medium text-primary">{scenario.title}</p>
-            <p className="mt-1 text-sm text-secondary">{scenario.summary}</p>
-          </div>
-          <SectionBadge tone={scenario.status === "published" ? "success" : "warning"}>
-            {scenario.status}
-          </SectionBadge>
-        </div>
-        <div className="grid gap-3 text-sm text-primary">
+    <ResourceCard title={scenario.title} description={scenario.summary} icon={<Workflow />}
+      status={<SectionBadge tone={scenario.status === "published" ? "success" : "warning"}>{adminLabel(scenario.status)}</SectionBadge>}
+      onEdit={onEdit} onDelete={onArchive} deleteLabel="В архив">
           <SummaryRow label="Идентификатор" value={scenario.slug} monospace />
           <SummaryRow label="Версия" value={`v${scenario.version}`} />
           <SummaryRow label="Обновлено" value={formatShortDate(scenario.updated_at)} />
-        </div>
-        <div className="flex justify-end gap-2 border-t border-border pt-4">
-          <Button size="sm" variant="ghost" onClick={onEdit} className="border border-border-strong bg-surface text-primary hover:bg-elevated">
-            <Edit className="h-4 w-4" />
-            Редактировать
-          </Button>
-          <Button size="sm" variant="danger" onClick={onArchive}>
-            <Trash2 className="h-4 w-4" />
-            В архив
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+    </ResourceCard>
   );
 }
 
-function SkillCard({
-  skill,
-  onEdit,
-  onDelete,
-}: {
-  skill: WorkspaceSkillItem;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
+function SkillCard({ skill, onEdit, onDelete }: { skill: WorkspaceSkillItem; onEdit: () => void; onDelete: () => void }) {
   return (
-    <Card className="border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.96),rgb(var(--color-surface)/0.98))]">
-      <CardContent className="grid gap-4 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-base font-medium text-primary">{skill.name}</p>
-            <p className="mt-1 text-sm text-secondary">{skill.summary ?? "Описание ещё не получено"}</p>
-          </div>
-          <div className="flex flex-col gap-2">
-            <SectionBadge tone={skill.status === "active" ? "success" : "warning"}>{skill.status}</SectionBadge>
-            <SectionBadge tone={skill.validation_status === "valid" ? "success" : skill.validation_status === "invalid" ? "danger" : "warning"}>
-              {skill.validation_status}
-            </SectionBadge>
-          </div>
-        </div>
-        <div className="grid gap-3 text-sm text-primary">
+    <ResourceCard title={skill.name} description={skill.summary ?? "Описание ещё не получено"} icon={<BookText />}
+      status={<><SectionBadge tone={skill.status === "active" ? "success" : "warning"}>{adminLabel(skill.status)}</SectionBadge><SectionBadge tone={skill.validation_status === "valid" ? "success" : skill.validation_status === "invalid" ? "danger" : "warning"}>{adminLabel(skill.validation_status)}</SectionBadge></>}
+      onEdit={onEdit} onDelete={onDelete}>
           <SummaryRow label="Приоритет" value={skill.priority} />
-          <SummaryRow label="Назначение" value={skill.capability_family} />
-          <SummaryRow label="Область" value={skill.engine_scope} />
+          <SummaryRow label="Назначение" value={adminLabel(skill.capability_family)} />
+          <SummaryRow label="Область" value={adminLabel(skill.engine_scope)} />
           <SummaryRow
             label="Источник"
             value={skill.source_kind === "manual_markdown" ? "ручной текст" : skill.source_url}
             monospace={skill.source_kind !== "manual_markdown"}
           />
+          <SummaryRow label="Версия" value={skill.version_digest ?? "прежняя версия"} monospace />
+          <SummaryRow label="Файлы" value={skill.content_bundle.assets.map((asset) => asset.path).join(", ")} />
           {skill.capability_family === "chat_instruction" ? (
             <SummaryRow
               label="Ассистент по умолчанию"
@@ -3203,44 +3184,15 @@ function SkillCard({
             />
           ) : null}
           <SummaryRow label="Проверен" value={formatDateTime(skill.last_validated_at)} />
-        </div>
-        <div className="flex justify-end gap-2 border-t border-border pt-4">
-          <Button size="sm" variant="ghost" onClick={onEdit} className="border border-border-strong bg-surface text-primary hover:bg-elevated">
-            <Edit className="h-4 w-4" />
-            Редактировать
-          </Button>
-          <Button size="sm" variant="danger" onClick={onDelete}>
-            <Trash2 className="h-4 w-4" />
-            Удалить
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+    </ResourceCard>
   );
 }
 
-function AgentCard({
-  agent,
-  onEdit,
-  onDelete,
-}: {
-  agent: AgentProfile;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
+function AgentCard({ agent, onEdit, onDelete }: { agent: AgentProfile; onEdit: () => void; onDelete: () => void }) {
   return (
-    <Card className="border-border-strong bg-surface">
-      <CardContent className="grid gap-4 p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-base font-medium text-primary">{agent.title}</p>
-            <p className="mt-1 text-sm text-secondary">{agent.description ?? agent.slug}</p>
-          </div>
-          <SectionBadge tone={agent.is_active ? "success" : "danger"}>
-            {agent.is_active ? "активен" : "неактивен"}
-          </SectionBadge>
-        </div>
-        <div className="grid gap-2 text-sm">
+    <ResourceCard title={agent.title} description={agent.description ?? agent.slug} icon={<Sparkles />}
+      status={<SectionBadge tone={agent.is_active ? "success" : "danger"}>{agent.is_active ? "активен" : "неактивен"}</SectionBadge>}
+      onEdit={onEdit} onDelete={onDelete}>
           <SummaryRow label="Звёзды" value={agent.star_count} />
           <SummaryRow label="LLM" value={agent.llm_connector_name ?? "по умолчанию"} />
           <SummaryRow label="Разрешённые БД" value={agent.allowed_database_connector_names.join(", ") || "все"} />
@@ -3254,19 +3206,7 @@ function AgentCard({
           />
           <SummaryRow label="Навыки для чата" value={agent.allowed_workspace_skill_ids.length} />
           <SummaryRow label="Обновлено" value={formatShortDate(agent.updated_at)} />
-        </div>
-        <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" size="sm" onClick={onEdit}>
-            <Edit className="h-4 w-4" />
-            Редактировать
-          </Button>
-          <Button type="button" variant="ghost" size="sm" onClick={onDelete}>
-            <Trash2 className="h-4 w-4" />
-            Удалить
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+    </ResourceCard>
   );
 }
 
@@ -3330,6 +3270,14 @@ function getConnectorDetailRows(
       { label: "Ключи API", value: item.has_api_key ? `${item.api_key_count || 1} сохранено` : "не задан" },
       { label: "Температура", value: item.connection.temperature ?? "По умолчанию провайдера" },
       { label: "Top P", value: item.connection.top_p ?? "По умолчанию провайдера" },
+      {
+        label: "Хранение ответов у провайдера (store)",
+        value: item.connection.extra_settings?.store === false
+          ? "Не сохранять (false)"
+          : item.connection.extra_settings?.store === true
+            ? "Сохранять (true)"
+            : "По умолчанию провайдера",
+      },
       { label: "Уровень reasoning", value: item.connection.reasoning_effort ?? "По умолчанию провайдера" },
       { label: "Максимум токенов ответа", value: item.connection.max_tokens ?? "По умолчанию провайдера" },
       {

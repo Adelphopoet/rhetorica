@@ -35,6 +35,8 @@ interface ChatMessageProps {
   id?: string;
   role: "user" | "assistant";
   userLabel?: string;
+  assistantLabel?: string;
+  subagentRole?: "developer" | "qa";
   text: string;
   timestamp?: Date;
   className?: string;
@@ -67,6 +69,8 @@ export function ChatMessageComponent({
   id,
   role,
   userLabel,
+  assistantLabel,
+  subagentRole,
   text,
   timestamp,
   className,
@@ -248,14 +252,17 @@ export function ChatMessageComponent({
           ? "border border-accent-border bg-[linear-gradient(180deg,rgb(var(--color-elevated)/0.9),rgb(var(--color-surface)/0.94))] px-5 py-4 shadow-[0_20px_60px_rgb(var(--color-shadow)/calc(0.16*var(--shadow-opacity-scale)))]"
           : "border border-border bg-[linear-gradient(180deg,rgb(var(--color-surface)/0.88),rgb(var(--color-page)/0.94))] px-5 py-4 shadow-[0_20px_60px_rgb(var(--color-shadow)/calc(0.16*var(--shadow-opacity-scale)))]",
         !isUser && deliveryState === "streaming" && "ring-2 ring-accent/30",
+        subagentRole === "developer" && "border-l-4 border-l-cyan/60",
+        subagentRole === "qa" && "border-l-4 border-l-success/60",
         className
       )}
     >
       <div className="min-w-0 flex-1">
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <span className="text-xs font-semibold uppercase tracking-[0.18em] text-secondary">
-            {isUser ? resolvedUserLabel : "Rhetorica Assistant"}
+            {isUser ? resolvedUserLabel : assistantLabel ?? "Rhetorica Assistant"}
           </span>
+          {subagentRole && <Badge variant={subagentRole === "qa" ? "success" : "info"}>Субагент · {subagentRole === "qa" ? "QA" : "Developer"}</Badge>}
           {timestamp ? (
             <span className="text-xs text-muted">
               {timestamp.toLocaleTimeString("en-GB", {

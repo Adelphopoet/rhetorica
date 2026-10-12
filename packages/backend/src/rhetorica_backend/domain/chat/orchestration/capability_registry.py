@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Lock
 
 from rhetorica_backend.contracts.chat import CapabilityTrace, RuntimeContextTrace
 
 from .turn_policy import TurnPolicy
+
+_TOOL_USAGE_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -226,6 +229,11 @@ TOOL_CAPABILITY_REGISTRY: dict[str, ToolCapabilitySpec] = {
         family="workspace_instruction",
         primary_provider="workspace_skill",
     ),
+    "list_workspace_skill_files": ToolCapabilitySpec(
+        name="list_workspace_skill_files",
+        family="workspace_instruction",
+        primary_provider="workspace_skill",
+    ),
     "list_mcp_tools": ToolCapabilitySpec(
         name="list_mcp_tools",
         family="mcp_discovery",
@@ -375,7 +383,7 @@ def resolve_available_tool_names(policy: TurnPolicy) -> list[str]:
             "query_victoriametrics_range",
         ])
     if policy.workspace_skill_tools_enabled:
-        names.append("read_workspace_skill")
+        names.extend(["read_workspace_skill", "list_workspace_skill_files"])
     return names
 
 
@@ -471,11 +479,14 @@ def register_tool_usage(
     providers: list[str],
 ) -> None:
     """Record tool and provider usage without duplicating entries."""
-    runtime_state.used_tools = _unique_preserve_order([*runtime_state.used_tools, tool_name])
-    runtime_state.used_providers = _unique_preserve_order([
-        *runtime_state.used_providers,
-        *providers,
-    ])
+    # Certified readers execute on separate threads. Serialize only their short
+    # audit updates; the tool calls themselves remain concurrent.
+    with _TOOL_USAGE_LOCK:
+        runtime_state.used_tools = _unique_preserve_order([*runtime_state.used_tools, tool_name])
+        runtime_state.used_providers = _unique_preserve_order([
+            *runtime_state.used_providers,
+            *providers,
+        ])
 
 
 def _unique_preserve_order(items: list[str]) -> list[str]:

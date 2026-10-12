@@ -63,6 +63,12 @@ class LlmConnectionConfig(BaseModel):
     _credential_rebind: Callable[[int, int], bool] | None = PrivateAttr(default=None)
 
     @property
+    def store(self) -> bool | None:
+        """Optional provider-side response storage; independent of local history."""
+        value = self.extra_settings.get("store")
+        return value if isinstance(value, bool) else None
+
+    @property
     def connector_id(self) -> str | None:
         """Internal connector identity used for conversation credential affinity."""
         return self._connector_id
@@ -148,6 +154,13 @@ class LlmConnectionConfig(BaseModel):
 
     @field_validator("extra_settings")
     @classmethod
+    def _validate_store(cls, value: dict[str, ScalarSetting]) -> dict[str, ScalarSetting]:
+        if "store" in value and not isinstance(value["store"], bool):
+            raise ValueError("store_must_be_boolean")
+        return value
+
+    @field_validator("extra_settings")
+    @classmethod
     def _validate_runtime_context_role(
         cls,
         value: dict[str, ScalarSetting],
@@ -159,6 +172,23 @@ class LlmConnectionConfig(BaseModel):
         }:
             raise ValueError("runtime_context_role_must_be_developer_or_user")
         return value
+
+    @model_validator(mode="after")
+    def _validate_native_compaction(self) -> LlmConnectionConfig:
+        enabled = self.extra_settings.get("native_compaction_enabled", False)
+        threshold = self.extra_settings.get("native_compaction_threshold_tokens")
+        if not isinstance(enabled, bool):
+            raise ValueError("native_compaction_enabled_must_be_boolean")  # noqa: TRY004
+        if threshold is not None and (
+            isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1
+        ):
+            raise ValueError("native_compaction_threshold_tokens_must_be_positive_integer")
+        if enabled:
+            if not self.endpoint_path.rstrip("/").endswith("/responses"):
+                raise ValueError("native_compaction_requires_responses_endpoint")
+            if threshold is None:
+                raise ValueError("native_compaction_threshold_tokens_required")
+        return self
 
 
 class UpsertLlmConnectorRequest(BaseModel):
@@ -353,6 +383,7 @@ class GitLabConnectionConfig(BaseModel):
     default_group_paths: list[str] = Field(default_factory=list, max_length=100)
     search_limit: int = Field(default=5, ge=1, le=10)
     read_max_tokens: int = Field(default=1600, ge=200, le=4000)
+    coding_archive_max_files: int = Field(default=20_000, ge=1, le=100_000)
     extra_settings: dict[str, ScalarSetting] = Field(default_factory=dict)
 
     @field_validator("base_url")

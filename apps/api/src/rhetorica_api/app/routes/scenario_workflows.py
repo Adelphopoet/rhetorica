@@ -24,6 +24,7 @@ from rhetorica_backend.domain.scenarios.bootstrap import build_scenario_runtime
 from rhetorica_backend.domain.scenarios.settings import ScenarioSettings
 from rhetorica_backend.domain.scenarios.workflow_service import ScenarioWorkflowService
 
+from rhetorica_api.app.auth import get_current_auth_context
 from rhetorica_api.app.identity import resolve_current_user
 from rhetorica_api.app.routes.scenario_authoring_stream import proposal_events
 
@@ -91,7 +92,7 @@ def start_run(
     idempotency_key: Annotated[str | None, Header()] = None,
 ) -> dict:
     run = service().start(
-        scenario_id, resolve_current_user(payload.workspace_id), payload, idempotency_key or ""
+        scenario_id, resolve_current_user(payload.workspace_id), payload, idempotency_key or "", auth_kind=get_current_auth_context().credential_type
     )
     return {"run_id": run.id, "run": run.model_dump(mode="json")}
 
@@ -114,7 +115,7 @@ def get_run(run_id: str, workspace_id: str = "default") -> ScenarioRun:
 
 @router.post("/scenario-runs/{run_id}/cancel", response_model=ScenarioRun)
 def cancel_run(run_id: str, workspace_id: str = "default") -> ScenarioRun:
-    return service().runs.cancel(run_id, resolve_current_user(workspace_id))
+    return service().cancel(run_id, resolve_current_user(workspace_id), auth_kind=get_current_auth_context().credential_type)
 
 
 @router.post("/scenario-runs/{run_id}/steps/{node_id}/approval", status_code=204)

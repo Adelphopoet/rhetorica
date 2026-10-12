@@ -9,10 +9,7 @@ from dataclasses import replace
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
-from rhetorica_backend.contracts.chat import (
-    ChatAskRequest,
-    OptimizationTrace,
-)
+from rhetorica_backend.contracts.chat import ChatAskRequest
 from rhetorica_backend.contracts.connectors import ConnectorItem
 from rhetorica_backend.domain.chat.error_contract import (
     ErrorCategory,
@@ -72,7 +69,6 @@ from rhetorica_backend.domain.chat.orchestration.tool_workspace_skill_capability
     ToolWorkspaceSkillCapabilityService,
 )
 from rhetorica_backend.domain.chat.settings import get_chat_settings
-from rhetorica_backend.domain.chat.sql.optimization import SqlOptimizationService
 from rhetorica_backend.domain.chat.sql.semantic_preflight import (
     SemanticSqlPreflightService,
 )
@@ -137,7 +133,6 @@ class ToolExecutor:
         mcp_connector_repository: McpConnectorRepository | None = None,
         semantic_preflight_service: SemanticSqlPreflightService | None = None,
         workspace_skill_repository: WorkspaceSkillRepository | None = None,
-        sql_optimization_service: SqlOptimizationService | None = None,
         tool_evidence_store: ToolEvidenceStore | None = None,
         tool_execution_timeout: float | None = None,
         file_capability_service: ToolFileCapabilityService | None = None,
@@ -154,16 +149,11 @@ class ToolExecutor:
             sql_router=sql_router,
             rag_retriever=rag_retriever,
             semantic_preflight_service=semantic_preflight_service,
-            sql_optimization_service=(
-                sql_optimization_service
-                or SqlOptimizationService(workspace_skill_repository=workspace_skill_repository)
-            ),
         )
         self._sql_tools = ToolSqlCapabilityService(
             support=self._support,
             sql_router=sql_router,
             semantic_preflight_service=self._support.semantic_preflight_service,
-            sql_optimization_service=self._support.sql_optimization_service,
             logger=self._logger,
         )
         self._docs_tools = ToolDocsCapabilityService(
@@ -209,10 +199,6 @@ class ToolExecutor:
             ToolMcpCapabilityService(repository=mcp_connector_repository)
             if mcp_connector_repository is not None
             else None
-        )
-        self._support.bind_sql_optimizer_hooks(
-            on_start=lambda **kwargs: self._emit_sql_optimizer_start(**kwargs),
-            on_end=lambda **kwargs: self._emit_sql_optimizer_end(**kwargs),
         )
         capabilities = [
             BoundToolCapability(
@@ -417,6 +403,10 @@ class ToolExecutor:
                 handler=self._execute_read_workspace_skill,
             ),
             BoundToolCapability(
+                name="list_workspace_skill_files",
+                handler=self._execute_list_workspace_skill_files,
+            ),
+            BoundToolCapability(
                 name="inspect_tool_artifact",
                 handler=self._execute_inspect_tool_artifact,
             ),
@@ -469,17 +459,6 @@ class ToolExecutor:
                 for name in ToolFileCapabilityService.TOOL_NAMES
             )
         self._capability_registry = ToolCapabilityRegistry(capabilities)
-
-    def set_sql_optimizer_event_handlers(
-        self,
-        *,
-        on_start: Callable[[dict[str, Any]], None] | None = None,
-        on_end: Callable[[OptimizationTrace, str], None] | None = None,
-    ) -> None:
-        self._sql_tools.set_sql_optimizer_event_handlers(
-            on_start=on_start,
-            on_end=on_end,
-        )
 
     def execute_tool(
         self,
@@ -729,22 +708,6 @@ class ToolExecutor:
             db_connectors=db_connectors,
             state=state,
         )
-
-    def _emit_sql_optimizer_start(
-        self,
-        *,
-        selected_connector_name: str,
-        engine: str,
-        referenced_tables: list[str],
-    ) -> None:
-        self._sql_tools.emit_sql_optimizer_start(
-            selected_connector_name=selected_connector_name,
-            engine=engine,
-            referenced_tables=referenced_tables,
-        )
-
-    def _emit_sql_optimizer_end(self, *, trace: OptimizationTrace) -> None:
-        self._sql_tools.emit_sql_optimizer_end(trace=trace)
 
     def _execute_search_rag_insights(
         self,
@@ -1212,6 +1175,18 @@ class ToolExecutor:
             state=state,
         )
 
+    def _execute_list_workspace_skill_files(
+        self,
+        request: ChatAskRequest,
+        arguments: dict[str, Any],
+        state: ToolOrchestrationState,
+    ) -> dict[str, Any]:
+        return self._workspace_skill_tools.execute_list_workspace_skill_files(
+            request=request,
+            arguments=arguments,
+            state=state,
+        )
+
     def _file_handler(self, tool_name: str) -> Callable[..., dict[str, Any]]:
         def execute(
             *,
@@ -1261,6 +1236,9 @@ class ToolExecutor:
             json_pointer=json_pointer if isinstance(json_pointer, str) else None,
             offset=arguments.get("offset", 0),
             limit=arguments.get("limit", 12_000),
+            format=arguments.get("format", "text"),
+            fields=arguments.get("fields"),
+            parse_json=arguments.get("parse_json") is True,
         )
 
     def _execute_find_tool_artifact_text(

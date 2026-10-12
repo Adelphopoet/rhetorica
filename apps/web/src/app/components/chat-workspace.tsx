@@ -1,5 +1,7 @@
 "use client";
 
+import { CodingChatConfirmation, CodingModeControl, useCodingChat } from "@/features/coding/CodingChat";
+import { useConversationHistory } from "@/features/chat/useConversationHistory";
 import {
   lazy,
   startTransition,
@@ -50,7 +52,6 @@ import {
   deriveConversationTitle,
   cacheMessageIntermediateSteps,
   lazyLoadExecution,
-  listConversations,
   loadConversationThread,
   mergeHydratedMessages,
   removeConversation,
@@ -130,6 +131,7 @@ type ChatWorkspaceProps = {
   initialConversations: ConversationSummary[];
   initialScenarios: ScenarioDefinition[];
   initialAgents?: AgentProfile[];
+  workspaces?: Array<{ id: string; name: string; role: "owner" | "analyst" | "viewer" }>;
   initialComposerDock?: ComposerDock;
   initialResultPanelOpen?: boolean;
   initialSidebarCollapsed?: boolean;
@@ -161,14 +163,6 @@ function buildDetachedPendingMessage(conversationId: string): ChatMessageViewMod
   };
 }
 
-function upsertConversation(
-  conversations: ConversationSummary[] | undefined,
-  nextConversation: ConversationSummary
-): ConversationSummary[] {
-  const previous = conversations ?? [];
-  return [nextConversation, ...previous.filter((conversation) => conversation.id !== nextConversation.id)];
-}
-
 function ResultSurfaceFallback() {
   return (
     <aside className="fixed inset-y-3 right-3 z-40 flex w-full max-w-[min(100vw-24px,560px)] flex-col rounded-[28px] border border-border bg-surface/[0.94] p-6 shadow-[-24px_0_80px_rgb(var(--color-shadow)/calc(0.45*var(--shadow-opacity-scale)))] xl:static xl:inset-auto xl:z-0 xl:h-full xl:w-[520px] xl:max-w-none xl:rounded-none xl:rounded-r-[32px] xl:border-y-0 xl:border-r-0 xl:shadow-none">
@@ -188,6 +182,7 @@ export function ChatWorkspace({
   initialConversations,
   initialScenarios,
   initialAgents = [],
+  workspaces = [],
   initialComposerDock = "bottom",
   initialResultPanelOpen = false,
   initialSidebarCollapsed = false,
@@ -204,6 +199,16 @@ export function ChatWorkspace({
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [threadLoadingConversationId, setThreadLoadingConversationId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [selectedTeamId, setSelectedTeamId] = useState<string | null>(null);
+  const coding = useCodingChat(conversationId, selectedAgentId, workspaceName, selectedTeamId);
+  const restoredTeamId = coding.plan.data?.resources.coding_team_id ?? null;
+  useEffect(() => {
+    // A reopened conversation keeps the team of its latest coding plan.
+    if (conversationId && restoredTeamId && !selectedTeamId) setSelectedTeamId(restoredTeamId);
+  }, [conversationId, restoredTeamId, selectedTeamId]);
+  useEffect(() => {
+    if (coding.enabled && !conversationId && !selectedAgentId && coding.resources.data?.root_agent_id) setSelectedAgentId(coding.resources.data.root_agent_id);
+  }, [coding.enabled, coding.resources.data?.root_agent_id, conversationId, selectedAgentId]);
   const [messages, setMessages] = useState<ChatMessageViewModel[]>(getInitialMessages);
   const [feedbackPendingByMessageId, setFeedbackPendingByMessageId] = useState<
     Record<string, boolean>
@@ -262,11 +267,7 @@ export function ChatWorkspace({
   const scenariosQueryKey = scenarioListQueryKey(workspaceName);
   const agentsQueryKey = agentListQueryKey(workspaceName);
 
-  const conversationsQuery = useQuery({
-    queryKey: conversationsQueryKey,
-    queryFn: () => listConversations(workspaceName),
-    initialData: initialConversations,
-  });
+  const conversationsQuery = useConversationHistory(workspaceName, initialConversations);
   const scenariosQuery = useQuery({
     queryKey: scenariosQueryKey,
     queryFn: () => listScenarios(workspaceName),
@@ -287,12 +288,6 @@ export function ChatWorkspace({
   const createConversationMutation = useMutation({
     mutationFn: ({ title, agentId }: { title: string; agentId: string | null }) =>
       createConversation(workspaceName, title, agentId),
-    onSuccess: (createdConversation) => {
-      queryClient.setQueryData<ConversationSummary[]>(
-        conversationsQueryKey,
-        (current) => upsertConversation(current, createdConversation)
-      );
-    },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: conversationsQueryKey });
     },
@@ -316,19 +311,17 @@ export function ChatWorkspace({
     mutationFn: removeConversation,
     onMutate: async (targetConversationId) => {
       await queryClient.cancelQueries({ queryKey: conversationsQueryKey });
-      const previousConversations =
-        queryClient.getQueryData<ConversationSummary[]>(conversationsQueryKey) ?? [];
-
-      queryClient.setQueryData<ConversationSummary[]>(
-        conversationsQueryKey,
-        previousConversations.filter((conversation) => conversation.id !== targetConversationId)
+      const previousConversations = queryClient.getQueriesData<ConversationSummary[]>({ queryKey: conversationsQueryKey });
+      queryClient.setQueriesData<ConversationSummary[]>(
+        { queryKey: conversationsQueryKey },
+        current => current?.filter(conversation => conversation.id !== targetConversationId)
       );
 
       return { previousConversations };
     },
     onError: (error, _targetConversationId, context) => {
       if (context?.previousConversations) {
-        queryClient.setQueryData(conversationsQueryKey, context.previousConversations);
+        for (const [key, data] of context.previousConversations) queryClient.setQueryData(key, data);
       }
       addToast({
         type: "error",
@@ -504,6 +497,7 @@ export function ChatWorkspace({
   );
 
   const { streamingMessage, startStreaming, cancelStreaming, clearStreaming } = useChatStreaming({
+    codingResources: coding.enabled && coding.missing.length === 0 ? coding.selection : null,
     workspaceId: workspaceName,
     onComplete: (message, doneEvent, intermediateSteps) => {
       handleStreamingComplete(message, doneEvent, intermediateSteps);
@@ -596,6 +590,7 @@ setThreadLoadingConversationId(nextConversationId);
         setFeedbackPendingByMessageId({});
       });
       setSelectedAgentId(thread.detail.agent_id ?? null);
+      setSelectedTeamId(null);
       setMessageExecutionIds(newMessageExecutionIds);
       setSelectedResultMessageId(
         [...hydratedMessages].reverse().find((m) => m.role === "assistant" && m.payload)?.id ?? null
@@ -710,6 +705,19 @@ setThreadLoadingConversationId(nextConversationId);
   useEffect(() => {
     return onStaleAssetConfirmed(handleConfirmedStaleAsset);
   }, [handleConfirmedStaleAsset]);
+
+  const linkedConversationRef = useRef(false);
+  useEffect(() => {
+    // Links such as "Вернуться в чат" open a conversation with /?conversation=<id>.
+    if (typeof window === "undefined" || linkedConversationRef.current) return;
+    linkedConversationRef.current = true;
+    const url = new URL(window.location.href);
+    const linked = url.searchParams.get("conversation");
+    if (!linked) return;
+    url.searchParams.delete("conversation");
+    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    void handleSelectConversation(linked);
+  }, [handleSelectConversation]);
 
   useEffect(() => {
     if (typeof window === "undefined" || recoveryRanRef.current) {
@@ -899,6 +907,10 @@ setThreadLoadingConversationId(nextConversationId);
       if ((!cleanQuestion && drafts.length === 0) || loading) {
         return;
       }
+      if (coding.enabled && (coding.missing.length > 0 || drafts.length > 0)) {
+        addToast({ title: "Настрой coding перед обсуждением", description: drafts.length > 0 ? "Для планирования пока используй текст задания без вложений" : coding.missing.join(", "), type: "warning" });
+        return;
+      }
       inFlightChatActionRef.current = {
         type: "send",
         draftText: cleanQuestion,
@@ -1048,7 +1060,7 @@ setThreadLoadingConversationId(nextConversationId);
         );
       }
     },
-    [addToast, createConversationMutation, loading, pendingAttachments, question, selectedAgentId, setActiveConversationId, startStreaming, workspaceName]
+    [addToast, coding.enabled, coding.missing, createConversationMutation, loading, pendingAttachments, question, selectedAgentId, setActiveConversationId, startStreaming, workspaceName]
   );
 
   const handleRepairTurn = useCallback(
@@ -1402,7 +1414,7 @@ setThreadLoadingConversationId(nextConversationId);
     deleteConversationMutation.isPending ||
     createConversationMutation.isPending;
   const sidebarDeletionDisabled = sidebarInteractionDisabled || loading;
-  const conversations = Array.isArray(conversationsQuery.data) ? conversationsQuery.data : [];
+  const conversations = conversationsQuery.conversations;
   const agents = Array.isArray(agentsQuery.data) ? agentsQuery.data : [];
   const activeConversationTitle =
     conversations.find((conversation) => conversation.id === conversationId)?.title ?? null;
@@ -1532,6 +1544,7 @@ setThreadLoadingConversationId(nextConversationId);
           onResizeWidth={setSidebarWidth}
           maxWidth={maxSidebarWidth}
           workspaceName={workspaceName}
+          workspaces={workspaces}
           apiStatus={apiStatus}
           canAccessAdmin={canAccessAdmin}
           userLogin={currentUser.login}
@@ -1540,7 +1553,16 @@ setThreadLoadingConversationId(nextConversationId);
           userAuthProvider={currentUser.authProvider}
           conversations={conversations}
           activeConversationId={conversationId}
-          historyLoading={conversationsQuery.isLoading}
+          historyLoading={conversationsQuery.isLoading || conversationsQuery.searching}
+          historySearch={conversationsQuery.search}
+          onHistorySearchChange={conversationsQuery.setSearch}
+          historyPage={conversationsQuery.page}
+          historyHasNext={conversationsQuery.hasNext}
+          historyBusy={conversationsQuery.isFetching || conversationsQuery.searching}
+          historyError={conversationsQuery.error?.message}
+          onHistoryPrevious={conversationsQuery.previous}
+          onHistoryNext={conversationsQuery.next}
+          onHistoryRetry={() => { void conversationsQuery.refetch(); }}
           interactionDisabled={sidebarInteractionDisabled}
           deletionDisabled={sidebarDeletionDisabled}
           deletingConversationId={
@@ -1570,6 +1592,7 @@ setThreadLoadingConversationId(nextConversationId);
                 chatWidth={chatWidth}
                 conversationId={conversationId}
                 messages={displayMessages}
+                codingRuns={coding.runs.data ?? []}
                 userLabel={userLabel}
                 loading={loading && !streamingMessage}
                 threadLoading={threadLoadingConversationId !== null}
@@ -1579,11 +1602,14 @@ setThreadLoadingConversationId(nextConversationId);
                 onSelectClarification={handleSelectClarification}
                 onOpenScenarioCatalog={() => setScenarioCatalogOpen(true)}
                 onInspectResult={handleInspectResult}
-              />
+              >
+                <CodingChatConfirmation coding={coding} busy={loading} />
+              </ChatThread>
             </div>
 
             {composerDock === "bottom" ? (
               <ChatComposer
+                codingControls={<CodingModeControl coding={coding} loading={loading} />}
                 value={question}
                 loading={loading}
                 chatWidth={chatWidth}
@@ -1599,7 +1625,10 @@ setThreadLoadingConversationId(nextConversationId);
                 selectedAgentId={selectedAgentId}
                 agentLocked={Boolean(conversationId && displayMessages.length > 0)}
                 onChange={setQuestion}
-                onSelectAgent={setSelectedAgentId}
+                onSelectAgent={agentId => { coding.disable(); setSelectedTeamId(null); setSelectedAgentId(agentId); }}
+                teams={coding.teams}
+                selectedTeamId={selectedTeamId}
+                onSelectTeam={team => { setSelectedAgentId(team.coordinator_agent_profile_id === "__default_assistant__" ? null : team.coordinator_agent_profile_id ?? null); setSelectedTeamId(team.id); coding.enable(); }}
                 onToggleAgentStar={(agent) => {
                   setAgentStarMutation.mutate({
                     agentId: agent.id,
@@ -1638,6 +1667,7 @@ setThreadLoadingConversationId(nextConversationId);
               className="hidden w-full shrink-0 flex-col overflow-hidden lg:flex lg:w-auto"
             >
               <ChatComposer
+                codingControls={<CodingModeControl coding={coding} loading={loading} />}
                 value={question}
                 loading={loading}
                 chatWidth={chatWidth}
@@ -1653,7 +1683,10 @@ setThreadLoadingConversationId(nextConversationId);
                 selectedAgentId={selectedAgentId}
                 agentLocked={Boolean(conversationId && displayMessages.length > 0)}
                 onChange={setQuestion}
-                onSelectAgent={setSelectedAgentId}
+                onSelectAgent={agentId => { coding.disable(); setSelectedTeamId(null); setSelectedAgentId(agentId); }}
+                teams={coding.teams}
+                selectedTeamId={selectedTeamId}
+                onSelectTeam={team => { setSelectedAgentId(team.coordinator_agent_profile_id === "__default_assistant__" ? null : team.coordinator_agent_profile_id ?? null); setSelectedTeamId(team.id); coding.enable(); }}
                 onToggleAgentStar={(agent) => {
                   setAgentStarMutation.mutate({
                     agentId: agent.id,

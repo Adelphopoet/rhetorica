@@ -56,10 +56,17 @@ class DocumentationRetrievalService:
             connector_id=connector.id,
         )
         connector = connector.model_copy(update={"connection": connection})
-        lexical = self._repository.search_chunks(
+        execution_scope = self._repository.execution_scope(
             workspace_id=workspace_id,
+            name=connector.name,
+        )
+        if execution_scope is None:
+            return [], [*connector_warnings, "documentation_connector_missing"]
+        source_workspace_id, source_connector_name = execution_scope
+        lexical = self._repository.search_chunks(
+            workspace_id=source_workspace_id,
             query=query,
-            connector_name=connector.name,
+            connector_name=source_connector_name,
             limit=bounded_limit * 2,
         )
         semantic: list[dict[str, Any]] = []
@@ -67,13 +74,13 @@ class DocumentationRetrievalService:
         try:
             vector = OpenAiCompatibleEmbeddingProvider(connector.connection).embed(query)
             semantic_hits = QdrantDocumentationStore(connector.connection).search(
-                workspace_id=workspace_id,
-                connector_name=connector.name,
+                workspace_id=source_workspace_id,
+                connector_name=source_connector_name,
                 vector=vector,
                 limit=bounded_limit * 2,
             )
             by_point = self._repository.get_chunks_by_point_ids(
-                workspace_id=workspace_id,
+                workspace_id=source_workspace_id,
                 point_ids=[hit["point_id"] for hit in semantic_hits],
             )
             for hit in semantic_hits:
@@ -81,10 +88,17 @@ class DocumentationRetrievalService:
                 record = by_point.get(point_id)
                 if record is None:
                     continue
-                semantic.append({**record, "semantic_score": hit["semantic_score"]})
+                semantic.append(
+                    {
+                        **record,
+                        "connector_name": connector.name,
+                        "semantic_score": hit["semantic_score"],
+                    }
+                )
         except Exception:
             warnings.append("documentation_semantic_search_unavailable")
 
+        lexical = [{**item, "connector_name": connector.name} for item in lexical]
         merged = self._merge_results(lexical=lexical, semantic=semantic)
         return merged[:bounded_limit], [*connector_warnings, *warnings]
 
@@ -116,10 +130,20 @@ class DocumentationRetrievalService:
         section: str | None = None,
         max_tokens: int | None = None,
     ) -> tuple[dict[str, Any] | None, list[str]]:
+        source_workspace_id = workspace_id
+        source_connector_name = connector_name
+        if connector_name:
+            execution_scope = self._repository.execution_scope(
+                workspace_id=workspace_id,
+                name=connector_name,
+            )
+            if execution_scope is None:
+                return None, ["documentation_page_missing"]
+            source_workspace_id, source_connector_name = execution_scope
         page = self._repository.get_page(
-            workspace_id=workspace_id,
+            workspace_id=source_workspace_id,
             page_ref=page_ref,
-            connector_name=connector_name,
+            connector_name=source_connector_name,
         )
         if page is None:
             return None, ["documentation_page_missing"]
@@ -129,7 +153,7 @@ class DocumentationRetrievalService:
         budget = max(200, min(4000, int(max_tokens or self._DEFAULT_CONTEXT_BUDGET_TOKENS)))
         packed_body, truncated = self._pack_text(body, budget)
         result = {
-            "connector_name": page["connector_name"],
+            "connector_name": connector_name or page["connector_name"],
             "page_ref": page["page_ref"],
             "url": page["url"],
             "title": page["title"],

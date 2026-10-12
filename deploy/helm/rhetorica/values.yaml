@@ -24,10 +24,6 @@ namespaceControls:
 
 infra:
   enabled: false
-  # Override only when a separately managed infra Deployment serves this Service.
-  serviceSelector:
-    component: infra
-    instance: ""
   tolerations: null
   imagePullPolicy: IfNotPresent
   storageClassName: ""
@@ -92,7 +88,6 @@ infra:
   minio:
     image: quay.io/minio/minio:RELEASE.2025-02-28T09-55-16Z
     initImage: quay.io/minio/mc:RELEASE.2025-03-12T17-29-24Z
-    initJobEnabled: true
     rootUser: minio
     rootPassword: minio123
     bucket: rhetorica-dev
@@ -106,13 +101,6 @@ infra:
       limits:
         cpu: 500m
         memory: 1Gi
-
-database:
-  # DATABASE_URL stays in a namespace Secret, outside Helm values and ConfigMap.
-  existingSecret: ""
-  urlKey: DATABASE_URL
-  caConfigMap: ""
-  caMountPath: /etc/rhetorica/managed-postgres
 
 api:
   enabled: true
@@ -196,75 +184,111 @@ worker:
       memory: 1Gi
       ephemeral-storage: 3Gi
 
-# The API depends only on the internal SandboxGateway HTTP contract. For the
-# pilot this image runs NsJail; production may replace it with a gVisor/Kata
-# control-plane image without changing API/backend code.
-sandbox:
+# Shared file/Python runtime. Coding Jobs use the same image and process executor.
+# Production enables a gVisor RuntimeClass; local Compose is an integration boundary.
+executionRuntime:
   enabled: false
-  tolerations: null
-  deploymentMode: local
-  replicaCount: 1
   image:
-    repository: ghcr.io/adelphopoet/rhetorica/sandbox
+    repository: ghcr.io/adelphopoet/rhetorica/coding-runner
     tag: latest
     pullPolicy: IfNotPresent
   service:
-    port: 8090
-  runtimeClassName: ""
-  maxParallelRuns: 2
+    port: 8091
+  runtimeClassName: runsc
+  nodeSelector:
+    rhetorica.io/coding-runtime: gvisor
+  tolerations:
+    - key: rhetorica.io/coding-runtime
+      operator: Equal
+      value: gvisor
+      effect: NoSchedule
+  maxActiveJobs: 10
+  startupTimeoutSeconds: 60
+  reconcileIntervalSeconds: 30
   processTimeoutSeconds: 60
   sessionTtlMinutes: 20
   cleanupIntervalSeconds: 60
   maxWorkspaceBytes: "536870912"
-  maxTmpBytes: "134217728"
   maxLogBytes: "65536"
   maxOutputFiles: "100"
   maxSessionOutputFiles: "200"
   memoryLimitBytes: "1073741824"
-  pidsLimit: "64"
-  cpuMsPerSecond: "1000"
-  manageLegacyCgroupParents: "true"
-  workspaceMedium: Memory
+  pidLimit: "64"
   workspaceSizeLimit: 1Gi
-  podSecurityContext: {}
-  securityContext:
-    privileged: true
-    readOnlyRootFilesystem: true
-    allowPrivilegeEscalation: true
-    runAsUser: 0
+  controller:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 384Mi}
+  networkPolicy:
+    objectStoragePodSelector:
+      app.kubernetes.io/component: infra
+    objectStoragePorts: [9000]
+    dnsNamespaceSelector:
+      kubernetes.io/metadata.name: kube-system
+    dnsPodSelector:
+      k8s-app: kube-dns
   resources:
     requests:
       cpu: "1"
       memory: 1Gi
+      ephemeral-storage: 512Mi
     limits:
       cpu: "2"
       memory: 2304Mi
       ephemeral-storage: 2Gi
-  kubernetesJobs:
-    maxSessions: 10
-    startupTimeoutSeconds: 60
-    controller:
-      tolerations: null
-      resources:
-        requests:
-          cpu: 100m
-          memory: 128Mi
-        limits:
-          cpu: 250m
-          memory: 256Mi
-    runner:
-      processMemoryLimitBytes: "805306368"
-      cpuMsPerSecond: "400"
-      workspaceSizeLimit: 768Mi
-      resources:
-        requests:
-          cpu: 400m
-          memory: 1Gi
-          ephemeral-storage: 512Mi
-        limits:
-          cpu: 425m
-          memory: 1152Mi
-          ephemeral-storage: 1Gi
+
+# Governed coding control plane. Task Jobs use the same runner image and
+# process executor as file/Python, always under gVisor in Kubernetes.
+codingRunner:
+  enabled: false
+  gateway:
+    # Query handles are process-local; horizontal scaling requires a shared registry.
+    replicaCount: 1
+    publicBaseUrl: ""
+    # The gateway resolves DWH connector secrets itself. Configure the selected
+    # SecretStore backend and only the credentials required by coding here.
+    # Do not inherit API/worker LLM, GitLab, or MCP secret sources.
+    env: []
+    extraEnvFrom: []
+    service:
+      port: 8082
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 300m, memory: 384Mi}
+  runner:
+    imageDigest: ""
+    softwareManifestDigest: ""
+    # JSON tool manifest whose sha256 equals softwareManifestDigest; mounted into the API
+    # so environment profiles record deployment-owned tool versions.
+    softwareManifest: ""
+    runtimeClassName: runsc
+    nodeSelector:
+      rhetorica.io/coding-runtime: gvisor
+    tolerations:
+      - key: rhetorica.io/coding-runtime
+        operator: Equal
+        value: gvisor
+        effect: NoSchedule
+  worker:
+    # Requires a Temporal frontend (same as scenarioWorkflows.worker).
+    enabled: false
+    replicaCount: 1
+    extraEnvFrom: []
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {cpu: 500m, memory: 768Mi}
+  service:
+    port: 8091
+  networkPolicy:
+    gatewayPodSelector:
+      app.kubernetes.io/component: coding-gateway
+    artifactRelayPodSelector:
+      app.kubernetes.io/component: execution-controller
+    packageMirrorPodSelector:
+      app.kubernetes.io/component: package-mirror
+    gatewayPorts: [8082]
+    artifactRelayPorts: [8091]
+    packageMirrorPorts: [8080]
 
 web:
   enabled: true
@@ -300,6 +324,22 @@ web:
       memory: 512Mi
 
 config:
+  # Optimized direct tools + deferred loading; these settings are shared by all workers.
+  # Explicit false is a rollback override, including upgrades with --reuse-values.
+  chatContextHarnessEnabled: true
+  chatToolOutputPolicyEnabled: true
+  chatToolDispatchEnabled: false
+  chatCertifiedToolConcurrencyEnabled: true
+  chatMaxIterations: 100
+  chatContextCompactionEnabled: true
+  chatContextTrimTriggerRatio: 0.7
+  chatContextCompactionTriggerRatio: 0.8
+  chatContextTargetRatio: 0.5
+  chatContextCompactionMaxCalls: 10
+  # Raw artifact retention, independent of the bounded model-facing envelope.
+  chatToolArtifactMaxChars: 16000000
+  chatToolArtifactTtlHours: 168
+  chatToolArtifactMaxRecordsPerConversation: 100
   appEnv: prod
   logLevel: INFO
   logJson: true
@@ -353,7 +393,7 @@ config:
   s3Bucket: ""
   s3Region: us-east-1
   s3Secure: "false"
-  sandboxUrl: ""
+  executionRuntimeUrl: ""
   fileMaxInputBytes: "26214400"
   fileMaxFilesPerTurn: "5"
   fileMaxTurnBytes: "52428800"
@@ -416,6 +456,11 @@ secrets:
   documentationQdrantApiKey: ""
   s3AccessKey: ""
   s3SecretKey: ""
+  codingControllerInternalToken: ""
+  codingControllerSecret: ""
+  codingQueryGatewayInternalToken: ""
+  codingQueryGatewaySigningSecret: ""
+  codingArtifactSigningSecret: ""
   # Empty means: generate once and reuse on Helm upgrades.
-  sandboxInternalToken: ""
+  executionRuntimeInternalToken: ""
   llmApiKey: ""

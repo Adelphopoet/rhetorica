@@ -31,6 +31,32 @@ def llm_client(llm_connection):
 class TestLlmClient:
     """Tests for LlmClient."""
 
+    @pytest.mark.parametrize("store", [None, False, True])
+    @pytest.mark.parametrize("responses", [False, True])
+    def test_direct_transport_sends_optional_store(self, llm_connection, store, responses):
+        llm_connection.extra_settings = {} if store is None else {"store": store}
+        http_client = MagicMock()
+        http_client.post.return_value = _fake_response(
+            body={
+                "id": "resp-test",
+                "output_text": "ok",
+                "choices": [{"message": {"content": "ok"}}],
+            },
+        )
+        with patch("httpx.Client") as http_client_cls:
+            http_client_cls.return_value.__enter__.return_value = http_client
+            client = LlmClient(llm_connection)
+            messages = [{"role": "user", "content": "hi"}]
+            if responses:
+                client.responses_completion(messages=messages)
+            else:
+                client.chat_completion(messages=messages)
+        payload = http_client.post.call_args.kwargs["json"]
+        if store is None:
+            assert "store" not in payload
+        else:
+            assert payload["store"] is store
+
     def test_build_endpoint_with_path(self, llm_client):
         """Test endpoint building with relative path."""
         result = llm_client._build_endpoint("https://api.example.com/", "/chat/completions")

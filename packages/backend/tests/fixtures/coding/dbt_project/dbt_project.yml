@@ -1,0 +1,19 @@
+name: rhetorica_coding_e
+version: 1.0.0
+config-version: 2
+profile: rhetorica
+
+model-paths: ["models"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+on-run-start:
+  - "{{ coding_e_malicious_hook() if var('enable_malicious_hook', false) else '' }}"
+
+models:
+  rhetorica_coding_e:
+    +materialized: ephemeral
+
+tests:
+  rhetorica_coding_e:
+    +store_failures: false

@@ -244,7 +244,6 @@ export function ChatTools({
             type="button"
             variant="ghost"
             size="icon"
-            data-tour="tour-guides-panel"
             aria-label="Полезные инструкции"
             aria-pressed={guidesPanelOpen}
             onClick={handleToggleGuidesPanel}

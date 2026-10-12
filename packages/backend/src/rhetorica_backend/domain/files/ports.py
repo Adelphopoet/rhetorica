@@ -71,10 +71,12 @@ class ArtifactRepository(Protocol):
         source_artifact_ids: Iterable[str] = (),
     ) -> Artifact: ...
 
-    def get_owned(self, artifact_id: str, owner_user_id: str) -> Artifact | None: ...
+    def get_owned(
+        self, artifact_id: str, owner_user_id: str, workspace_id: str
+    ) -> Artifact | None: ...
 
     def list_conversation(
-        self, *, conversation_id: str, owner_user_id: str, limit: int = 100
+        self, *, workspace_id: str, conversation_id: str, owner_user_id: str, limit: int = 100
     ) -> list[Artifact]: ...
 
     def usage_bytes(self, *, workspace_id: str, owner_user_id: str | None = None) -> int: ...
@@ -86,10 +88,13 @@ class ArtifactRepository(Protocol):
         message_id: str,
         conversation_id: str,
         owner_user_id: str,
+        workspace_id: str,
         relation: str,
     ) -> list[Artifact]: ...
 
-    def delete_staged(self, *, artifact_id: str, owner_user_id: str) -> Artifact | None: ...
+    def delete_staged(
+        self, *, artifact_id: str, owner_user_id: str, workspace_id: str
+    ) -> Artifact | None: ...
 
     def mark_failed(self, artifact_id: str) -> None: ...
 

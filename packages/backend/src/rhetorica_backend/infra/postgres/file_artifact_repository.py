@@ -189,18 +189,19 @@ class FileArtifactRepository:
             session.delete(row)
             session.commit()
 
-    def get_owned(self, artifact_id: str, owner_user_id: str) -> Artifact | None:
+    def get_owned(self, artifact_id: str, owner_user_id: str, workspace_id: str) -> Artifact | None:
         with self._db.session() as session:
             row = session.execute(
                 select(FileArtifactOrm).where(
                     FileArtifactOrm.id == artifact_id,
                     FileArtifactOrm.owner_user_id == owner_user_id,
+                    FileArtifactOrm.workspace_id == workspace_id,
                 )
             ).scalar_one_or_none()
         return self._to_domain(row) if row is not None else None
 
     def list_conversation(
-        self, *, conversation_id: str, owner_user_id: str, limit: int = 100
+        self, *, workspace_id: str, conversation_id: str, owner_user_id: str, limit: int = 100
     ) -> list[Artifact]:
         bounded_limit = max(1, min(limit, 200))
         with self._db.session() as session:
@@ -210,6 +211,7 @@ class FileArtifactRepository:
                     .where(
                         FileArtifactOrm.conversation_id == conversation_id,
                         FileArtifactOrm.owner_user_id == owner_user_id,
+                        FileArtifactOrm.workspace_id == workspace_id,
                         FileArtifactOrm.status.in_([
                             ArtifactStatus.STAGED.value,
                             ArtifactStatus.READY.value,
@@ -258,6 +260,7 @@ class FileArtifactRepository:
         message_id: str,
         conversation_id: str,
         owner_user_id: str,
+        workspace_id: str,
         relation: str,
     ) -> list[Artifact]:
         ids = list(dict.fromkeys(artifact_ids))
@@ -274,6 +277,7 @@ class FileArtifactRepository:
                     ChatMessageOrm.id == message_id,
                     ChatMessageOrm.conversation_id == conversation_id,
                     ChatConversationOrm.owner_user_id == owner_user_id,
+                    ChatConversationOrm.workspace_id == workspace_id,
                     ChatConversationOrm.deleted_at.is_(None),
                 )
             ).scalar_one_or_none()
@@ -286,6 +290,7 @@ class FileArtifactRepository:
                         FileArtifactOrm.id.in_(ids),
                         FileArtifactOrm.conversation_id == conversation_id,
                         FileArtifactOrm.owner_user_id == owner_user_id,
+                        FileArtifactOrm.workspace_id == workspace_id,
                         FileArtifactOrm.status.in_([
                             ArtifactStatus.STAGED.value,
                             ArtifactStatus.READY.value,
@@ -320,7 +325,9 @@ class FileArtifactRepository:
             session.commit()
             return [self._to_domain(by_id[item]) for item in ids]
 
-    def delete_staged(self, *, artifact_id: str, owner_user_id: str) -> Artifact | None:
+    def delete_staged(
+        self, *, artifact_id: str, owner_user_id: str, workspace_id: str
+    ) -> Artifact | None:
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
             row = session.execute(
@@ -328,6 +335,7 @@ class FileArtifactRepository:
                 .where(
                     FileArtifactOrm.id == artifact_id,
                     FileArtifactOrm.owner_user_id == owner_user_id,
+                    FileArtifactOrm.workspace_id == workspace_id,
                     FileArtifactOrm.status == ArtifactStatus.STAGED.value,
                     ~FileArtifactOrm.id.in_(select(ChatMessageFileOrm.artifact_id)),
                 )

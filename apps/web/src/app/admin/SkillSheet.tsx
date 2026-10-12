@@ -1,5 +1,7 @@
 "use client";
 
+import { adminLabel } from "./adminLabels";
+
 import { Alert, Badge, Button, Input, Sheet, Switch, Textarea } from "@rhetorica/ui";
 
 import type { WorkspaceSkillItem } from "./types";
@@ -30,6 +32,16 @@ function manualSkillUseWhen(skill: WorkspaceSkillItem | null) {
   return typeof raw === "string" ? raw : skill?.summary ?? "";
 }
 
+function gitLabImportDefaults(skill: WorkspaceSkillItem | null) {
+  const match = skill?.source_url?.match(/^gitlab:\/\/([^/]+)\/(.+)@([^/]+)\/(.*)$/);
+  return {
+    connector: match?.[1] ?? "",
+    project: match?.[2] ?? "",
+    ref: match?.[3] ?? "",
+    path: match?.[4] ?? "",
+  };
+}
+
 export function SkillSheet({
   open,
   onOpenChange,
@@ -41,10 +53,7 @@ export function SkillSheet({
 }: SkillSheetProps) {
   const isEdit = editingSkill != null;
   const sessionKey = `${editingSkill?.id ?? "new-skill"}:${sessionNonce}`;
-  const [capabilityFamily, setCapabilityFamily] = useSessionState<WorkspaceSkillItem["capability_family"]>(
-    sessionKey,
-    () => editingSkill?.capability_family ?? "sql_optimization_advisor"
-  );
+  const gitLab = gitLabImportDefaults(editingSkill);
   const [sourceKind, setSourceKind] = useSessionState<WorkspaceSkillItem["source_kind"]>(
     sessionKey,
     () => editingSkill?.source_kind ?? "github_markdown_url"
@@ -55,10 +64,10 @@ export function SkillSheet({
       open={open}
       onOpenChange={onOpenChange}
       title={isEdit ? "Редактирование навыка рабочего пространства" : "Добавление навыка рабочего пространства"}
-      description="Навыки задают переиспользуемые правила оптимизации. Источник должен быть каноническим, а приоритет — явным"
+      description="Навыки задают версионируемые инструкции. Источник должен быть каноническим, а приоритет — явным"
       keepMounted
     >
-      <div className="space-y-5">
+      <div className="space-y-3">
         {error ? (
           <Alert variant="danger" title="Ошибка сохранения" description={error} />
         ) : null}
@@ -69,11 +78,11 @@ export function SkillSheet({
             event.preventDefault();
             void onSubmit(new FormData(event.currentTarget));
           }}
-          className="space-y-5"
+          className="space-y-3"
         >
           <input type="hidden" name="skill_id" value={editingSkill?.id ?? ""} />
 
-          <div className="grid gap-4 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-2">
             <Input
               data-autofocus
               label="Название"
@@ -82,38 +91,8 @@ export function SkillSheet({
               placeholder="clickhouse-optimizer-playbook"
               required
             />
-            <label>
-              <span className="mb-2 block text-sm font-medium text-primary">Назначение</span>
-              <NativeSelect
-                name="capability_family"
-                value={capabilityFamily}
-                onChange={(event) => {
-                  setCapabilityFamily(
-                    event.currentTarget.value as WorkspaceSkillItem["capability_family"]
-                  );
-                }}
-              >
-                <option value="sql_optimization_advisor">Оптимизация SQL</option>
-                <option value="chat_instruction">Инструкции для чата</option>
-              </NativeSelect>
-            </label>
-            {capabilityFamily === "chat_instruction" ? (
-              <input type="hidden" name="engine_scope" value="any" />
-            ) : (
-              <label>
-                <span className="mb-2 block text-sm font-medium text-primary">Область применения</span>
-                <NativeSelect
-                  name="engine_scope"
-                  defaultValue={editingSkill?.engine_scope ?? "clickhouse"}
-                >
-                  <option value="clickhouse">ClickHouse</option>
-                  <option value="trino">Trino</option>
-                  <option value="greenplum">Greenplum</option>
-                  <option value="impala">Impala</option>
-                  <option value="any">Любой</option>
-                </NativeSelect>
-              </label>
-            )}
+            <input type="hidden" name="capability_family" value="chat_instruction" />
+            <input type="hidden" name="engine_scope" value="any" />
             <Input
               label="Приоритет"
               type="number"
@@ -123,23 +102,21 @@ export function SkillSheet({
               defaultValue={editingSkill?.priority ?? 100}
             />
             <label>
-              <span className="mb-2 block text-sm font-medium text-primary">Статус</span>
+              <span className="mb-1 block text-sm font-medium text-primary">Статус</span>
               <NativeSelect name="status" defaultValue={editingSkill?.status ?? "active"}>
                 <option value="active">активен</option>
                 <option value="inactive">неактивен</option>
               </NativeSelect>
             </label>
-            {capabilityFamily === "chat_instruction" ? (
-              <div className="rounded-[18px] border border-border-strong bg-surface px-4 py-3">
-                <Switch
-                  name="visible_to_default_assistant"
-                  defaultChecked={editingSkill?.visible_to_default_assistant ?? true}
-                  label="Ассистент по умолчанию"
-                />
-              </div>
-            ) : null}
+            <div className="rounded-lg border border-border-strong bg-surface px-4 py-3">
+              <Switch
+                name="visible_to_default_assistant"
+                defaultChecked={editingSkill?.visible_to_default_assistant ?? true}
+                label="Ассистент по умолчанию"
+              />
+            </div>
             <label className="md:col-span-2">
-              <span className="mb-2 block text-sm font-medium text-primary">Источник</span>
+              <span className="mb-1 block text-sm font-medium text-primary">Источник</span>
               <NativeSelect
                 name="source_kind"
                 value={sourceKind}
@@ -150,12 +127,13 @@ export function SkillSheet({
                 }}
               >
                 <option value="github_markdown_url">URL GitHub Markdown</option>
+                <option value="gitlab_bundle">Пакет GitLab (зафиксированный коммит)</option>
                 <option value="manual_markdown">Ручной текст</option>
               </NativeSelect>
             </label>
             <div className="md:col-span-2">
               {sourceKind === "manual_markdown" ? (
-                <div className="grid gap-4">
+                <div className="grid gap-3">
                   <Input
                     label="Применять, когда"
                     name="use_when"
@@ -175,6 +153,16 @@ export function SkillSheet({
                     required
                   />
                 </div>
+              ) : sourceKind === "gitlab_bundle" ? (
+                <div className="grid gap-3 md:grid-cols-2">
+                  <Input label="Подключение GitLab" name="connector_name" defaultValue={gitLab.connector} required />
+                  <Input label="Путь проекта" name="project_path" defaultValue={gitLab.project} placeholder="group/project" required />
+                  <Input label="SHA коммита или ref" name="ref" defaultValue={gitLab.ref} required />
+                  <Input label="Каталог пакета" name="path" defaultValue={gitLab.path} placeholder="skills/data-quality" />
+                  <p className="md:col-span-2 text-xs text-secondary">
+                    Импорт однократно разрешает ref в SHA коммита, читает только Markdown и текстовые файлы и не запускает файлы репозитория
+                  </p>
+                </div>
               ) : (
                 <Input
                   label="URL GitHub Markdown"
@@ -187,8 +175,8 @@ export function SkillSheet({
             </div>
           </div>
 
-          <div className="grid gap-3 rounded-[24px] border border-border bg-surface/90 p-4">
-            <div className="flex items-center justify-between gap-3">
+          <div className="grid gap-3 rounded-lg border border-border bg-surface/90 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">
                   Контракт выполнения
@@ -200,7 +188,7 @@ export function SkillSheet({
             <dl className="grid gap-3 text-sm text-primary md:grid-cols-2">
               <div>
                 <dt className="text-xs uppercase tracking-[0.16em] text-muted">Проверка</dt>
-                <dd className="mt-1">{editingSkill?.validation_status ?? "ожидает"}</dd>
+                <dd className="mt-1">{adminLabel(editingSkill?.validation_status ?? "pending")}</dd>
               </div>
               <div>
                 <dt className="text-xs uppercase tracking-[0.16em] text-muted">Последняя проверка</dt>
@@ -213,7 +201,7 @@ export function SkillSheet({
             </dl>
           </div>
 
-          <div className="flex items-center justify-end gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <Button
               type="button"
               variant="ghost"

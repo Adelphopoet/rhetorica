@@ -85,6 +85,7 @@ class UserAccountOrm(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     workspace_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    last_workspace_id: Mapped[str | None] = mapped_column(String(128))
     login: Mapped[str] = mapped_column(String(128), nullable=False)
     password_hash: Mapped[str | None] = mapped_column(String(512))
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="admin")
@@ -622,6 +623,9 @@ class GitLabConnectorConfigOrm(Base):
     default_group_paths: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     search_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     read_max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=1600)
+    coding_archive_max_files: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=20_000, server_default="20000"
+    )
     extra_settings: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -907,9 +911,32 @@ class WorkspaceSkillOrm(Base):
     content_markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
     content_bundle: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     content_sha256: Mapped[str | None] = mapped_column(String(128))
+    current_version_digest: Mapped[str | None] = mapped_column(String(128), index=True)
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WorkspaceSkillVersionOrm(Base):
+    """Immutable skill content retained for pinned turn/task reads."""
+
+    __tablename__ = "workspace_skill_version"
+    __table_args__ = (
+        UniqueConstraint(
+            "skill_id",
+            "version_digest",
+            name="uq_workspace_skill_version_digest",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    skill_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    version_digest: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(String(1024))
+    content_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    content_bundle: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class MetricDefinitionOrm(Base):

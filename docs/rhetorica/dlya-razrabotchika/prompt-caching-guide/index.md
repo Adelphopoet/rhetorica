@@ -294,3 +294,39 @@ input_cost = (U × price_input + R × price_read + W × price_write) / 1_000_000
 | [An update on recent Claude Code quality reports](https://www.anthropic.com/engineering/april-23-postmortem) | 23.04.2026 | Реальный регресс из-за очистки истории после простоя |
 
 Статьи объясняют архитектуру на момент публикации. Названия параметров, поддержку моделей, TTL и цены берите из актуальной документации конкретного endpoint, ссылки на которую приведены выше.
+
+## Настройки context harness
+
+В конфигурации проекта выбран оптимизированный прямой режим с отложенной загрузкой tools. `compose.yaml` и Helm передают одинаковые настройки API, worker и scenario-worker; приватный Docker override не нужен. Это явное решение о развёртывании после ограниченной проверки DeepSeek, полная сравнительная приёмка остаётся незавершённой.
+
+| Переменная Compose / `.env` | Helm `config.*` | Значение проекта |
+| --- | --- | --- |
+| `CHAT_CONTEXT_HARNESS_ENABLED` | `chatContextHarnessEnabled` | `true` |
+| `CHAT_TOOL_OUTPUT_POLICY_ENABLED` | `chatToolOutputPolicyEnabled` | `true` |
+| `CHAT_CERTIFIED_TOOL_CONCURRENCY_ENABLED` | `chatCertifiedToolConcurrencyEnabled` | `true` |
+| `CHAT_TOOL_DISPATCH_ENABLED` | `chatToolDispatchEnabled` | `false` |
+| `CHAT_MAX_ITERATIONS` | `chatMaxIterations` | `100` |
+| `CHAT_CONTEXT_COMPACTION_ENABLED` | `chatContextCompactionEnabled` | `true` |
+| `CHAT_CONTEXT_TRIM_TRIGGER_RATIO` | `chatContextTrimTriggerRatio` | `0.7` |
+| `CHAT_CONTEXT_COMPACTION_TRIGGER_RATIO` | `chatContextCompactionTriggerRatio` | `0.8` |
+| `CHAT_CONTEXT_TARGET_RATIO` | `chatContextTargetRatio` | `0.5` |
+| `CHAT_CONTEXT_COMPACTION_MAX_CALLS` | `chatContextCompactionMaxCalls` | `10` |
+| `CHAT_TOOL_ARTIFACT_MAX_CHARS` | `chatToolArtifactMaxChars` | `16000000` |
+| `CHAT_TOOL_ARTIFACT_TTL_HOURS` | `chatToolArtifactTtlHours` | `168` |
+| `CHAT_TOOL_ARTIFACT_MAX_RECORDS_PER_CONVERSATION` | `chatToolArtifactMaxRecordsPerConversation` | `100` |
+
+Для отката задайте `false` у context harness, output policy и certified concurrency в `.env` либо соответствующих Helm values и повторно разверните backend. В Compose примените `docker compose --profile apps up -d --no-deps api worker scenario-worker`; простой `restart` не перечитывает окружение. В Helm изменения общей ConfigMap обновляют все backend pods. Старые values без новых ключей получают значения проекта даже при `--reuse-values`; явный `false` сохраняется. Настройки `api.env` и `worker.env` могут переопределять ConfigMap — удалите конфликтующий override или задайте одинаковое значение для всех обработчиков. Закреплённый ранее dispatch-разговор сохраняет свой режим, поэтому сравнивайте режимы в новых разговорах.
+
+Параметры LLM-подключения остаются в административной форме коннектора: окно контекста, резерв ответа, роли, reasoning и retries. В `Additional LLM settings JSON` задаются в том числе `runtime_context_role`, `runtime_requires_last_user`, `runtime_reasoning_replay` и `runtime_compaction_reasoning_effort`. На проверенном локальном DeepSeek для компактора выбрано `none`; значение не навязывается другим подключениям через окружение проекта.
+
+`CHAT_CONTEXT_HARNESS_ENABLED=true` включает стабильную проекцию служебных сообщений и перенос описаний коннекторов из каждого вопроса в каталог возможностей. Время фиксируется на начало хода. Для совместимых провайдеров роль служебного сообщения задаётся в `extra_settings.runtime_context_role`; `runtime_requires_last_user=true` сохраняет обязательное завершающее сообщение `user` без замены ранее отправленного контекста. Наличие `/responses` не включает hosted-возможности OpenAI.
+
+Полные результаты инструментов хранятся как artifacts; `CHAT_TOOL_OUTPUT_POLICY_ENABLED=true` ограничивает всю модельную JSON-оболочку до 16 000 символов, для каждого MCP — до 12 000. Ограничение охватывает SQL, файлы, документацию, логи и новые инструменты. Выбранные скиллы сохраняются целиком как инструкции с проверкой общего бюджета контекста. В `read_tool_artifact` используйте `format=json`, точный `json_pointer` и `fields`. `offset/limit` считают элементы массива либо символы строки; продолжение определяется `next_offset`. Для JSON внутри текстового MCP-блока доступен `parse_json=true`. Статус `durable=false` означает, что artifact доступен только в текущем ходе; лимит постоянного хранения задаёт `CHAT_TOOL_ARTIFACT_MAX_CHARS`.
+
+Для подключений без нативного режима при 70% входного бюджета сокращаются старые результаты, при 80% создаётся checkpoint старого префикса. Последний настоящий запрос, действующие скиллы и три последних завершённых tool batch защищены. Лимит — 100 основных вызовов, включая финализацию на шагах 99–100; отдельный compactor ограничен десятью вызовами с ответом до 2048 токенов. Для проверенного Responses-провайдера владелец workspace может включить `Native context compaction` и задать абсолютный порог в токенах. Тогда `context_management` передаётся через OpenAI Agents SDK, а legacy trim и compactor не запускаются.
+
+Если reasoning провайдера расходует весь лимит компактора, подключение может явно задать `extra_settings.runtime_compaction_reasoning_effort`, например `none` после проверки поддержки. Настройка применяется только к вспомогательному SDK-агенту; reasoning основного агента сохраняется. При отсутствии настройки используется прежняя конфигурация подключения. Один checkpoint без новой завершённой истории повторно не сжимается.
+
+`CHAT_TOOL_DISPATCH_ENABLED=true` экспериментально заменяет изменяемый список функций стабильными `discover_tools`/`invoke_tool`. Режим закрепляется в разговоре. `CHAT_CERTIFIED_TOOL_CONCURRENCY_ENABLED=true` разрешает до четырёх независимых локальных чтений artifacts; остальные вызовы последовательны. Нативный ToolSearchTool для текущих подключений не включается.
+
+При запуске backend вне конфигурации проекта библиотечные defaults четырёх rollout-флагов остаются выключенными. Для сравнений используйте `scripts/quality/agent_context_eval.py` и фиксированный набор `scripts/quality/fixtures/agent_context_harness/cases.json`: 30 задач × 3 повторения на подключение. Сравнение требует проверенных одинаковых внешних fixtures и оценок ответа, SQL и grounding. Отсутствующие данные, cache hit ниже 70% или baseline, рост незакэшированных токенов либо p95 дают неуспешный gate. Ручной выбор режима развёртывания не меняет результат проверки; ограниченный smoke не заменяет полную сравнительную приёмку.

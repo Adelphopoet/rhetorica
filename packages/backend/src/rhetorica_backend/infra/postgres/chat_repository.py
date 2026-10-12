@@ -20,7 +20,7 @@ from rhetorica_backend.infra.postgres.chat_models import (
 from rhetorica_backend.infra.postgres.file_artifact_repository import FileArtifactRepository
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from rhetorica_backend.infra.postgres.user_repository import UserAccountRepository
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 
@@ -62,6 +62,7 @@ class ChatMessageItem:
         files: list[Artifact] | None = None,
         source_provider: str | None = None,
         source_message_id: str | None = None,
+        journal_events: list[dict[str, object]] | None = None,
     ):
         self.id = message_id
         self.conversation_id = conversation_id
@@ -92,6 +93,7 @@ class ChatMessageItem:
         self.files = files or []
         self.source_provider = source_provider
         self.source_message_id = source_message_id
+        self.journal_events = journal_events
 
 
 class ChatConversationItem:
@@ -331,6 +333,7 @@ class ChatRepository:
         agent_id: str | None = None,
         source_provider: str | None = None,
         source_message_id: str | None = None,
+        journal_events: list[dict[str, object]] | None = None,
     ) -> ChatMessageItem:
         """Save a new message to a conversation."""
         now = datetime.now(tz=UTC)
@@ -350,6 +353,7 @@ class ChatRepository:
                 content=content,
                 source_provider=source_provider,
                 source_message_id=source_message_id,
+                journal_events=journal_events,
                 generated_sql=generated_sql,
                 execution_id=execution_id,
                 agent_id=agent_id,
@@ -427,16 +431,26 @@ class ChatRepository:
         """Persist semantic/runtime conversation state."""
         now = datetime.now(tz=UTC)
         with self._db.session() as session:
-            stmt = select(ChatConversationOrm).where(
-                ChatConversationOrm.id == conversation_id,
-                ChatConversationOrm.deleted_at.is_(None),
+            # FOR NO KEY UPDATE: serializes with coding plan writers without blocking FK inserts.
+            stmt = (
+                select(ChatConversationOrm)
+                .where(
+                    ChatConversationOrm.id == conversation_id,
+                    ChatConversationOrm.deleted_at.is_(None),
+                )
+                .with_for_update(key_share=True)
             )
             if owner_user_id is not None:
                 stmt = stmt.where(ChatConversationOrm.owner_user_id == owner_user_id)
             row = session.execute(stmt).scalar_one_or_none()
             if row is None:
                 raise ConversationNotFoundError
-            row.conversation_state = dict(conversation_state)
+            next_state = dict(conversation_state)
+            # Coding plan state is owned by CodingPlanRepository; analytics turns must not erase it.
+            coding_chat = (row.conversation_state or {}).get("coding_chat")
+            if coding_chat is not None:
+                next_state["coding_chat"] = coding_chat
+            row.conversation_state = next_state
             row.updated_at = now
             session.commit()
             return dict(row.conversation_state or {})
@@ -946,6 +960,8 @@ class ChatRepository:
         workspace_id: str,
         limit: int = 50,
         owner_user_id: str | None = None,
+        offset: int = 0,
+        search: str = "",
     ) -> list[ChatConversationItem]:
         """List conversations for a workspace, ordered by updated_at."""
         with self._db.session() as session:
@@ -963,11 +979,26 @@ class ChatRepository:
                     ChatConversationOrm.deleted_at.is_(None),
                 )
                 .group_by(ChatConversationOrm.id)
-                .order_by(ChatConversationOrm.updated_at.desc())
+                .order_by(ChatConversationOrm.updated_at.desc(), ChatConversationOrm.id.desc())
                 .limit(limit)
+                .offset(offset)
             )
             if owner_user_id is not None:
                 stmt = stmt.where(ChatConversationOrm.owner_user_id == owner_user_id)
+            if search.strip():
+                matching_message = (
+                    select(ChatMessageOrm.id)
+                    .where(
+                        ChatMessageOrm.conversation_id == ChatConversationOrm.id,
+                        ChatMessageOrm.content.icontains(search.strip(), autoescape=True),
+                    )
+                    .correlate(ChatConversationOrm)
+                    .exists()
+                )
+                stmt = stmt.where(or_(
+                    ChatConversationOrm.title.icontains(search.strip(), autoescape=True),
+                    matching_message,
+                ))
             rows = session.execute(stmt).all()
         return [
             self._to_domain_conversation(row, message_count=message_count)
@@ -1038,6 +1069,7 @@ class ChatRepository:
             feedback_expected_answer=row.feedback_expected_answer,
             source_provider=row.source_provider,
             source_message_id=row.source_message_id,
+            journal_events=row.journal_events,
         )
 
     @staticmethod

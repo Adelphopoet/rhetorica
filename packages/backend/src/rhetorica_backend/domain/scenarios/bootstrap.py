@@ -30,6 +30,7 @@ from rhetorica_backend.infra.postgres.scenario_authoring_repository import (
 )
 from rhetorica_backend.infra.postgres.scenario_run_repository import ScenarioRunRepository
 from rhetorica_backend.infra.postgres.user_repository import UserAccountRepository
+from rhetorica_backend.infra.postgres.workspace_repository import WorkspaceRepository
 from rhetorica_backend.infra.sandbox.http_gateway import HttpSandboxGateway
 
 
@@ -41,6 +42,10 @@ class ScenarioRuntime:
 
 
 def build_scenario_runtime(settings: ScenarioSettings) -> ScenarioRuntime:
+    from rhetorica_backend.domain.coding.bootstrap import build_coding_service
+    from rhetorica_backend.domain.coding.settings import CodingSettings
+    from rhetorica_backend.domain.scenarios.coding_step import ScenarioCodingStepRunner
+    coding = build_coding_service(CodingSettings())
     storage = S3ObjectStorage(
         S3StorageConfig(
             settings.s3_endpoint,
@@ -86,6 +91,7 @@ def build_scenario_runtime(settings: ScenarioSettings) -> ScenarioRuntime:
         AgentProfileRepository(db),
         ConnectorRepository(db),
         LlmConnectorRepository(db),
+        WorkspaceRepository(db),
     )
     exports = SqlResultExportService(
         execution_reader=execution,
@@ -98,7 +104,8 @@ def build_scenario_runtime(settings: ScenarioSettings) -> ScenarioRuntime:
     sql = ScenarioSqlStepRunner(execution, exports, resources, repository)
     python = ScenarioPythonStepRunner(
         HttpSandboxGateway(
-            base_url=settings.sandbox_url, internal_token=settings.sandbox_internal_token
+            base_url=settings.execution_runtime_url,
+            internal_token=settings.execution_runtime_internal_token,
         ),
         artifacts,
         data,
@@ -115,7 +122,8 @@ def build_scenario_runtime(settings: ScenarioSettings) -> ScenarioRuntime:
             data,
             llm,
             enabled=settings.scenario_workflows_enabled,
+            coding=coding,
         ),
-        ScenarioActivities(repository, data, resources, sql, python, llm, tools),
+        ScenarioActivities(repository, data, resources, sql, python, llm, tools, coding=ScenarioCodingStepRunner(coding, repository)),
         repository,
     )

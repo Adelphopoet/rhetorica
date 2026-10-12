@@ -45,6 +45,12 @@ from rhetorica_backend.domain.files.sql_export import (
     SqlResultExportLimitError,
     SqlResultExportService,
 )
+from rhetorica_backend.infra.execution import ProcessExecutor, ProcessLimits
+from rhetorica_backend.infra.execution.file_sessions import (
+    ExecutionRejectedError,
+    FileSessionConfig,
+    FileSessionRuntime,
+)
 from rhetorica_backend.infra.object_storage import ObjectStorageSqlResultSnapshotStore
 from rhetorica_backend.infra.object_storage.sql_result_snapshots import (
     SqlResultSnapshotLimitError,
@@ -57,11 +63,6 @@ from rhetorica_backend.infra.postgres.file_artifact_repository import FileArtifa
 from rhetorica_backend.infra.postgres.file_models import FileArtifactOrm, FileQuotaUsageOrm
 from rhetorica_backend.infra.postgres.session import DatabaseRuntime
 from rhetorica_backend.infra.sandbox.http_gateway import HttpSandboxGateway
-from rhetorica_backend.infra.sandbox.local_supervisor import (
-    LocalSandboxConfig,
-    LocalSandboxSupervisor,
-    SandboxRejectedError,
-)
 from sqlalchemy import event
 from sqlalchemy.orm import Session
 
@@ -175,7 +176,8 @@ def test_repository_enforces_ownership_lineage_and_message_lifecycle(tmp_path: P
         source=ArtifactSource.USER_UPLOAD,
         status=ArtifactStatus.STAGED,
     )
-    assert repository.get_owned(artifact.id, "somebody-else") is None
+    assert repository.get_owned(artifact.id, "somebody-else", "default") is None
+    assert repository.get_owned(artifact.id, conversation.owner_user_id, "other") is None
 
     message = chat.save_message(
         conversation_id=conversation.id,
@@ -188,6 +190,7 @@ def test_repository_enforces_ownership_lineage_and_message_lifecycle(tmp_path: P
         message_id=message.id,
         conversation_id=conversation.id,
         owner_user_id=conversation.owner_user_id,
+        workspace_id="default",
         relation="input",
     )
     assert linked[0].status is ArtifactStatus.READY
@@ -232,10 +235,15 @@ def test_repository_enforces_ownership_lineage_and_message_lifecycle(tmp_path: P
         message_id=assistant_message.id,
         conversation_id=conversation.id,
         owner_user_id=conversation.owner_user_id,
+        workspace_id="default",
         relation="output",
     )
     assert (
-        repository.delete_staged(artifact_id=artifact.id, owner_user_id=conversation.owner_user_id)
+        repository.delete_staged(
+            artifact_id=artifact.id,
+            owner_user_id=conversation.owner_user_id,
+            workspace_id="default",
+        )
         is None
     )
     history = chat.get_conversation_with_messages(
@@ -248,7 +256,7 @@ def test_repository_enforces_ownership_lineage_and_message_lifecycle(tmp_path: P
 
     assert chat.delete_conversation(conversation.id, owner_user_id=conversation.owner_user_id)
     assert (
-        repository.get_owned(artifact.id, conversation.owner_user_id).status
+        repository.get_owned(artifact.id, conversation.owner_user_id, "default").status
         is ArtifactStatus.READY
     )
     assert repository.usage_bytes(workspace_id="default") == 17
@@ -303,11 +311,13 @@ def test_attach_and_delete_lock_artifact_rows_for_atomic_status_transition(tmp_p
             message_id=message.id,
             conversation_id=conversation.id,
             owner_user_id=conversation.owner_user_id,
+            workspace_id="default",
             relation="input",
         )
         repository.delete_staged(
             artifact_id="artifact-delete",
             owner_user_id=conversation.owner_user_id,
+            workspace_id="default",
         )
     finally:
         event.remove(Session, "do_orm_execute", record_lock)
@@ -1079,7 +1089,7 @@ def test_failed_sandbox_process_returns_actionable_error_and_keeps_stderr() -> N
 
 def test_http_sandbox_gateway_preserves_rejection_code_for_the_llm() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/internal/v1/sessions":
+        if request.url.path == "/internal/v1/files/sessions":
             return httpx.Response(200, json={"session_id": "session-1"})
         return httpx.Response(422, json={"detail": "inspection_failed"})
 
@@ -1109,7 +1119,7 @@ def test_http_sandbox_gateway_cancels_session_after_timeout() -> None:
 
     def handle(request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
-        if request.url.path == "/internal/v1/sessions":
+        if request.url.path == "/internal/v1/files/sessions":
             return httpx.Response(200, json={"session_id": "session-timeout"})
         if request.url.path.endswith("/execute"):
             raise httpx.ReadTimeout("timed out", request=request)
@@ -1127,7 +1137,7 @@ def test_http_sandbox_gateway_cancels_session_after_timeout() -> None:
         gateway.run_python(session_id=None, code="print(1)", inputs=[])
 
     assert failure.value.code == "sandbox_timeout"
-    assert ("DELETE", "/internal/v1/sessions/session-timeout") in requests
+    assert ("DELETE", "/internal/v1/files/sessions/session-timeout") in requests
 
 
 def test_file_tool_exposes_typed_sandbox_error_without_stopping_the_llm() -> None:
@@ -1167,86 +1177,38 @@ def test_file_tool_exposes_typed_sandbox_error_without_stopping_the_llm() -> Non
     }
 
 
-def test_local_sandbox_accepts_five_files_and_workflow_manifest(tmp_path: Path, monkeypatch) -> None:
-    supervisor = LocalSandboxSupervisor(LocalSandboxConfig(sessions_root=tmp_path / "sessions"))
+def _file_session_runtime(tmp_path: Path) -> FileSessionRuntime:
+    return FileSessionRuntime(
+        FileSessionConfig(
+            sessions_root=tmp_path / "sessions",
+            workspace_mount=tmp_path / "workspace",
+        ),
+        ProcessExecutor(ProcessLimits(max_log_bytes=65536, pid_limit=64)),
+    )
+
+
+def test_execution_runtime_accepts_five_files_and_workflow_manifest(
+    tmp_path: Path, monkeypatch
+) -> None:
+    supervisor = _file_session_runtime(tmp_path)
     session = supervisor._session(supervisor.create_session())
-    # The real supervisor runs as root; this test also supports an unprivileged host.
-    (session.root / "input").chmod(0o700)
 
     def download(*, target, **_kwargs):
         target.write_bytes(b"{}")
 
     monkeypatch.setattr(supervisor, "_download", download)
-    specs = [
-        {"artifact_id": str(index), "filename": f"file-{index}.csv"}
-        for index in range(5)
-    ] + [{"artifact_id": "manifest", "filename": "rhetorica-inputs.json"}]
+    specs = [{"artifact_id": str(index), "filename": f"file-{index}.csv"} for index in range(5)] + [
+        {"artifact_id": "manifest", "filename": "rhetorica-inputs.json"}
+    ]
     paths = supervisor._materialize_inputs(session, specs)
     assert len(paths) == 6
     assert all(path.read_bytes() == b"{}" for path in paths)
-    with pytest.raises(SandboxRejectedError, match="too_many_inputs"):
+    with pytest.raises(ExecutionRejectedError, match="too_many_inputs"):
         supervisor._materialize_inputs(session, [*specs, {"artifact_id": "extra"}])
 
 
-def test_local_sandbox_sets_an_explicit_bounded_tmpfs(tmp_path: Path) -> None:
-    supervisor = LocalSandboxSupervisor(
-        LocalSandboxConfig(
-            sessions_root=tmp_path / "sessions",
-            max_tmp_bytes=128 * 1024 * 1024,
-        )
-    )
-    session_id = supervisor.create_session()
-    session = supervisor._session(session_id)
-
-    command = supervisor._nsjail_command(session)
-
-    mount_index = command.index("--mount")
-    assert command[mount_index + 1] == "none:/tmp:tmpfs:size=134217728,mode=1777"
-    assert command[command.index("--cgroup_mem_parent") + 1] == "NSJAIL"
-    assert command[command.index("--cgroup_pids_parent") + 1] == "NSJAIL"
-    assert command[command.index("--cgroup_cpu_parent") + 1] == "NSJAIL"
-
-
-def test_local_sandbox_prepares_legacy_cgroup_v1_parents(tmp_path: Path) -> None:
-    cgroup_root = tmp_path / "cgroup"
-    for controller in ("memory", "pids", "cpu,cpuacct"):
-        (cgroup_root / controller).mkdir(parents=True)
-
-    LocalSandboxSupervisor(
-        LocalSandboxConfig(
-            sessions_root=tmp_path / "sessions",
-            manage_legacy_cgroup_parents=True,
-            cgroup_root=cgroup_root,
-            cgroup_parent="NSJAIL_test_pod",
-        )
-    )
-
-    for controller in ("memory", "pids", "cpu,cpuacct"):
-        assert (cgroup_root / controller / "NSJAIL_test_pod").is_dir()
-
-
-def test_local_sandbox_leaves_cgroup_v2_hierarchy_untouched(tmp_path: Path) -> None:
-    cgroup_root = tmp_path / "cgroup"
-    cgroup_root.mkdir()
-    (cgroup_root / "cgroup.controllers").write_text("cpu memory pids", encoding="utf-8")
-
-    LocalSandboxSupervisor(
-        LocalSandboxConfig(
-            sessions_root=tmp_path / "sessions",
-            manage_legacy_cgroup_parents=True,
-            cgroup_root=cgroup_root,
-        )
-    )
-
-    assert not (cgroup_root / "memory").exists()
-
-
-def test_sandbox_output_collection_is_atomic_on_invalid_entry(tmp_path: Path) -> None:
-    supervisor = LocalSandboxSupervisor(
-        LocalSandboxConfig(
-            sessions_root=tmp_path / "sessions",
-        )
-    )
+def test_execution_output_collection_is_atomic_on_invalid_entry(tmp_path: Path) -> None:
+    supervisor = _file_session_runtime(tmp_path)
     session = supervisor._session(supervisor.create_session())
     (session.root / "output" / "valid.csv").write_text("id\n1\n", encoding="utf-8")
     invalid = session.root / "output" / "invalid.exe"
@@ -1284,7 +1246,7 @@ def test_sandbox_output_lineage_is_bound_to_the_run_that_created_it() -> None:
         for artifact_id in ("input-a", "input-b")
     }
     artifact_service = SimpleNamespace(
-        get_owned=lambda *, artifact_id, owner_user_id: artifacts[artifact_id],
+        get_owned=lambda *, artifact_id, owner_user_id, workspace_id: artifacts[artifact_id],
         sandbox_input=lambda artifact: artifact,
     )
     run_number = 0
